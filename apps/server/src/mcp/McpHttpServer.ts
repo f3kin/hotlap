@@ -615,7 +615,7 @@ export const DeviceToolkitRegistrationLive = Layer.mergeAll(
 );
 
 const McpTransportLive = McpServer.layerHttp({
-  name: "T3 Code",
+  name: "Hotlap",
   version: packageJson.version,
   path: "/mcp",
   protocols: [McpProtocol.v2025_06_18],
