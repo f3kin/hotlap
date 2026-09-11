@@ -443,9 +443,9 @@ describe.skipIf(posixShellRunner === null)("WSL runtime install script (executed
       archivePath,
       archiveSha,
       runtimeId,
-      runtimeParent: `${work}/home/.t3/wsl-runtime`,
-      runtimeRoot: `${work}/home/.t3/wsl-runtime/${runtimeId}`,
-      serverEntry: `${work}/home/.t3/wsl-runtime/${runtimeId}/apps/server/dist/bin.mjs`,
+      runtimeParent: `${work}/home/.hotlap/wsl-runtime`,
+      runtimeRoot: `${work}/home/.hotlap/wsl-runtime/${runtimeId}`,
+      serverEntry: `${work}/home/.hotlap/wsl-runtime/${runtimeId}/apps/server/dist/bin.mjs`,
       installScript,
       install: (archive?: string, sha?: string) => runShell(installScript(archive, sha)),
     };
