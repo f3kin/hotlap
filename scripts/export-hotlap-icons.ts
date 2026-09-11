@@ -29,10 +29,10 @@ type Variant = "prod" | "nightly" | "dev";
 const MARK_PATH = "assets/hotlap/mark.svg";
 const MOBILE_ASSETS = "apps/mobile/assets";
 
-// The mark's visible bounds inside its 100pt viewBox: the arc is centred at
-// (48.01, 51.53) with an outer radius of 42.75.
-const MARK_CENTER = { x: 48.0145, y: 51.526 };
-const MARK_EXTENT = 85.5;
+// The mark's visible bounds inside its 100pt viewBox: the ring is centred at
+// (50, 50) with an outer radius of 44.
+const MARK_CENTER = { x: 50, y: 50 };
+const MARK_EXTENT = 88;
 // Solid replacement for the arc gradient wherever a single-colour mark is needed.
 const ARC_SOLID = "#FF5A2E";
 
