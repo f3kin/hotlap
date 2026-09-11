@@ -203,7 +203,18 @@ jobs:
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --platform ${{ inputs.platform }} --profile production --auto-submit --non-interactive --no-wait
+        # Hotlap: Android ships as a sideloaded APK on the GitHub release, not
+        # through Google Play, so only iOS auto-submits (to TestFlight).
+        run: |
+          case "${{ inputs.platform }}" in
+            all) platforms="ios android" ;;
+            *) platforms="${{ inputs.platform }}" ;;
+          esac
+          for platform in $platforms; do
+            submit=""
+            if [ "$platform" = ios ]; then submit="--auto-submit"; fi
+            eas build --platform "$platform" --profile production $submit --non-interactive --no-wait
+          done
 
       - name: Publish OTA update (manual)
         if: steps.expo-token.outputs.present == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'update'

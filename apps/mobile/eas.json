@@ -48,16 +48,16 @@
       },
       "channel": "production",
       "environment": "production",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      }
     }
   },
   "submit": {
     "production": {
       "ios": {
-        "ascAppId": "6787819824"
-      },
-      "android": {
-        "track": "internal"
+        "ascAppId": "HOTLAP_ASC_APP_ID_PENDING"
       }
     }
   }
