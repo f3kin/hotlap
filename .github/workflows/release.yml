@@ -6,8 +6,9 @@ on:
       - "v*.*.*"
       - "!v*-nightly.*"
   schedule:
-    # Avoid minute zero, when GitHub scheduled jobs are busiest.
-    - cron: "8,38 * * * *"
+    # Hotlap: one nightly a day (upstream builds every 30 minutes). Avoid
+    # minute zero, when GitHub scheduled jobs are busiest.
+    - cron: "8 15 * * *"
   workflow_dispatch:
     inputs:
       channel:
