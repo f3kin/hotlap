@@ -1,6 +1,6 @@
 import {
   ApprovalRequestId,
-  isImportedAgentSessionMessageId,
+  isReadOnlyHistoryMessageId,
   UserInputAttachmentAnswerPayload,
   type ChatAttachment,
   type OrchestrationEvent,
@@ -230,7 +230,7 @@ function retainProjectionMessagesAfterRevert(
   }
 
   for (const message of messages) {
-    if (message.role === "system" || isImportedAgentSessionMessageId(message.messageId)) {
+    if (message.role === "system" || isReadOnlyHistoryMessageId(message.messageId)) {
       retainedMessageIds.add(message.messageId);
       continue;
     }
@@ -242,7 +242,7 @@ function retainProjectionMessagesAfterRevert(
   const retainedUserCount = messages.filter(
     (message) =>
       message.role === "user" &&
-      !isImportedAgentSessionMessageId(message.messageId) &&
+      !isReadOnlyHistoryMessageId(message.messageId) &&
       retainedMessageIds.has(message.messageId),
   ).length;
   const missingUserCount = Math.max(0, turnCount - retainedUserCount);
@@ -268,7 +268,7 @@ function retainProjectionMessagesAfterRevert(
   const retainedAssistantCount = messages.filter(
     (message) =>
       message.role === "assistant" &&
-      !isImportedAgentSessionMessageId(message.messageId) &&
+      !isReadOnlyHistoryMessageId(message.messageId) &&
       retainedMessageIds.has(message.messageId),
   ).length;
   const missingAssistantCount = Math.max(0, turnCount - retainedAssistantCount);
@@ -622,6 +622,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             linkedPullRequest: null,
             branchPullRequest: null,
             latestTurnId: null,
+            forkSourceThreadId: event.payload.forkedFrom?.threadId ?? null,
+            forkSourceMessageId: event.payload.forkedFrom?.messageId ?? null,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
             archivedAt: null,
@@ -999,7 +1001,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             updatedAt: event.occurredAt,
             latestUserMessageAt:
               event.payload.role === "user" &&
-              !isImportedAgentSessionMessageId(event.payload.messageId) &&
+              !isReadOnlyHistoryMessageId(event.payload.messageId) &&
               (previousLatest === null || event.payload.createdAt > previousLatest)
                 ? event.payload.createdAt
                 : previousLatest,

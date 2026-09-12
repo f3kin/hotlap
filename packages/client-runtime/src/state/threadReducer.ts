@@ -14,7 +14,7 @@ import type {
   TurnId,
 } from "@t3tools/contracts";
 import { threadPullRequestKeysEqual } from "@t3tools/shared/threadPullRequests";
-import { isImportedAgentSessionMessageId } from "@t3tools/contracts";
+import { isReadOnlyHistoryMessageId } from "@t3tools/contracts";
 import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 
 export type ThreadDetailReducerResult =
@@ -122,6 +122,9 @@ export function applyThreadDetailEvent(
           interactionMode: event.payload.interactionMode,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
+          ...(event.payload.forkedFrom !== undefined
+            ? { forkedFrom: event.payload.forkedFrom }
+            : {}),
           branchPullRequest: null,
           latestTurn: null,
           createdAt: event.payload.createdAt,
@@ -822,7 +825,7 @@ function retainMessagesAfterRevert(
 ): OrchestrationMessage[] {
   const retainedMessageIds = new Set<string>();
   for (const message of messages) {
-    if (message.role === "system" || isImportedAgentSessionMessageId(message.id)) {
+    if (message.role === "system" || isReadOnlyHistoryMessageId(message.id)) {
       retainedMessageIds.add(message.id);
     } else if (message.turnId !== null && retainedTurnIds.has(message.turnId)) {
       retainedMessageIds.add(message.id);
@@ -833,7 +836,7 @@ function retainMessagesAfterRevert(
     const retainedCount = messages.filter(
       (message) =>
         message.role === role &&
-        !isImportedAgentSessionMessageId(message.id) &&
+        !isReadOnlyHistoryMessageId(message.id) &&
         retainedMessageIds.has(message.id),
     ).length;
     const missingCount = Math.max(0, turnCount - retainedCount);

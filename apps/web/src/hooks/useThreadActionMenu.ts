@@ -23,6 +23,7 @@ import {
   readEnvironmentSupportsSettlement,
   readEnvironmentSupportsSnooze,
   readEnvironmentSupportsTitleRegeneration,
+  readEnvironmentSupportsThreadTranscriptExport,
   readThreadShell,
   useProjects,
 } from "../state/entities";
@@ -36,6 +37,7 @@ import {
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { useUiStateStore } from "../uiStateStore";
 import { useCopyToClipboard } from "./useCopyToClipboard";
+import { useCopyThreadTranscript } from "./useCopyThreadTranscript";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
@@ -117,6 +119,7 @@ export function useThreadActionMenu(input: {
     },
     onError: (error) => failureToast("Failed to copy thread ID", error),
   });
+  const copyThreadTranscript = useCopyThreadTranscript();
 
   const openMenu = useCallback(
     (position: { x: number; y: number }) => {
@@ -145,6 +148,9 @@ export function useThreadActionMenu(input: {
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
           isRunning: thread.session?.status === "running" && thread.session.activeTurnId != null,
+          includeTranscriptCopy: readEnvironmentSupportsThreadTranscriptExport(
+            threadRef.environmentId,
+          ),
           supports,
           snoozePresets,
         });
@@ -276,6 +282,9 @@ export function useThreadActionMenu(input: {
           case "copy-thread-id":
             copyThreadIdToClipboard(thread.id, { threadId: thread.id });
             return;
+          case "copy-transcript":
+            await copyThreadTranscript(threadRef);
+            return;
           case "archive": {
             if (confirmThreadArchive) {
               const confirmed = await settlePromise(() =>
@@ -336,6 +345,7 @@ export function useThreadActionMenu(input: {
       copyBranchToClipboard,
       copyPathToClipboard,
       copyThreadIdToClipboard,
+      copyThreadTranscript,
       deleteThread,
       handleNewThread,
       logicalProjectKeyByPhysicalKey,

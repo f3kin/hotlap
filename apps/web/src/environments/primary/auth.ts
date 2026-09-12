@@ -213,6 +213,8 @@ function readEnvironmentHttpErrorStatus(error: EnvironmentHttpCommonErrorType): 
       return 403;
     case "EnvironmentResourceNotFoundError":
       return 404;
+    case "EnvironmentPayloadTooLargeError":
+      return 413;
     case "EnvironmentInternalError":
       return 500;
   }

@@ -163,6 +163,7 @@ import {
 } from "../types";
 import { useTheme } from "../hooks/useTheme";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { useCopyThreadTranscript } from "../hooks/useCopyThreadTranscript";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { subscribeSnapShotComposerFocus } from "../lib/desktopSnapShot";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
@@ -1455,6 +1456,7 @@ export default function ChatView(props: ChatViewProps) {
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
+  const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -2376,6 +2378,11 @@ export default function ChatView(props: ChatViewProps) {
     attachmentEnvironmentConfig?.environment.capabilities.attachmentUploads === true;
   const supportsCustomPrompts =
     attachmentEnvironmentConfig?.environment.capabilities.customPrompts === true;
+  const supportsThreadForking =
+    attachmentEnvironmentConfig?.environment.capabilities.threadForking === true;
+  const supportsThreadTranscriptExport =
+    serverConfig?.environment.capabilities.threadTranscriptExport === true;
+  const copyThreadTranscript = useCopyThreadTranscript();
   const advertisedFileAttachmentBytes =
     attachmentEnvironmentConfig?.environment.capabilities.fileAttachments?.maxUploadBytes ?? null;
   const maxFileAttachmentBytes =
@@ -3286,6 +3293,51 @@ export default function ChatView(props: ChatViewProps) {
   const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
     displayedTimeline.displayThreadKey,
     activeThreadKey,
+  );
+  const canForkConversation =
+    supportsThreadForking &&
+    isServerThread &&
+    !paintOnlyDisplayedTimeline &&
+    !isWorking &&
+    activeThread?.session?.status !== "running" &&
+    activeThread?.session?.status !== "starting" &&
+    activeThreadShell?.hasPendingApprovals !== true &&
+    activeThreadShell?.hasPendingUserInput !== true &&
+    activeThreadShell?.backgroundLiveness == null;
+  const handleForkAssistantMessage = useCallback(
+    async (sourceMessageId: MessageId) => {
+      if (!canForkConversation || activeThreadRef === null) return;
+      const destinationThreadId = newThreadId();
+      const result = await forkThread({
+        environmentId: activeThreadRef.environmentId,
+        input: {
+          threadId: destinationThreadId,
+          sourceThreadId: activeThreadRef.threadId,
+          sourceMessageId,
+          createdAt: new Date().toISOString(),
+        },
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not fork conversation",
+              description: chatActionErrorMessage(error),
+            }),
+          );
+        }
+        return;
+      }
+      await navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(
+          scopeThreadRef(activeThreadRef.environmentId, destinationThreadId),
+        ),
+      });
+    },
+    [activeThreadRef, canForkConversation, forkThread, navigate],
   );
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
@@ -6316,6 +6368,14 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
 
+      if (command === "thread.copyTranscript") {
+        if (!isServerThread || activeThreadRef === null || !supportsThreadTranscriptExport) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) void copyThreadTranscript(activeThreadRef);
+        return;
+      }
+
       if (command === "thread.settle") {
         event.preventDefault();
         event.stopPropagation();
@@ -6508,8 +6568,10 @@ export default function ChatView(props: ChatViewProps) {
     settleThread,
     supportsPinning,
     supportsSettlement,
+    supportsThreadTranscriptExport,
     confirmAndUnpinThread,
     copyActiveThreadReference,
+    copyThreadTranscript,
     previewPanelOpen,
     toggleRightPanel,
     toggleRightPanelMaximized,
@@ -8798,6 +8860,9 @@ export default function ChatView(props: ChatViewProps) {
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
+                onForkAssistantMessage={
+                  canForkConversation ? handleForkAssistantMessage : undefined
+                }
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}

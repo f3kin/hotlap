@@ -7,6 +7,7 @@ import {
   type AuthSessionState,
   type OrchestrationShellSnapshot,
   type OrchestrationThreadDetailSnapshot,
+  type OrchestrationReadableThreadTranscript,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -34,6 +35,7 @@ import {
 import { fetchEnvironmentSessionState } from "./session.ts";
 import { fetchEnvironmentShellSnapshot } from "./shellSnapshotHttp.ts";
 import { fetchEnvironmentThreadSnapshot } from "./threadSnapshotHttp.ts";
+import { fetchEnvironmentThreadTranscript } from "./threadTranscriptHttp.ts";
 
 const TARGET = new RelayConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -101,6 +103,12 @@ const THREAD = {
   },
   page: { beforeCursor: null, hasMore: false, snapshotSequence: 2 },
 } satisfies OrchestrationThreadDetailSnapshot;
+const TRANSCRIPT = {
+  threadId: THREAD.thread.id,
+  title: THREAD.thread.title,
+  markdown: "# Thread\n\n## User\n\nHello",
+  messageCount: 1,
+} satisfies OrchestrationReadableThreadTranscript;
 
 function credentialRejectedResponse(reason = "invalid_credential") {
   return Response.json(
@@ -210,6 +218,17 @@ const LOADERS: ReadonlyArray<{
         ...input,
         threadId: THREAD.thread.id,
         window: { turnLimit: 20, beforeCursor: "older-page" },
+      }),
+  },
+  {
+    name: "thread transcript",
+    method: "GET",
+    path: "/api/orchestration/threads/thread-1/transcript",
+    response: TRANSCRIPT,
+    load: (input: HttpInput) =>
+      fetchEnvironmentThreadTranscript({
+        ...input,
+        threadId: THREAD.thread.id,
       }),
   },
 ];

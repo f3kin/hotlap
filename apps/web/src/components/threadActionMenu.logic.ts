@@ -23,6 +23,7 @@ export type ThreadActionMenuId =
   | "copy-path"
   | "copy-branch"
   | "copy-thread-id"
+  | "copy-transcript"
   | "archive"
   | "delete";
 
@@ -35,6 +36,8 @@ export interface ThreadActionMenuState {
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects a thread with an active turn, so disable it here rather than let the action fail. */
   readonly isRunning: boolean;
+  /** Header-only affordance; sidebar row menus intentionally keep their compact utility list. */
+  readonly includeTranscriptCopy?: boolean;
   readonly supports: {
     readonly settlement: boolean;
     readonly snooze: boolean;
@@ -118,6 +121,9 @@ export function buildThreadActionMenuItems(
           ? [{ id: "copy-branch" as const, label: "Branch", icon: "git-branch" }]
           : []),
         { id: "copy-thread-id", label: "Thread ID", icon: "hash" },
+        ...(state.includeTranscriptCopy
+          ? [{ id: "copy-transcript" as const, label: "Readable transcript", icon: "copy" }]
+          : []),
       ],
     },
     { id: "project-settings", label: "Project settings", icon: "settings" },

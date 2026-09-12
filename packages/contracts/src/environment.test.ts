@@ -24,6 +24,23 @@ describe("ExecutionEnvironmentDescriptor", () => {
     ).toBe(true);
   });
 
+  it("gates transcript export and thread forking under server version skew", () => {
+    const legacy = decodeDescriptor(descriptor).capabilities;
+    expect(legacy.threadTranscriptExport).toBeUndefined();
+    expect(legacy.threadForking).toBeUndefined();
+
+    const current = decodeDescriptor({
+      ...descriptor,
+      capabilities: {
+        ...descriptor.capabilities,
+        threadTranscriptExport: true,
+        threadForking: true,
+      },
+    }).capabilities;
+    expect(current.threadTranscriptExport).toBe(true);
+    expect(current.threadForking).toBe(true);
+  });
+
   it("treats a missing pull-request capability as unsupported under version skew", () => {
     expect(decodeDescriptor(descriptor).capabilities.pullRequests).toBeUndefined();
   });

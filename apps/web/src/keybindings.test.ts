@@ -246,6 +246,26 @@ describe("copy thread reference shortcut", () => {
   });
 });
 
+describe("copy thread transcript shortcut", () => {
+  it("resolves a user-configured shortcut without requiring a default binding", () => {
+    const bindings = compile([
+      {
+        shortcut: modShortcut("c", { altKey: true }),
+        command: "thread.copyTranscript",
+        whenAst: whenNot(whenIdentifier("terminalFocus")),
+      },
+    ]);
+
+    assert.equal(
+      resolveShortcutCommand(event({ key: "c", metaKey: true, altKey: true }), bindings, {
+        platform: "MacIntel",
+        context: { terminalFocus: false },
+      }),
+      "thread.copyTranscript",
+    );
+  });
+});
+
 describe("split/new/close terminal shortcuts", () => {
   it("requires terminalFocus for default split/new/close bindings", () => {
     assert.isFalse(

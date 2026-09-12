@@ -10,6 +10,7 @@ import type {
   AgentSessionImportSource,
   ApprovalRequestId,
   CheckpointRef,
+  ComposerContextKind,
   MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -24,7 +25,10 @@ import type {
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadDetailWindow,
   OrchestrationThreadShell,
+  ModelSelection,
+  ProviderInteractionMode,
   ProjectId,
+  RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -64,6 +68,52 @@ export interface ProjectionFullThreadDiffContext {
   readonly toCheckpointRef: CheckpointRef | null;
 }
 
+export interface ProjectionReadableThreadMessage {
+  readonly id: MessageId;
+  readonly role: "user" | "assistant" | "system";
+  readonly text: string;
+  readonly streaming: boolean;
+  readonly createdAt: string;
+  readonly attachments?: ReadonlyArray<{ readonly name: string }>;
+  readonly context?: {
+    readonly records: ReadonlyArray<{
+      readonly contextId: string;
+      readonly kind: ComposerContextKind;
+      readonly label: string;
+    }>;
+  };
+}
+
+export interface ProjectionThreadTranscriptSource {
+  readonly threadId: ThreadId;
+  readonly title: string;
+  readonly messages: ReadonlyArray<ProjectionReadableThreadMessage>;
+}
+
+export type ProjectionBoundedThreadSource<T> =
+  | {
+      readonly overLimit: true;
+    }
+  | {
+      readonly overLimit: false;
+      readonly source: Option.Option<T>;
+    };
+
+export interface ProjectionThreadForkSource extends ProjectionThreadTranscriptSource {
+  readonly projectId: ProjectId;
+  readonly modelSelection: ModelSelection;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+  readonly archivedAt: string | null;
+  readonly busy: boolean;
+  readonly selectedTurn: {
+    readonly state: string;
+    readonly assistantMessageId: MessageId | null;
+  } | null;
+}
+
 export interface ProjectionThreadDetailQuery {
   /**
    * Limit activities before SQLite returns and decodes their payloads.
@@ -77,6 +127,31 @@ export interface ProjectionThreadDetailQuery {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Read only safe, readable fields for a complete transcript, including archived threads. */
+  readonly getThreadTranscriptSource: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    ProjectionBoundedThreadSource<ProjectionThreadTranscriptSource>,
+    ProjectionRepositoryError
+  >;
+
+  /** Resolve and validate the durable source facts needed by a serialized fork command. */
+  readonly getThreadForkSource: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<
+    ProjectionBoundedThreadSource<ProjectionThreadForkSource>,
+    ProjectionRepositoryError
+  >;
+
+  /** Destination-owned copied history for the first provider continuation after a fork. */
+  readonly getPendingForkHandoffSource: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    ProjectionBoundedThreadSource<ProjectionThreadTranscriptSource>,
+    ProjectionRepositoryError
+  >;
+
   /** Read the latest request or resolution without loading the thread history. */
   readonly getUserInputActivity: (input: {
     readonly threadId: ThreadId;

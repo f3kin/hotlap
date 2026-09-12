@@ -5,7 +5,12 @@ import type {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
-import { OrchestrationCommand } from "@t3tools/contracts";
+import { OrchestrationCommand, PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
+import {
+  buildForkProviderInput,
+  projectReadableThreadMessages,
+} from "@t3tools/shared/readableThreadTranscript";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
@@ -242,12 +247,84 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        const forkSourceResult =
+          envelope.command.type === "thread.fork"
+            ? yield* projectionSnapshotQuery
+                .getThreadForkSource({
+                  threadId: envelope.command.sourceThreadId,
+                  messageId: envelope.command.sourceMessageId,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationCommandInvariantError({
+                        commandType: envelope.command.type,
+                        detail: "Failed to read the source conversation for this fork.",
+                        cause,
+                      }),
+                  ),
+                )
+            : { overLimit: false as const, source: Option.none() };
+        if (forkSourceResult.overLimit) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail: "The conversation is too large to fork safely.",
+          });
+        }
+        const forkSource = forkSourceResult.source;
+        const pendingForkHandoffResult =
+          envelope.command.type === "thread.turn.start"
+            ? yield* projectionSnapshotQuery
+                .getPendingForkHandoffSource(envelope.command.threadId)
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new OrchestrationCommandInvariantError({
+                        commandType: envelope.command.type,
+                        detail: "Failed to read the inherited conversation for this turn.",
+                        cause,
+                      }),
+                  ),
+                )
+            : { overLimit: false as const, source: Option.none() };
+        if (pendingForkHandoffResult.overLimit) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail: "The inherited conversation is too large to continue safely.",
+          });
+        }
+        const pendingForkHandoff = pendingForkHandoffResult.source;
+        const builtProviderInput =
+          envelope.command.type === "thread.turn.start" && Option.isSome(pendingForkHandoff)
+            ? buildForkProviderInput({
+                messages: projectReadableThreadMessages(pendingForkHandoff.value.messages),
+                continuation: projectComposerContextForProvider({
+                  text: envelope.command.message.text,
+                  records: envelope.command.message.context?.records ?? [],
+                }),
+                maxChars: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+              })
+            : undefined;
+        if (
+          envelope.command.type === "thread.turn.start" &&
+          Option.isSome(pendingForkHandoff) &&
+          builtProviderInput == null
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail:
+              "The selected response and this message are too large to fit in the provider context.",
+          });
+        }
+        const providerInput = builtProviderInput ?? undefined;
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
           ...(Option.isSome(userInputActivity)
             ? { userInputActivity: userInputActivity.value }
             : {}),
+          ...(Option.isSome(forkSource) ? { forkSource: forkSource.value } : {}),
+          ...(providerInput !== undefined ? { providerInput } : {}),
         }).pipe(
           Effect.provideService(Crypto.Crypto, crypto),
           Effect.mapError((cause) =>
