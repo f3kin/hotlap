@@ -5758,6 +5758,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       settings.customPrompts.length > 0 &&
       prompt.trim().length === 0 &&
       !isConnecting &&
+      !composerHasExpandedChrome &&
+      !isComposerModelPickerOpen &&
       !isComposerApprovalState &&
       !projectSelectionRequired &&
       !isChoiceOnlyPendingQuestion &&
