@@ -460,6 +460,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const hasUnsentDraft = useComposerDraftHasUserContent(`${thread.environmentId}:${thread.id}`);
   const status = resolveThreadListV2Status(thread, hasUnsentDraft);
   const statusLabel = STATUS_LABEL_BY_STATUS[status];
+  const threadAccessibilityLabel = [
+    thread.title,
+    statusLabel?.label,
+    props.hasQueuedMessages ? "messages queued to send" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   // Settled rows label by the same stamp they sort by, so order and label
   // can't disagree. updatedAt is always present, so the resolver never
   // returns null here.
@@ -927,9 +934,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant === "card" ? (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onPress={() => {
@@ -970,9 +975,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ) : (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         className={sidebarPane || materialYouStyleLayoutActive ? undefined : "bg-screen"}
