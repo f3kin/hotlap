@@ -39,6 +39,44 @@ describe("copyReadableThreadTranscript", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  it("offers a second user gesture when deferred clipboard access is unavailable", async () => {
+    const requestClipboardRetry = vi.fn();
+    const writeClipboard = vi.fn();
+
+    await copyReadableThreadTranscript({
+      threadRef,
+      loadTranscript: vi.fn().mockResolvedValue({ markdown: "# Remote", messageCount: 2 }),
+      beginClipboardWrite: vi.fn(() => null),
+      requestClipboardRetry,
+      writeClipboard,
+      onSuccess: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    expect(writeClipboard).not.toHaveBeenCalled();
+    expect(requestClipboardRetry).toHaveBeenCalledWith("# Remote", 2);
+  });
+
+  it("offers a second user gesture when a deferred clipboard write is rejected", async () => {
+    const requestClipboardRetry = vi.fn();
+    const error = new Error("activation rejected");
+
+    await copyReadableThreadTranscript({
+      threadRef,
+      loadTranscript: vi.fn().mockResolvedValue({ markdown: "# Remote", messageCount: 2 }),
+      beginClipboardWrite: vi.fn(() => ({
+        commit: vi.fn().mockRejectedValue(error),
+        cancel: vi.fn(),
+      })),
+      requestClipboardRetry,
+      writeClipboard: vi.fn(),
+      onSuccess: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    expect(requestClipboardRetry).toHaveBeenCalledWith("# Remote", 2);
+  });
+
   it("loads a fresh transcript for every copy and writes the returned markdown", async () => {
     const loadTranscript = vi
       .fn()

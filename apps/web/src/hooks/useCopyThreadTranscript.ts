@@ -20,6 +20,7 @@ interface CopyReadableThreadTranscriptInput {
     threadRef: ScopedThreadRef,
   ) => Promise<Pick<OrchestrationReadableThreadTranscript, "markdown" | "messageCount"> | null>;
   readonly beginClipboardWrite?: (target: string) => DeferredTextClipboardWrite | null;
+  readonly requestClipboardRetry?: (value: string, messageCount: number) => void;
   readonly writeClipboard: (value: string, target: string) => Promise<boolean>;
   readonly onSuccess: (messageCount: number) => void;
   readonly onError: (error: unknown) => void;
@@ -31,12 +32,27 @@ export async function copyReadableThreadTranscript(
 ): Promise<boolean> {
   const target = "readable chat transcript";
   const deferredWrite = input.beginClipboardWrite?.(target) ?? null;
+  let transcript: Pick<OrchestrationReadableThreadTranscript, "markdown" | "messageCount"> | null;
   try {
-    const transcript = await input.loadTranscript(input.threadRef);
-    if (transcript === null) {
-      deferredWrite?.cancel();
-      return false;
-    }
+    transcript = await input.loadTranscript(input.threadRef);
+  } catch (error) {
+    deferredWrite?.cancel(error);
+    input.onError(error);
+    return false;
+  }
+  if (transcript === null) {
+    deferredWrite?.cancel();
+    return false;
+  }
+  if (
+    input.beginClipboardWrite !== undefined &&
+    deferredWrite === null &&
+    input.requestClipboardRetry
+  ) {
+    input.requestClipboardRetry(transcript.markdown, transcript.messageCount);
+    return false;
+  }
+  try {
     const copied = deferredWrite
       ? await deferredWrite.commit(transcript.markdown)
       : await input.writeClipboard(transcript.markdown, target);
@@ -45,9 +61,56 @@ export async function copyReadableThreadTranscript(
     return true;
   } catch (error) {
     deferredWrite?.cancel(error);
+    if (input.requestClipboardRetry) {
+      input.requestClipboardRetry(transcript.markdown, transcript.messageCount);
+      return false;
+    }
     input.onError(error);
     return false;
   }
+}
+
+function addTranscriptCopiedToast(messageCount: number) {
+  toastManager.add({
+    type: "success",
+    title: "Transcript copied",
+    description: `Copied ${messageCount} readable ${messageCount === 1 ? "message" : "messages"}.`,
+  });
+}
+
+function addTranscriptCopyErrorToast(error: unknown) {
+  console.error(error);
+  const copy = readableTranscriptCopyFailure(error);
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: copy.title,
+      description: copy.description,
+    }),
+  );
+}
+
+function requestTranscriptClipboardRetry(value: string, messageCount: number) {
+  let retryToast: ReturnType<typeof toastManager.add>;
+  retryToast = toastManager.add(
+    stackedThreadToast({
+      type: "info",
+      title: "Transcript ready to copy",
+      description: "Your browser needs one more click to grant clipboard access.",
+      timeout: 30_000,
+      actionProps: {
+        children: "Copy now",
+        onClick: () => {
+          // The Clipboard API or execCommand fallback must start inside this click.
+          const write = writeTextToClipboard(value, "readable chat transcript");
+          toastManager.close(retryToast);
+          void write.then((copied) => {
+            if (copied) addTranscriptCopiedToast(messageCount);
+          }, addTranscriptCopyErrorToast);
+        },
+      },
+    }),
+  );
 }
 
 export function readableTranscriptCopyFailure(error: unknown): {
@@ -109,25 +172,10 @@ export function useCopyThreadTranscript(): (threadRef: ScopedThreadRef) => Promi
         threadRef,
         loadTranscript,
         beginClipboardWrite: beginDeferredTextClipboardWrite,
+        requestClipboardRetry: requestTranscriptClipboardRetry,
         writeClipboard: writeTextToClipboard,
-        onSuccess: (messageCount) => {
-          toastManager.add({
-            type: "success",
-            title: "Transcript copied",
-            description: `Copied ${messageCount} readable ${messageCount === 1 ? "message" : "messages"}.`,
-          });
-        },
-        onError: (error) => {
-          console.error(error);
-          const copy = readableTranscriptCopyFailure(error);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: copy.title,
-              description: copy.description,
-            }),
-          );
-        },
+        onSuccess: addTranscriptCopiedToast,
+        onError: addTranscriptCopyErrorToast,
       }),
     [loadTranscript],
   );
