@@ -357,6 +357,9 @@ function ThreadRouteContent(
     async (sourceMessageId: MessageId) => {
       if (!canForkConversation || selectedThread === null) return;
       const destinationThreadId = ThreadId.make(uuidv4());
+      forkWaitAbortRef.current?.abort();
+      const forkWaitAbort = new AbortController();
+      forkWaitAbortRef.current = forkWaitAbort;
       const result = await forkThread({
         environmentId: selectedThread.environmentId,
         input: {
@@ -366,7 +369,9 @@ function ThreadRouteContent(
           createdAt: new Date().toISOString(),
         },
       });
+      if (forkWaitAbort.signal.aborted) return;
       if (result._tag === "Failure") {
+        if (forkWaitAbortRef.current === forkWaitAbort) forkWaitAbortRef.current = null;
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           Alert.alert(
@@ -381,9 +386,6 @@ function ThreadRouteContent(
         destinationThreadId,
       );
       const destinationThreadAtom = environmentThreadShells.threadShellAtom(destinationThreadRef);
-      forkWaitAbortRef.current?.abort();
-      const forkWaitAbort = new AbortController();
-      forkWaitAbortRef.current = forkWaitAbort;
       const forkSynced = await waitForSynchronizedValue({
         read: () => appAtomRegistry.get(destinationThreadAtom),
         subscribe: (listener) => appAtomRegistry.subscribe(destinationThreadAtom, listener),
