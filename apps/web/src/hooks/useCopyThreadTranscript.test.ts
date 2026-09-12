@@ -12,6 +12,33 @@ const threadRef = {
 };
 
 describe("copyReadableThreadTranscript", () => {
+  it("reserves async clipboard access before loading a remote transcript", async () => {
+    const order: Array<string> = [];
+    const commit = vi.fn(async (value: string) => {
+      order.push(`commit:${value}`);
+      return true;
+    });
+    const cancel = vi.fn();
+
+    await copyReadableThreadTranscript({
+      threadRef,
+      loadTranscript: vi.fn(async () => {
+        order.push("load");
+        return { markdown: "# Remote", messageCount: 1 };
+      }),
+      beginClipboardWrite: vi.fn(() => {
+        order.push("reserve");
+        return { commit, cancel };
+      }),
+      writeClipboard: vi.fn(),
+      onSuccess: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    expect(order).toEqual(["reserve", "load", "commit:# Remote"]);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it("loads a fresh transcript for every copy and writes the returned markdown", async () => {
     const loadTranscript = vi
       .fn()
@@ -47,14 +74,17 @@ describe("copyReadableThreadTranscript", () => {
     const onError = vi.fn();
     const onSuccess = vi.fn();
 
+    const cancel = vi.fn();
     await copyReadableThreadTranscript({
       threadRef,
       loadTranscript: vi.fn().mockRejectedValue(error),
+      beginClipboardWrite: vi.fn(() => ({ commit: vi.fn(), cancel })),
       writeClipboard: vi.fn(),
       onSuccess,
       onError,
     });
 
+    expect(cancel).toHaveBeenCalledWith(error);
     expect(onSuccess).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledWith(error);
     expect(readableTranscriptCopyFailure(error)).toEqual({

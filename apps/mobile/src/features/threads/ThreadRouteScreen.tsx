@@ -5,7 +5,15 @@ import {
   useNavigation,
   type StaticScreenProps,
 } from "@react-navigation/native";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import * as Option from "effect/Option";
 import type { MenuAction } from "@react-native-menu/menu";
 import {
@@ -330,7 +338,9 @@ function ThreadRouteContent(
       };
     }, [cancelPendingFork, props.renderInspector]),
   );
-  useEffect(() => {
+  // Abort during the route commit. A passive effect leaves a window where the
+  // old fork promise can settle and navigate from the newly selected thread.
+  useLayoutEffect(() => {
     if (forkRouteIdentityRef.current === routeThreadIdentity) return;
     forkRouteIdentityRef.current = routeThreadIdentity;
     cancelPendingFork();

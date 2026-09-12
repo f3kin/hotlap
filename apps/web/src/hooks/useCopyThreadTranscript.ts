@@ -8,13 +8,18 @@ import { useCallback } from "react";
 import { loadThreadTranscript } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { writeTextToClipboard } from "./useCopyToClipboard";
+import {
+  beginDeferredTextClipboardWrite,
+  type DeferredTextClipboardWrite,
+  writeTextToClipboard,
+} from "./useCopyToClipboard";
 
 interface CopyReadableThreadTranscriptInput {
   readonly threadRef: ScopedThreadRef;
   readonly loadTranscript: (
     threadRef: ScopedThreadRef,
   ) => Promise<Pick<OrchestrationReadableThreadTranscript, "markdown" | "messageCount"> | null>;
+  readonly beginClipboardWrite?: (target: string) => DeferredTextClipboardWrite | null;
   readonly writeClipboard: (value: string, target: string) => Promise<boolean>;
   readonly onSuccess: (messageCount: number) => void;
   readonly onError: (error: unknown) => void;
@@ -24,14 +29,22 @@ interface CopyReadableThreadTranscriptInput {
 export async function copyReadableThreadTranscript(
   input: CopyReadableThreadTranscriptInput,
 ): Promise<boolean> {
+  const target = "readable chat transcript";
+  const deferredWrite = input.beginClipboardWrite?.(target) ?? null;
   try {
     const transcript = await input.loadTranscript(input.threadRef);
-    if (transcript === null) return false;
-    const copied = await input.writeClipboard(transcript.markdown, "readable chat transcript");
+    if (transcript === null) {
+      deferredWrite?.cancel();
+      return false;
+    }
+    const copied = deferredWrite
+      ? await deferredWrite.commit(transcript.markdown)
+      : await input.writeClipboard(transcript.markdown, target);
     if (!copied) return false;
     input.onSuccess(transcript.messageCount);
     return true;
   } catch (error) {
+    deferredWrite?.cancel(error);
     input.onError(error);
     return false;
   }
@@ -95,6 +108,7 @@ export function useCopyThreadTranscript(): (threadRef: ScopedThreadRef) => Promi
       copyReadableThreadTranscript({
         threadRef,
         loadTranscript,
+        beginClipboardWrite: beginDeferredTextClipboardWrite,
         writeClipboard: writeTextToClipboard,
         onSuccess: (messageCount) => {
           toastManager.add({
