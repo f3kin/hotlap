@@ -258,6 +258,7 @@ function ThreadRouteContent(
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
   const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
   const loadThreadTranscript = useAtomCommand(copyThreadTranscript, { reportFailure: false });
+  const forkWaitAbortRef = useRef<AbortController | null>(null);
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
@@ -314,6 +315,8 @@ function ThreadRouteContent(
   useFocusEffect(
     useCallback(() => {
       return () => {
+        forkWaitAbortRef.current?.abort();
+        forkWaitAbortRef.current = null;
         if (props.renderInspector === undefined) {
           // Inspectors are contextual to this chat destination. Clear the
           // hidden chat copy after a native push so returning from Files,
@@ -378,12 +381,18 @@ function ThreadRouteContent(
         destinationThreadId,
       );
       const destinationThreadAtom = environmentThreadShells.threadShellAtom(destinationThreadRef);
+      forkWaitAbortRef.current?.abort();
+      const forkWaitAbort = new AbortController();
+      forkWaitAbortRef.current = forkWaitAbort;
       const forkSynced = await waitForSynchronizedValue({
         read: () => appAtomRegistry.get(destinationThreadAtom),
         subscribe: (listener) => appAtomRegistry.subscribe(destinationThreadAtom, listener),
         isReady: (thread) => thread !== null,
         timeoutMs: 10_000,
+        signal: forkWaitAbort.signal,
       });
+      if (forkWaitAbortRef.current === forkWaitAbort) forkWaitAbortRef.current = null;
+      if (forkWaitAbort.signal.aborted) return;
       if (!forkSynced) {
         Alert.alert(
           "Fork created but not ready",

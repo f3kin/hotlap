@@ -235,6 +235,10 @@ const ProjectionImportedAgentSessionSourcesRowSchema = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+const ReadableThreadLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  forkHistoryOnly: Schema.optionalKey(Schema.Boolean),
+});
 const ThreadMessageEndpointLookupInput = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
@@ -1353,9 +1357,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const listReadableThreadMessageRows = SqlSchema.findAll({
-    Request: ThreadIdLookupInput,
+    Request: ReadableThreadLookupInput,
     Result: ProjectionReadableThreadMessageDbRowSchema,
-    execute: ({ threadId }) =>
+    execute: ({ threadId, forkHistoryOnly }) =>
       sql`
         SELECT
           message.message_id AS id,
@@ -1393,6 +1397,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_messages AS message
         WHERE message.thread_id = ${threadId}
           AND message.role != 'system'
+          ${forkHistoryOnly === true ? sql`AND message.message_id GLOB 'fork-history:*'` : sql``}
         ORDER BY message.created_at ASC, message.message_id ASC
       `,
   });
@@ -1460,9 +1465,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // The fixed per-message allowance covers Markdown headings/separators and also
   // ensures a very large collection of otherwise-empty rows trips the byte cap.
   const getReadableThreadMessageStats = SqlSchema.findOne({
-    Request: ThreadIdLookupInput,
+    Request: ReadableThreadLookupInput,
     Result: ProjectionReadableThreadStatsDbRowSchema,
-    execute: ({ threadId }) =>
+    execute: ({ threadId, forkHistoryOnly }) =>
       sql`
         SELECT
           COUNT(*) AS "messageCount",
@@ -1501,6 +1506,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_messages AS message
         WHERE message.thread_id = ${threadId}
           AND message.role != 'system'
+          ${forkHistoryOnly === true ? sql`AND message.message_id GLOB 'fork-history:*'` : sql``}
       `,
   });
 
@@ -3638,7 +3644,10 @@ pending_approval_requests AS (
               source: Option.none<ProjectionThreadTranscriptSource>(),
             };
           }
-          const stats = yield* getReadableThreadMessageStats({ threadId }).pipe(
+          const stats = yield* getReadableThreadMessageStats({
+            threadId,
+            forkHistoryOnly: true,
+          }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getPendingForkHandoffSource:getStats:query",
@@ -3652,7 +3661,10 @@ pending_approval_requests AS (
           ) {
             return { overLimit: true as const };
           }
-          const messages = yield* listReadableThreadMessageRows({ threadId }).pipe(
+          const messages = yield* listReadableThreadMessageRows({
+            threadId,
+            forkHistoryOnly: true,
+          }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
                 "ProjectionSnapshotQuery.getPendingForkHandoffSource:listMessages:query",

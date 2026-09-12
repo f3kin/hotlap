@@ -3497,10 +3497,22 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
       yield* sql`UPDATE projection_threads
         SET latest_user_message_at = '2026-09-12T00:01:00Z'
         WHERE thread_id = 'handoff-thread'`;
+      yield* sql`WITH RECURSIVE sequence(value) AS (
+          SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 399
+        )
+        INSERT INTO projection_thread_messages
+          (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        SELECT printf('fork-history:handoff-thread:%04d', value), 'handoff-thread', 'user',
+          'Inherited', 0, '2026-09-11T00:00:00Z', '2026-09-11T00:00:00Z'
+        FROM sequence`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('message-first', 'handoff-thread', 'turn-first', 'user', 'Try once', 0,
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z')`;
       yield* sql`INSERT INTO projection_turns
         (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
          started_at, completed_at, checkpoint_files_json)
-        VALUES ('handoff-thread', 'turn-first', 'message-first', NULL, 'failed',
+        VALUES ('handoff-thread', 'turn-first', 'message-first', NULL, 'error',
           '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', NULL, '[]')`;
       const afterFailedTurn = yield* query.getPendingForkHandoffSource(
         ThreadId.make("handoff-thread"),
@@ -3508,6 +3520,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
       assert.isFalse(afterFailedTurn.overLimit);
       if (afterFailedTurn.overLimit) return;
       assert.equal(Option.getOrThrow(afterFailedTurn.source).messages[0]?.text, "Inherited");
+      assert.lengthOf(Option.getOrThrow(afterFailedTurn.source).messages, 400);
+      assert.notInclude(
+        Option.getOrThrow(afterFailedTurn.source).messages.map(({ id }) => id),
+        MessageId.make("message-first"),
+      );
 
       yield* sql`UPDATE projection_turns
         SET state = 'completed', assistant_message_id = 'answer-first',
@@ -3625,7 +3642,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
           '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', '2026-09-12T00:02:00Z', '[]')`;
       yield* sql`INSERT INTO projection_thread_messages
         (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
-        SELECT 'handoff-' || message_id, 'count-handoff', role, text, 0, created_at, updated_at
+        SELECT 'fork-history:count-handoff:' || message_id, 'count-handoff', role, text, 0,
+          created_at, updated_at
         FROM projection_thread_messages WHERE thread_id = 'count-fork'`;
 
       assert.deepEqual(

@@ -41,4 +41,21 @@ describe("waitForSynchronizedValue", () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
     vi.useRealTimers();
   });
+
+  it("returns false and unsubscribes when cancelled", async () => {
+    const controller = new AbortController();
+    const unsubscribe = vi.fn();
+    const waiting = waitForSynchronizedValue({
+      read: () => null,
+      subscribe: () => unsubscribe,
+      isReady: () => false,
+      timeoutMs: 10_000,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(waiting).resolves.toBe(false);
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
 });
