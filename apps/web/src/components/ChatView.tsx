@@ -3330,11 +3330,24 @@ export default function ChatView(props: ChatViewProps) {
         }
         return;
       }
+      const destinationThreadRef = scopeThreadRef(
+        activeThreadRef.environmentId,
+        destinationThreadId,
+      );
+      const forkSynced = await waitForStartedServerThread(destinationThreadRef, 10_000);
+      if (!forkSynced) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Fork created but not ready",
+            description: "The new conversation has not finished syncing yet.",
+          }),
+        );
+        return;
+      }
       await navigate({
         to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(
-          scopeThreadRef(activeThreadRef.environmentId, destinationThreadId),
-        ),
+        params: buildThreadRouteParams(destinationThreadRef),
       });
     },
     [activeThreadRef, canForkConversation, forkThread, navigate],
