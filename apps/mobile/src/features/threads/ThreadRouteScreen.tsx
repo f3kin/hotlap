@@ -259,6 +259,10 @@ function ThreadRouteContent(
   const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
   const loadThreadTranscript = useAtomCommand(copyThreadTranscript, { reportFailure: false });
   const forkWaitAbortRef = useRef<AbortController | null>(null);
+  const cancelPendingFork = useCallback(() => {
+    forkWaitAbortRef.current?.abort();
+    forkWaitAbortRef.current = null;
+  }, []);
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
@@ -266,6 +270,7 @@ function ThreadRouteContent(
   const threadId = firstRouteParam(params.threadId);
   const routeThreadIdentity =
     environmentIdRaw !== null && threadId !== null ? `${environmentIdRaw}:${threadId}` : null;
+  const forkRouteIdentityRef = useRef(routeThreadIdentity);
   const [inspectorSelection, setInspectorSelection] = useState<ThreadInspectorSelection | null>(
     () => (props.renderInspector ? { routeThreadIdentity, mode: "route" } : null),
   );
@@ -315,8 +320,7 @@ function ThreadRouteContent(
   useFocusEffect(
     useCallback(() => {
       return () => {
-        forkWaitAbortRef.current?.abort();
-        forkWaitAbortRef.current = null;
+        cancelPendingFork();
         if (props.renderInspector === undefined) {
           // Inspectors are contextual to this chat destination. Clear the
           // hidden chat copy after a native push so returning from Files,
@@ -324,8 +328,13 @@ function ThreadRouteContent(
           setInspectorSelection(null);
         }
       };
-    }, [props.renderInspector]),
+    }, [cancelPendingFork, props.renderInspector]),
   );
+  useEffect(() => {
+    if (forkRouteIdentityRef.current === routeThreadIdentity) return;
+    forkRouteIdentityRef.current = routeThreadIdentity;
+    cancelPendingFork();
+  }, [cancelPendingFork, routeThreadIdentity]);
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
@@ -357,7 +366,7 @@ function ThreadRouteContent(
     async (sourceMessageId: MessageId) => {
       if (!canForkConversation || selectedThread === null) return;
       const destinationThreadId = ThreadId.make(uuidv4());
-      forkWaitAbortRef.current?.abort();
+      cancelPendingFork();
       const forkWaitAbort = new AbortController();
       forkWaitAbortRef.current = forkWaitAbort;
       const result = await forkThread({
@@ -407,7 +416,7 @@ function ThreadRouteContent(
         threadId: String(destinationThreadId),
       });
     },
-    [canForkConversation, forkThread, navigation, selectedThread],
+    [canForkConversation, cancelPendingFork, forkThread, navigation, selectedThread],
   );
   const handleCopyTranscript = useCallback(async () => {
     if (!supportsTranscriptExport || selectedThread === null) return;
