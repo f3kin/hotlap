@@ -159,6 +159,7 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+import { CustomPromptsSettings } from "./CustomPromptsSettings";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -2062,6 +2063,9 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
+  const supportsCustomPrompts =
+    isEnvironmentScope &&
+    environment?.serverConfig?.environment.capabilities.customPrompts === true;
 
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
@@ -2236,6 +2240,15 @@ export function GeneralSettingsPanel() {
           </>
         ) : null}
       </SettingsSection>
+
+      {supportsCustomPrompts ? (
+        <SettingsSection id="custom-prompts" title="Custom prompts">
+          <CustomPromptsSettings
+            prompts={settings.customPrompts}
+            onChange={(customPrompts) => updateSettings({ customPrompts })}
+          />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection id="behavior" title="Behavior">
         <SettingsRow

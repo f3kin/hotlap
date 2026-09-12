@@ -571,9 +571,16 @@ function ConfiguredSettingsRouteScreen() {
 }
 
 function GeneralSettingsSection() {
+  const { environments } = useEnvironments();
+  const supportsCustomPrompts = environments.some(
+    (environment) => environment.serverConfig?.environment.capabilities.customPrompts === true,
+  );
   return (
     <SettingsSection title="General">
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
+      {supportsCustomPrompts ? (
+        <SettingsRow icon="text.bubble" label="Custom Prompts" target="SettingsCustomPrompts" />
+      ) : null}
       <AutoSettleSettingsRows />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
     </SettingsSection>

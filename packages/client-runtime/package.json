@@ -83,6 +83,10 @@
       "types": "./src/providerSkills.ts",
       "default": "./src/providerSkills.ts"
     },
+    "./custom-prompts": {
+      "types": "./src/customPrompts.ts",
+      "default": "./src/customPrompts.ts"
+    },
     "./voice-input": {
       "types": "./src/voice-input/index.ts",
       "default": "./src/voice-input/index.ts"
