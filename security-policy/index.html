@@ -1,0 +1,14 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Security Policy — Hotlap</title><link rel="stylesheet" href="../style.css"></head><body><main>
+<header><span class="mark"></span><a href="../">Hotlap</a></header>
+<h1>Security Policy</h1><p class="meta">Effective 12 September 2026</p>
+<h2>Reporting a vulnerability</h2>
+<p>Please report security issues privately through <a href="https://github.com/shwarmadev/hotlap/security/advisories/new">GitHub private vulnerability reporting</a> rather than a public issue. You will get an acknowledgement, and a fix or mitigation will ship in the next release once confirmed.</p>
+<h2>Scope</h2><p>Hotlap's own code: the host server, the desktop, mobile, and CLI apps, and the release pipeline. Issues in upstream T3 Code should also go to <a href="https://github.com/pingdotgg/t3code/security">T3 Code's security page</a>; Hotlap tracks upstream and ships its fixes automatically.</p>
+<h2>How Hotlap is secured</h2>
+<ul><li>Every client must pair with a host using a one-time token; unpaired connections are refused.</li>
+<li>macOS builds are signed with a Developer ID and notarized by Apple; iOS builds ship through TestFlight and the App Store.</li>
+<li>Releases are built by GitHub Actions from a tagged commit, and the npm package is published with a Trusted Publisher (no long-lived tokens).</li>
+<li>There is no hosted backend, so there is no central store of user data to breach.</li></ul>
+<hr><footer><a href="../legal/">Legal</a> · <a href="../privacy-policy/">Privacy</a> · <a href="../terms-of-service/">Terms</a> · <a href="../security-policy/">Security</a> · <a href="https://github.com/shwarmadev/hotlap">GitHub</a></footer>
+</main></body></html>

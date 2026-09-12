@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy — Hotlap</title><link rel="stylesheet" href="../style.css"></head><body><main>
+<header><span class="mark"></span><a href="../">Hotlap</a></header>
+<h1>Privacy Policy</h1><p class="meta">Effective 12 September 2026</p>
+<p>Hotlap is an open-source coding-agent GUI, forked from <a href="https://t3.codes">T3 Code</a>. It is maintained by Anish Sharma (<a href="https://github.com/shwarmadev">shwarmadev</a>) and offered without any hosted service. This policy explains what that means for your data.</p>
+<h2>1. Hotlap does not collect your data</h2>
+<p>There is no Hotlap server, account, analytics, crash reporting, or telemetry. The desktop, mobile, and command-line apps talk only to a Hotlap host that <em>you</em> run, on a machine you control, over a connection you choose (local network, Tailscale, or your own tunnel). Your projects, conversations, credentials, and settings stay on that machine.</p>
+<h2>2. Data that stays on your host</h2>
+<p>A Hotlap host stores, under its data directory on your machine: project paths, conversation history with coding agents, checkpoints of your code, pairing tokens for your devices, and any provider credentials you supply. You can delete all of it by deleting that directory. We never see it.</p>
+<h2>3. Third parties you connect</h2>
+<p>Hotlap drives coding agents from other companies (for example Anthropic, OpenAI, Cursor, Google). When you use them, your prompts and code go to those providers under their own terms and privacy policies. Hotlap does not add anything to that traffic and does not receive a copy.</p>
+<h2>4. Network requests the apps make on their own</h2>
+<ul>
+<li><strong>Desktop update check.</strong> The macOS, Windows, and Linux apps ask GitHub Releases whether a newer version exists. GitHub sees a normal HTTPS request (your IP address, app version) under <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>.</li>
+<li><strong>Mobile update check.</strong> The iOS and Android apps check Expo's update service for a newer JavaScript bundle. Expo sees a request with your device platform and app version under <a href="https://expo.dev/privacy">Expo's privacy policy</a>.</li>
+<li><strong>App stores.</strong> If you install through TestFlight or an app store, Apple or Google may collect crash reports and usage statistics according to their own policies and your device settings. We do not receive per-user data from them.</li>
+</ul>
+<h2>5. Children</h2><p>Hotlap is a developer tool and is not directed at children under 13.</p>
+<h2>6. Changes</h2><p>If Hotlap ever adds a hosted feature, this policy will change first and the change will be visible in the <a href="https://github.com/shwarmadev/hotlap">source repository</a> before it ships.</p>
+<h2>7. Contact</h2><p>Questions: open an issue at <a href="https://github.com/shwarmadev/hotlap/issues">github.com/shwarmadev/hotlap/issues</a>.</p>
+<hr><footer><a href="../legal/">Legal</a> · <a href="../privacy-policy/">Privacy</a> · <a href="../terms-of-service/">Terms</a> · <a href="../security-policy/">Security</a> · <a href="https://github.com/shwarmadev/hotlap">GitHub</a></footer>
+</main></body></html>
