@@ -103,7 +103,10 @@ import {
   type NavigationWithFinishTransitioning,
 } from "./use-thread-settings-sheet-presentation";
 import { CustomPromptSheet } from "./CustomPromptSheet";
-import { shouldShowCustomPromptControl } from "./customPromptPresentation";
+import {
+  prefillComposerWithCustomPrompt,
+  shouldShowCustomPromptControl,
+} from "./customPromptPresentation";
 
 /**
  * Height of the collapsed composer (pill + vertical padding, excluding safe-area inset).
@@ -447,13 +450,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const selectCustomPrompt = useCallback(
     (savedPrompt: (typeof customPrompts)[number]) => {
       setCustomPromptSheetOpen(false);
-      onChangeDraftMessage(savedPrompt.prompt);
-      requestAnimationFrame(() => {
-        inputRef.current?.focus();
-        inputRef.current?.setSelection({
-          start: savedPrompt.prompt.length,
-          end: savedPrompt.prompt.length,
-        });
+      prefillComposerWithCustomPrompt({
+        prompt: savedPrompt.prompt,
+        onChangeDraftMessage,
+        editorRef: inputRef,
       });
     },
     [inputRef, onChangeDraftMessage],
