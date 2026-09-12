@@ -849,6 +849,37 @@ jobs:
             fi
           done
 
+      # Hotlap: the Android app is not built by this workflow (EAS builds it
+      # on its own cadence), but every release page should still offer the
+      # newest finished APK. The Expo GraphQL API is queried directly because
+      # eas-cli would need the whole mobile workspace installed just to read
+      # its config. A missing token or no finished build simply skips.
+      - name: Fetch latest Android APK
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EAS_PROJECT_ID: 76b6ab11-1d33-4c90-bb08-96e7baad539b
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "EXPO_TOKEN is not available; skipping APK."
+            exit 0
+          fi
+          query='query($appId:String!){app{byId(appId:$appId){buildsPaginated(first:10,filter:{platforms:[ANDROID],buildProfile:"production"}){edges{node{... on Build{status appVersion artifacts{applicationArchiveUrl}}}}}}}}'
+          build="$(jq -cn --arg q "$query" --arg id "$EAS_PROJECT_ID" '{query:$q,variables:{appId:$id}}' \
+            | curl -fsS https://api.expo.dev/graphql -H "content-type: application/json" -H "authorization: Bearer $EXPO_TOKEN" -d @- \
+            | jq -c '[.data.app.byId.buildsPaginated.edges[].node | select(.status == "FINISHED")][0] // empty')"
+          if [ -z "$build" ]; then
+            echo "No finished Android production build; skipping APK."
+            exit 0
+          fi
+          url="$(jq -r '.artifacts.applicationArchiveUrl // empty' <<<"$build")"
+          version="$(jq -r '.appVersion' <<<"$build")"
+          if [[ "$url" != *.apk ]]; then
+            echo "Latest Android build is not an APK; skipping."
+            exit 0
+          fi
+          curl -fsSL --retry 3 -o "release-assets/Hotlap-${version}-android.apk" "$url"
+          ls -l release-assets/*.apk
+
       - name: Publish release
         if: needs.preflight.outputs.previous_tag != ''
         uses: softprops/action-gh-release@v3
@@ -889,6 +920,18 @@ jobs:
             release-assets/*.yml
           fail_on_unmatched_files: true
           token: ${{ github.token }}
+
+      - name: Attach Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          apks=(release-assets/*.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "No APK to attach."
+            exit 0
+          fi
+          gh release upload "${{ needs.preflight.outputs.tag }}" "${apks[@]}" --clobber --repo "$GITHUB_REPOSITORY"
 
   publish_aur:
     name: Publish AUR package
