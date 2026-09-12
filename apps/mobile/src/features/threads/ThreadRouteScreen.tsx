@@ -19,7 +19,9 @@ import {
   deriveForkableAssistantMessageIds,
   requestOlderThreadTurns,
   threadHasOlderTurns,
+  waitForSynchronizedValue,
 } from "@t3tools/client-runtime/state/threads";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   projectScriptCwd,
   projectScriptRuntimeEnv,
@@ -78,7 +80,12 @@ import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-s
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
-import { copyThreadTranscript, threadEnvironment } from "../../state/threads";
+import {
+  copyThreadTranscript,
+  environmentThreadShells,
+  threadEnvironment,
+} from "../../state/threads";
+import { appAtomRegistry } from "../../state/atom-registry";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -364,6 +371,24 @@ function ThreadRouteContent(
             error instanceof Error ? error.message : "An error occurred.",
           );
         }
+        return;
+      }
+      const destinationThreadRef = scopeThreadRef(
+        selectedThread.environmentId,
+        destinationThreadId,
+      );
+      const destinationThreadAtom = environmentThreadShells.threadShellAtom(destinationThreadRef);
+      const forkSynced = await waitForSynchronizedValue({
+        read: () => appAtomRegistry.get(destinationThreadAtom),
+        subscribe: (listener) => appAtomRegistry.subscribe(destinationThreadAtom, listener),
+        isReady: (thread) => thread !== null,
+        timeoutMs: 10_000,
+      });
+      if (!forkSynced) {
+        Alert.alert(
+          "Fork created but not ready",
+          "The new conversation has not finished syncing yet.",
+        );
         return;
       }
       navigation.navigate("Thread", {

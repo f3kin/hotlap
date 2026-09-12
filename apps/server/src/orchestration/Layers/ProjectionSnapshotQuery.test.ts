@@ -3473,7 +3473,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
     }),
   );
 
-  it.effect("returns destination-owned handoff only before the first real user message", () =>
+  it.effect("returns destination-owned handoff until a provider turn completes", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const query = yield* ProjectionSnapshotQuery;
@@ -3497,6 +3497,22 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
       yield* sql`UPDATE projection_threads
         SET latest_user_message_at = '2026-09-12T00:01:00Z'
         WHERE thread_id = 'handoff-thread'`;
+      yield* sql`INSERT INTO projection_turns
+        (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
+         started_at, completed_at, checkpoint_files_json)
+        VALUES ('handoff-thread', 'turn-first', 'message-first', NULL, 'failed',
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', NULL, '[]')`;
+      const afterFailedTurn = yield* query.getPendingForkHandoffSource(
+        ThreadId.make("handoff-thread"),
+      );
+      assert.isFalse(afterFailedTurn.overLimit);
+      if (afterFailedTurn.overLimit) return;
+      assert.equal(Option.getOrThrow(afterFailedTurn.source).messages[0]?.text, "Inherited");
+
+      yield* sql`UPDATE projection_turns
+        SET state = 'completed', assistant_message_id = 'answer-first',
+          completed_at = '2026-09-12T00:03:00Z'
+        WHERE thread_id = 'handoff-thread' AND turn_id = 'turn-first'`;
       const consumed = yield* query.getPendingForkHandoffSource(ThreadId.make("handoff-thread"));
       assert.isFalse(consumed.overLimit);
       if (consumed.overLimit) return;

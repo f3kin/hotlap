@@ -53,7 +53,9 @@ function draftTitle(draft: ComposerDraft): string {
     return deriveThreadTitleFromPrompt(draft.text);
   }
   const count = draft.attachments.length;
-  return count === 1 ? "1 attachment" : `${count} attachments`;
+  if (count > 0) return count === 1 ? "1 attachment" : `${count} attachments`;
+  const contextCount = draft.context?.records.length ?? 0;
+  return contextCount === 1 ? "1 context item" : `${contextCount} context items`;
 }
 
 export function buildPendingNewTasks(input: {

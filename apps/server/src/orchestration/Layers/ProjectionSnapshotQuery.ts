@@ -175,6 +175,9 @@ const ProjectionForkSelectedTurnDbRowSchema = Schema.Struct({
   state: Schema.String,
   assistantMessageId: Schema.NullOr(MessageId),
 });
+const ProjectionCompletedTurnExistsDbRowSchema = Schema.Struct({
+  exists: Schema.Number,
+});
 const ProjectionReadableThreadStatsDbRowSchema = Schema.Struct({
   messageCount: Schema.Number,
   payloadBytes: Schema.Number,
@@ -1573,6 +1576,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND message.message_id = ${messageId}
         LIMIT 1
       `,
+  });
+
+  const getCompletedTurnExistsRow = SqlSchema.findOne({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionCompletedTurnExistsDbRowSchema,
+    execute: ({ threadId }) => sql`
+      SELECT EXISTS(
+        SELECT 1
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND state = 'completed'
+      ) AS "exists"
+    `,
   });
 
   const getThreadRuntimeContextRow = SqlSchema.findOneOption({
@@ -3602,9 +3617,22 @@ pending_approval_requests AS (
             Option.isNone(row) ||
             row.value.archivedAt !== null ||
             row.value.forkSourceThreadId == null ||
-            row.value.forkSourceMessageId == null ||
-            row.value.latestUserMessageAt !== null
+            row.value.forkSourceMessageId == null
           ) {
+            return {
+              overLimit: false as const,
+              source: Option.none<ProjectionThreadTranscriptSource>(),
+            };
+          }
+          const completedTurn = yield* getCompletedTurnExistsRow({ threadId }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getCompletedTurn:query",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getCompletedTurn:decodeRow",
+              ),
+            ),
+          );
+          if (completedTurn.exists === 1) {
             return {
               overLimit: false as const,
               source: Option.none<ProjectionThreadTranscriptSource>(),

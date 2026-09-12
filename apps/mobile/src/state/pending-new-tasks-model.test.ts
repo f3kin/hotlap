@@ -63,6 +63,19 @@ describe("composerDraftHasUserContent", () => {
 });
 
 describe("buildPendingNewTasks", () => {
+  it("gives a context-only draft a readable title", () => {
+    const tasks = buildPendingNewTasks({
+      queuedMessages: [],
+      drafts: {
+        "new-task:context-only": draft("", "2026-09-05T11:00:00.000Z", {
+          context: { version: 1, records: [{} as never] },
+        }),
+      },
+    });
+
+    expect(tasks.map((task) => task.title)).toEqual(["1 context item"]);
+  });
+
   it("surfaces every new-task draft with content alongside queued creations", () => {
     const tasks = buildPendingNewTasks({
       queuedMessages: [queuedCreation("a", "2026-09-05T10:00:00.000Z")],
