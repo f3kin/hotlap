@@ -157,6 +157,7 @@ import {
   clearComposerDraftContentState,
   clearComposerDraftsEnvironment,
   ComposerDraftPersistenceError,
+  composerDraftHasUserContentAtom,
   composerDraftsAtom,
   composerCloudDraftsAtom,
   createNewTaskDraft,
@@ -194,6 +195,29 @@ const DRAFT: ComposerDraft = {
   text: "hello",
   attachments: [],
 };
+
+describe("composerDraftHasUserContentAtom", () => {
+  it("selects one thread's content-bearing state without exposing its text", () => {
+    const first = composerDraftHasUserContentAtom("environment-1:thread-1");
+    const second = composerDraftHasUserContentAtom("environment-1:thread-2");
+
+    appAtomRegistry.set(composerDraftsAtom, {
+      "environment-1:thread-1": DRAFT,
+      "environment-1:thread-2": { text: "", attachments: [] },
+    });
+
+    expect(appAtomRegistry.get(first)).toBe(true);
+    expect(appAtomRegistry.get(second)).toBe(false);
+
+    appAtomRegistry.set(composerDraftsAtom, {
+      "environment-1:thread-1": { ...DRAFT, text: "hello again" },
+      "environment-1:thread-2": { text: "", attachments: [] },
+    });
+
+    expect(appAtomRegistry.get(first)).toBe(true);
+    expect(appAtomRegistry.get(second)).toBe(false);
+  });
+});
 
 afterEach(() => {
   vi.useRealTimers();

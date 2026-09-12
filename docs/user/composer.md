@@ -76,6 +76,13 @@ the text is an unedited recalled prompt, with the caret on the first visual line
 the last visual line for `ArrowDown`, counting wrapped lines. Editing a recalled prompt turns it
 into a normal draft.
 
+## Saved prompts
+
+Manage reusable prompts in **Settings → Custom prompts**. When an editable composer is empty,
+choose a saved prompt beside it to prefill the draft. The prompt is never sent automatically, so
+you can edit it, add context, or change the model first. On web and desktop the shortcuts appear
+when the composer is hovered or focused; on mobile, open **Prompts**.
+
 ## Edit an earlier prompt
 
 On web and desktop, choose **Edit from here** beneath a sent message to rewind

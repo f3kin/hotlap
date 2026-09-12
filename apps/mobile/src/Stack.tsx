@@ -53,6 +53,7 @@ import { NewTaskFlowProvider } from "./features/threads/new-task-flow-provider";
 import { NewTaskRouteScreen } from "./features/threads/NewTaskRouteScreen";
 import { SettingsAppearanceRouteScreen } from "./features/settings/SettingsAppearanceRouteScreen";
 import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsClientStorageRouteScreen";
+import { SettingsCustomPromptsRouteScreen } from "./features/settings/SettingsCustomPromptsRouteScreen";
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
@@ -182,6 +183,13 @@ const SettingsContentStack = createNativeStackNavigator({
       linking: "appearance",
       options: {
         title: "Appearance",
+      },
+    }),
+    SettingsCustomPrompts: createNativeStackScreen({
+      screen: SettingsCustomPromptsRouteScreen,
+      linking: "custom-prompts",
+      options: {
+        title: "Custom Prompts",
       },
     }),
     SettingsProjectGrouping: createNativeStackScreen({

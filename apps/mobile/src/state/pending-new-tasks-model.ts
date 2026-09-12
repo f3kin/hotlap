@@ -3,7 +3,7 @@ import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { deriveThreadTitleFromPrompt } from "../lib/projectThreadStartTurn";
 import type { QueuedThreadCreation, QueuedThreadMessage } from "./thread-outbox-model";
 import { isNewTaskDraftKey } from "./new-task-draft-key";
-import type { ComposerDraft } from "./use-composer-drafts";
+import { composerDraftHasUserContent, type ComposerDraft } from "./use-composer-drafts";
 
 /**
  * Unsent work that will become a thread, shaped for thread-list presentation.
@@ -46,16 +46,16 @@ export interface PendingDraftTask {
  * Settings-only drafts (a model pick with no text) are not work the user
  * would look for in the list; only text or attachments make a draft visible.
  */
-export function composerDraftHasUserContent(draft: ComposerDraft): boolean {
-  return draft.text.trim().length > 0 || draft.attachments.length > 0;
-}
+export { composerDraftHasUserContent } from "./use-composer-drafts";
 
 function draftTitle(draft: ComposerDraft): string {
   if (draft.text.trim().length > 0) {
     return deriveThreadTitleFromPrompt(draft.text);
   }
   const count = draft.attachments.length;
-  return count === 1 ? "1 attachment" : `${count} attachments`;
+  if (count > 0) return count === 1 ? "1 attachment" : `${count} attachments`;
+  const contextCount = draft.context?.records.length ?? 0;
+  return contextCount === 1 ? "1 context item" : `${contextCount} context items`;
 }
 
 export function buildPendingNewTasks(input: {

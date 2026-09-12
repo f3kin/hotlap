@@ -883,6 +883,124 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("sends the durable inherited provider input for a fork continuation", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const sourceThreadId = ThreadId.make("thread-1");
+    const sourceTurnId = asTurnId("turn-fork-source");
+    const sourceAssistantMessageId = asMessageId("message-fork-source-answer");
+    const destinationThreadId = ThreadId.make("thread-fork-destination");
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-provider-fork-source-turn"),
+        threadId: sourceThreadId,
+        message: {
+          messageId: asMessageId("message-fork-source-question"),
+          role: "user",
+          text: "Which setting should we use?",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-provider-fork-source-running"),
+        threadId: sourceThreadId,
+        session: {
+          threadId: sourceThreadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: sourceTurnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("cmd-provider-fork-source-answer-delta"),
+        threadId: sourceThreadId,
+        messageId: sourceAssistantMessageId,
+        delta: "Use the inherited setting.",
+        turnId: sourceTurnId,
+        createdAt,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-provider-fork-source-answer-complete"),
+        threadId: sourceThreadId,
+        messageId: sourceAssistantMessageId,
+        turnId: sourceTurnId,
+        createdAt,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-provider-fork-source-ready"),
+        threadId: sourceThreadId,
+        session: {
+          threadId: sourceThreadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("cmd-provider-fork-create"),
+        threadId: destinationThreadId,
+        sourceThreadId,
+        sourceMessageId: sourceAssistantMessageId,
+        createdAt,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-provider-fork-continuation"),
+        threadId: destinationThreadId,
+        message: {
+          messageId: asMessageId("message-provider-fork-continuation"),
+          role: "user",
+          text: "Continue from there.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      threadId: destinationThreadId,
+      input: expect.stringContaining("## Assistant\n\nUse the inherited setting."),
+    });
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      input: expect.stringContaining("## New user message\n\nContinue from there."),
+    });
+  });
+
   effectIt.effect("projects inline context before sending the provider turn", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() => createHarness());

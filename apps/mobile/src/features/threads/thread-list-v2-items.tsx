@@ -27,6 +27,7 @@ import { relativeTime } from "../../lib/time";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useThreadPr } from "../../state/use-thread-pr";
+import { useComposerDraftHasUserContent } from "../../state/use-composer-drafts";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
 import {
@@ -62,6 +63,7 @@ const STATUS_LABEL_BY_STATUS: Partial<
   input: { label: "Input", className: "text-foreground-secondary" },
   working: { label: "Working", className: "text-adaptive-sky-600-400" },
   failed: { label: "Failed", className: "text-danger-foreground" },
+  draft: { label: "Draft", className: "text-warning-foreground" },
 };
 
 function threadTimeLabel(thread: EnvironmentThreadShell): string {
@@ -455,8 +457,16 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       : drawerColor
     : screenColor;
 
-  const status = resolveThreadListV2Status(thread);
+  const hasUnsentDraft = useComposerDraftHasUserContent(`${thread.environmentId}:${thread.id}`);
+  const status = resolveThreadListV2Status(thread, hasUnsentDraft);
   const statusLabel = STATUS_LABEL_BY_STATUS[status];
+  const threadAccessibilityLabel = [
+    thread.title,
+    statusLabel?.label,
+    props.hasQueuedMessages ? "messages queued to send" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   // Settled rows label by the same stamp they sort by, so order and label
   // can't disagree. updatedAt is always present, so the resolver never
   // returns null here.
@@ -924,9 +934,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant === "card" ? (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onPress={() => {
@@ -967,9 +975,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ) : (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={threadAccessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         className={sidebarPane || materialYouStyleLayoutActive ? undefined : "bg-screen"}

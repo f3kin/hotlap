@@ -2144,6 +2144,102 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("requires authentication to read a thread transcript", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-transcript-auth");
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadTranscriptSource: () =>
+              Effect.succeed({
+                overLimit: false as const,
+                source: Option.some({
+                  threadId,
+                  title: "Transcript",
+                  messages: [],
+                }),
+              }),
+          },
+        },
+      });
+
+      const response = yield* fetchEffect(
+        yield* getHttpServerUrl(
+          `/api/orchestration/threads/${encodeURIComponent(threadId)}/transcript`,
+        ),
+      );
+      const body = yield* responseJsonEffect<{
+        readonly code: string;
+        readonly reason: string;
+      }>(response);
+
+      assert.equal(response.status, 401);
+      assert.equal(body.code, "auth_invalid");
+      assert.equal(body.reason, "missing_credential");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("returns a typed not-found response for a missing thread transcript", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-transcript-missing");
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadTranscriptSource: () =>
+              Effect.succeed({ overLimit: false as const, source: Option.none() }),
+          },
+        },
+      });
+
+      const response = yield* fetchEffect(
+        yield* getHttpServerUrl(
+          `/api/orchestration/threads/${encodeURIComponent(threadId)}/transcript`,
+        ),
+        { headers: { cookie: yield* getAuthenticatedSessionCookieHeader() } },
+      );
+      const body = yield* responseJsonEffect<{
+        readonly _tag: string;
+        readonly code: string;
+        readonly reason: string;
+      }>(response);
+
+      assert.equal(response.status, 404);
+      assert.equal(body._tag, "EnvironmentResourceNotFoundError");
+      assert.equal(body.code, "not_found");
+      assert.equal(body.reason, "thread_not_found");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("returns a typed 413 when a readable transcript exceeds its byte limit", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-transcript-too-large");
+      yield* buildAppUnderTest({
+        layers: {
+          projectionSnapshotQuery: {
+            getThreadTranscriptSource: () => Effect.succeed({ overLimit: true as const }),
+          },
+        },
+      });
+
+      const response = yield* fetchEffect(
+        yield* getHttpServerUrl(
+          `/api/orchestration/threads/${encodeURIComponent(threadId)}/transcript`,
+        ),
+        { headers: { cookie: yield* getAuthenticatedSessionCookieHeader() } },
+      );
+      const body = yield* responseJsonEffect<{
+        readonly _tag: string;
+        readonly code: string;
+        readonly reason: string;
+      }>(response);
+
+      assert.equal(response.status, 413);
+      assert.equal(body._tag, "EnvironmentPayloadTooLargeError");
+      assert.equal(body.code, "payload_too_large");
+      assert.equal(body.reason, "thread_transcript_too_large");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("compresses large JSON responses through the composed routes", () =>
     Effect.gen(function* () {
       const descriptor = {

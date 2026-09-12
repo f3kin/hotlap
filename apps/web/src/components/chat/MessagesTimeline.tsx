@@ -31,6 +31,7 @@ import {
 import { resolveWorkGroupScrollAnchor } from "@t3tools/client-runtime/work-log/scroll-anchor";
 import type { AgentPanelModel } from "@t3tools/client-runtime/state/subagentRuntime";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
+import { deriveForkableAssistantMessageIds } from "@t3tools/client-runtime/state/threads";
 import {
   emptyAgentPanelModel,
   formatSubagentTokenCount,
@@ -102,6 +103,7 @@ import {
   CircleAlertIcon,
   DownloadIcon,
   EyeIcon,
+  GitForkIcon,
   GitPullRequestIcon,
   GlobeIcon,
   HammerIcon,
@@ -266,6 +268,8 @@ interface TimelineRowSharedState {
   workGroupViewState: WorkGroupViewState;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
+  forkableAssistantMessageIds: ReadonlySet<MessageId>;
+  onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
 }
 
 interface TimelineRowActivityState {
@@ -406,6 +410,7 @@ interface MessagesTimelineProps {
   topFadeEnabled?: boolean;
   /** Non-null when older turns exist beyond the loaded window. */
   loadEarlier?: CitationHistoryPage | null;
+  onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -454,6 +459,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   hideEmptyPlaceholder = false,
   topFadeEnabled = false,
   loadEarlier = null,
+  onForkAssistantMessage,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -638,6 +644,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     supportsConversationRollback,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  const forkableAssistantMessageIds = useMemo(
+    () => deriveForkableAssistantMessageIds(turnDiffSummaries),
+    [turnDiffSummaries],
+  );
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -826,6 +836,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workGroupViewState,
       agentPanelModel,
       onOpenAgents,
+      forkableAssistantMessageIds,
+      onForkAssistantMessage,
     }),
     [
       readyCitationRequest,
@@ -851,6 +863,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workGroupViewState,
       agentPanelModel,
       onOpenAgents,
+      forkableAssistantMessageIds,
+      onForkAssistantMessage,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -1877,6 +1891,10 @@ function AssistantMessageMeta({
         showCopyButton={showCopyButton}
         streaming={copyStreaming}
       />
+      {ctx.forkableAssistantMessageIds.has(message.id) &&
+      ctx.onForkAssistantMessage !== undefined ? (
+        <AssistantForkButton messageId={message.id} onFork={ctx.onForkAssistantMessage} />
+      ) : null}
       {!message.streaming && (
         <Tooltip>
           <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
@@ -1888,6 +1906,40 @@ function AssistantMessageMeta({
         </Tooltip>
       )}
     </div>
+  );
+}
+
+function AssistantForkButton({
+  messageId,
+  onFork,
+}: {
+  messageId: MessageId;
+  onFork: (messageId: MessageId) => Promise<void>;
+}) {
+  const [pending, setPending] = useState(false);
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            aria-label="Fork conversation from this response"
+            disabled={pending}
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              if (pending) return;
+              setPending(true);
+              void onFork(messageId).finally(() => setPending(false));
+            }}
+          />
+        }
+      >
+        <GitForkIcon className="size-3" aria-hidden="true" />
+      </TooltipTrigger>
+      <TooltipPopup>Fork conversation from this response</TooltipPopup>
+    </Tooltip>
   );
 }
 

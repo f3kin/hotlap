@@ -47,6 +47,7 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { composerContextImportsAtom } from "../../state/use-composer-drafts";
+import { serverEnvironment } from "../../state/server";
 import type { ComposerDocumentAttachment } from "../../lib/composerContext";
 import { useProject } from "../../state/entities";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -101,6 +102,11 @@ import {
   useThreadSettingsSheetPresentation,
   type NavigationWithFinishTransitioning,
 } from "./use-thread-settings-sheet-presentation";
+import { CustomPromptSheet } from "./CustomPromptSheet";
+import {
+  prefillComposerWithCustomPrompt,
+  shouldShowCustomPromptControl,
+} from "./customPromptPresentation";
 
 /**
  * Height of the collapsed composer (pill + vertical padding, excluding safe-area inset).
@@ -290,6 +296,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
   const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
   const [previewVideo, setPreviewVideo] = useState<VideoPreviewSource | null>(null);
+  const [customPromptSheetOpen, setCustomPromptSheetOpen] = useState(false);
+  const serverSettings = useAtomValue(serverEnvironment.settingsValueAtom(props.environmentId));
+  const customPrompts =
+    props.serverConfig?.environment.capabilities.customPrompts === true
+      ? (serverSettings?.customPrompts ?? [])
+      : [];
   const hasContent = props.draftMessage.trim().length > 0 || props.draftAttachments.length > 0;
   // Attachment context ids are the attachment id, so the prompt alone says which attachments
   // already read as an inline chip and need no strip tile.
@@ -429,6 +441,23 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     !voiceInput.blocksSubmission &&
     sendBlockedReason === null &&
     !modelUnavailable;
+  const showCustomPromptControl = shouldShowCustomPromptControl({
+    supported: props.serverConfig?.environment.capabilities.customPrompts === true,
+    promptCount: customPrompts.length,
+    draftMessage: props.draftMessage,
+    editorReadOnly: voiceInput.freezesEditor,
+  });
+  const selectCustomPrompt = useCallback(
+    (savedPrompt: (typeof customPrompts)[number]) => {
+      setCustomPromptSheetOpen(false);
+      prefillComposerWithCustomPrompt({
+        prompt: savedPrompt.prompt,
+        onChangeDraftMessage,
+        editorRef: inputRef,
+      });
+    },
+    [inputRef, onChangeDraftMessage],
+  );
 
   // Keep the feed inset aligned with the card or compact dictation strip.
   useEffect(() => {
@@ -504,7 +533,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       armAgentAwarenessLiveActivityForLocalWork({
         environmentId: props.environmentId,
         threadTitle: props.selectedThread.title,
-        projectTitle: props.environmentLabel ?? "T3 Code",
+        projectTitle: props.environmentLabel ?? "Hotlap",
       });
     } finally {
       inFlightThreadIdsRef.current.delete(threadKey);
@@ -796,6 +825,17 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             ) : null}
             {!isExpanded ? (
               <View className="flex-row items-center">
+                {showCustomPromptControl ? (
+                  <ComposerInlineControl
+                    accessibilityLabel="Custom prompts"
+                    accessibilityHint="Choose a saved prompt to fill the composer"
+                    icon="text.bubble"
+                    label="Prompts"
+                    maxWidth={104}
+                    showChevron={false}
+                    onPress={() => setCustomPromptSheetOpen(true)}
+                  />
+                ) : null}
                 <ComposerDictationStartAction
                   state={voiceInput.state}
                   isAvailable={voiceInput.isAvailable}
@@ -863,13 +903,26 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   />
                 ) : (
                   <View className="min-w-0 flex-1 flex-row items-center justify-between">
-                    <ComposerAttachmentButton
-                      supportsFiles={Boolean(
-                        props.serverConfig?.environment.capabilities.fileAttachments,
-                      )}
-                      onPickMedia={props.onPickDraftMedia}
-                      onPickFiles={props.onPickDraftFiles}
-                    />
+                    <View className="flex-row items-center">
+                      <ComposerAttachmentButton
+                        supportsFiles={Boolean(
+                          props.serverConfig?.environment.capabilities.fileAttachments,
+                        )}
+                        onPickMedia={props.onPickDraftMedia}
+                        onPickFiles={props.onPickDraftFiles}
+                      />
+                      {showCustomPromptControl ? (
+                        <ComposerInlineControl
+                          accessibilityLabel="Custom prompts"
+                          accessibilityHint="Choose a saved prompt to fill the composer"
+                          icon="text.bubble"
+                          label="Prompts"
+                          maxWidth={104}
+                          showChevron={false}
+                          onPress={() => setCustomPromptSheetOpen(true)}
+                        />
+                      ) : null}
+                    </View>
                     <View className="min-w-0 shrink">
                       <ComposerInlineControl
                         accessibilityLabel="Model and reasoning settings"
@@ -918,6 +971,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
       <VideoPreviewModal source={previewVideo} onRequestClose={closePreview} />
       <FilePreviewModal source={previewFile} onRequestClose={closePreview} />
+      <CustomPromptSheet
+        visible={customPromptSheetOpen}
+        prompts={customPrompts}
+        onClose={() => setCustomPromptSheetOpen(false)}
+        onSelect={selectCustomPrompt}
+      />
     </Animated.View>
   );
 });

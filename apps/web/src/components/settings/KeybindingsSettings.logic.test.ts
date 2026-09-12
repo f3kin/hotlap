@@ -174,7 +174,14 @@ describe("KeybindingsSettings.logic", () => {
   it("formats static and project script command labels", () => {
     expect(commandLabel("commandPalette.toggle")).toBe("Command Palette: Toggle");
     expect(commandLabel("themeEditor.toggle")).toBe("Theme Editor: Toggle");
+    expect(commandLabel("thread.copyTranscript")).toBe("Thread: Copy Transcript");
     expect(commandLabel("script.setup-db.run")).toBe("Run Script: Setup Db");
+  });
+
+  it("offers transcript copy for customization without assigning a default shortcut", () => {
+    expect(
+      DEFAULT_RESOLVED_KEYBINDINGS.some((binding) => binding.command === "thread.copyTranscript"),
+    ).toBe(false);
   });
 
   it("builds known when variable options from defaults without frontend labels", () => {

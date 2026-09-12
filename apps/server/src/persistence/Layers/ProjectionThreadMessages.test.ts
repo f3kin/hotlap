@@ -30,6 +30,18 @@ layer("ProjectionThreadMessageRepository", (it) => {
       });
       assert.isNull(yield* repository.getLatestUserMessageAt({ threadId }));
 
+      yield* repository.upsert({
+        messageId: MessageId.make("fork-history:destination:0000"),
+        threadId,
+        turnId: null,
+        role: "user",
+        text: "Inherited prompt",
+        isStreaming: false,
+        createdAt: "2026-02-28T19:05:07.000Z",
+        updatedAt: "2026-02-28T19:05:07.000Z",
+      });
+      assert.isNull(yield* repository.getLatestUserMessageAt({ threadId }));
+
       const messages = [
         { role: "user", createdAt: "2026-02-28T19:05:02.000Z" },
         { role: "user", createdAt: "2026-02-28T19:05:01.000Z" },

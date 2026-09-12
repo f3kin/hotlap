@@ -445,7 +445,7 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       );
 
       expect(error._tag).toBe("OrchestrationCommandInvariantError");
-      expect(error.message).toContain("reserved imported-session namespace");
+      expect(error.message).toContain("reserved read-only history namespace");
     }),
   );
 
@@ -502,7 +502,7 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
         const error = yield* Effect.flip(decideOrchestrationCommand({ command, readModel }));
 
         expect(error._tag).toBe("OrchestrationCommandInvariantError");
-        expect(error.message).toContain("reserved imported-session namespace");
+        expect(error.message).toContain("reserved read-only history namespace");
       }
     }),
   );
