@@ -321,6 +321,22 @@ export const composerDraftsAtom = Atom.make<Record<string, ComposerDraft>>({}).p
   Atom.withLabel("mobile:composer-drafts"),
 );
 
+export function composerDraftHasUserContent(draft: ComposerDraft): boolean {
+  return (
+    draft.text.trim().length > 0 ||
+    draft.attachments.length > 0 ||
+    (draft.context?.records.length ?? 0) > 0
+  );
+}
+
+export const composerDraftHasUserContentAtom = Atom.family((draftKey: string) =>
+  Atom.map(
+    composerDraftsAtom,
+    (drafts) =>
+      draftKey.length > 0 && composerDraftHasUserContent(normalizeDraft(drafts[draftKey])),
+  ),
+);
+
 export const stickyComposerModelSelectionAtom = Atom.make<ModelSelection | null>(null).pipe(
   Atom.keepAlive,
   Atom.withLabel("mobile:sticky-composer-model-selection"),
@@ -1763,6 +1779,14 @@ export function useComposerDraft(draftKey: string | null): ComposerDraft {
     ensureComposerDraftsLoaded();
   }, []);
   return draftKey ? normalizeDraft(drafts[draftKey]) : EMPTY_DRAFT;
+}
+
+export function useComposerDraftHasUserContent(draftKey: string | null): boolean {
+  const hasContent = useAtomValue(composerDraftHasUserContentAtom(draftKey ?? ""));
+  useEffect(() => {
+    ensureComposerDraftsLoaded();
+  }, []);
+  return hasContent;
 }
 
 export function useStickyComposerModelSelection(): ModelSelection | null {

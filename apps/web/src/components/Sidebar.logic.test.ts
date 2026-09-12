@@ -2013,6 +2013,42 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({ label: "Completed", pulse: false });
   });
+
+  it("shows draft instead of idle time when the composer has unsent content", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            activeTurnId: null,
+          },
+        },
+        hasUnsentDraft: true,
+      }),
+    ).toMatchObject({ label: "Draft", pulse: false });
+  });
+
+  it("keeps completed ahead of an unsent draft", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: makeLatestTurn(),
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            activeTurnId: null,
+          },
+        },
+        hasUnsentDraft: true,
+      }),
+    ).toMatchObject({ label: "Completed", pulse: false });
+  });
 });
 
 describe("resolveThreadRowClassName", () => {

@@ -3,7 +3,7 @@ import { CommandId, EnvironmentId, MessageId, ProjectId, ThreadId } from "@t3too
 
 import type { QueuedThreadMessage } from "./thread-outbox-model";
 import type { ComposerDraft } from "./use-composer-drafts";
-import { buildPendingNewTasks } from "./pending-new-tasks-model";
+import { buildPendingNewTasks, composerDraftHasUserContent } from "./pending-new-tasks-model";
 
 const environmentId = EnvironmentId.make("env-1");
 const projectId = ProjectId.make("project-1");
@@ -38,6 +38,29 @@ function draft(
     ...overrides,
   };
 }
+
+describe("composerDraftHasUserContent", () => {
+  it("counts persisted composer context without visible text as unsent content", () => {
+    expect(
+      composerDraftHasUserContent({
+        text: "",
+        attachments: [],
+        context: { version: 1, records: [{} as never] },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not count an empty context envelope or settings alone", () => {
+    expect(
+      composerDraftHasUserContent({
+        text: "   ",
+        attachments: [],
+        context: { version: 1, records: [] },
+        runtimeMode: "full-access",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("buildPendingNewTasks", () => {
   it("surfaces every new-task draft with content alongside queued creations", () => {

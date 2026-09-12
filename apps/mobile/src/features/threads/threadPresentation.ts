@@ -8,7 +8,8 @@ export type ThreadStatusKind =
   | "working"
   | "connecting"
   | "error"
-  | "plan-ready";
+  | "plan-ready"
+  | "draft";
 
 export interface ThreadStatusPresentation extends StatusTone {
   readonly kind: ThreadStatusKind;
@@ -37,6 +38,7 @@ function isLatestTurnSettled(
  */
 export function resolveThreadStatus(
   thread: EnvironmentThreadShell,
+  hasUnsentDraft = false,
 ): ThreadStatusPresentation | null {
   if (thread.hasPendingApprovals) {
     return {
@@ -110,6 +112,18 @@ export function resolveThreadStatus(
       textClassName: "text-foreground-secondary",
       iconColor: "#bf5af2",
       iconBackground: "rgba(191,90,242,0.22)",
+      pulse: false,
+    };
+  }
+
+  if (hasUnsentDraft) {
+    return {
+      kind: "draft",
+      label: "Draft",
+      pillClassName: "bg-warning/15",
+      textClassName: "text-warning-foreground",
+      iconColor: "#ff9f0a",
+      iconBackground: "rgba(255,159,10,0.16)",
       pulse: false,
     };
   }
