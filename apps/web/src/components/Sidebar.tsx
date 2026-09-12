@@ -1163,17 +1163,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     icon: "woke" as const,
                     className: "text-amber-700 dark:text-amber-300",
                   }
-                : isUnread
+                : hasUnsentDraft
                   ? {
-                      label: "Done",
-                      icon: "done" as const,
-                      className: "text-emerald-700 dark:text-emerald-300",
+                      label: "Draft",
+                      icon: null,
+                      className: "text-amber-700 dark:text-amber-300",
                     }
-                  : hasUnsentDraft
+                  : isUnread
                     ? {
-                        label: "Draft",
-                        icon: null,
-                        className: "text-amber-700 dark:text-amber-300",
+                        label: "Done",
+                        icon: "done" as const,
+                        className: "text-emerald-700 dark:text-emerald-300",
                       }
                     : null;
   const isWokeStatus = topStatus?.icon === "woke";

@@ -2031,7 +2031,7 @@ describe("resolveThreadStatusPill", () => {
     ).toMatchObject({ label: "Draft", pulse: false });
   });
 
-  it("keeps completed ahead of an unsent draft", () => {
+  it("shows an unsent draft ahead of an unseen completion", () => {
     expect(
       resolveThreadStatusPill({
         thread: {
@@ -2047,7 +2047,7 @@ describe("resolveThreadStatusPill", () => {
         },
         hasUnsentDraft: true,
       }),
-    ).toMatchObject({ label: "Completed", pulse: false });
+    ).toMatchObject({ label: "Draft", pulse: false });
   });
 });
 
@@ -2120,6 +2120,25 @@ describe("resolveProjectStatusIndicator", () => {
         },
       ]),
     ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
+  });
+
+  it("prefers a draft over a passive completed sibling", () => {
+    expect(
+      resolveProjectStatusIndicator([
+        {
+          label: "Completed",
+          colorClass: "text-emerald-600",
+          dotClass: "bg-emerald-500",
+          pulse: false,
+        },
+        {
+          label: "Draft",
+          colorClass: "text-amber-700",
+          dotClass: "bg-amber-500",
+          pulse: false,
+        },
+      ]),
+    ).toMatchObject({ label: "Draft" });
   });
 });
 
