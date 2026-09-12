@@ -27,7 +27,7 @@ export function isImportedAgentSessionMessageId(messageId: string): boolean {
 
 export const FORK_HISTORY_MESSAGE_ID_PREFIX = "fork-history:";
 
-export function isForkHistoryMessageId(messageId: string): boolean {
+function isForkHistoryMessageId(messageId: string): boolean {
   return messageId.startsWith(FORK_HISTORY_MESSAGE_ID_PREFIX);
 }
 
