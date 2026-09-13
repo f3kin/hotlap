@@ -17,12 +17,27 @@ export const AgentSessionImportSource = Schema.Struct({
   device: Schema.Number,
   inode: Schema.NullOr(Schema.Number),
   birthtimeMs: Schema.NullOr(Schema.Number),
+  /** Missing on imports created before parser-aware reconciliation shipped. */
+  parserVersion: Schema.optional(NonNegativeInt),
+  /** Parser version that deliberately preserved a user-modified imported thread. */
+  parserReviewVersion: Schema.optional(NonNegativeInt),
 });
 export type AgentSessionImportSource = typeof AgentSessionImportSource.Type;
 
 /** Imported message ids retain their origin after event metadata is projected into SQLite. */
 export function isImportedAgentSessionMessageId(messageId: string): boolean {
   return messageId.startsWith("import:");
+}
+
+export const FORK_HISTORY_MESSAGE_ID_PREFIX = "fork-history:";
+
+function isForkHistoryMessageId(messageId: string): boolean {
+  return messageId.startsWith(FORK_HISTORY_MESSAGE_ID_PREFIX);
+}
+
+/** Read-only transcript rows that are context, not turns created in this thread. */
+export function isReadOnlyHistoryMessageId(messageId: string): boolean {
+  return isImportedAgentSessionMessageId(messageId) || isForkHistoryMessageId(messageId);
 }
 
 /**
@@ -100,6 +115,8 @@ export class AgentSessionImportProjectChangedError extends Schema.TaggedError<Ag
 export const AgentSessionImportResult = Schema.Struct({
   importedCount: NonNegativeInt,
   skippedCount: NonNegativeInt,
+  repairedCount: Schema.optional(NonNegativeInt),
+  archivedCount: Schema.optional(NonNegativeInt),
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
 

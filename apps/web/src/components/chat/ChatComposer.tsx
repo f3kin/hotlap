@@ -311,6 +311,7 @@ import {
   suppressActiveComposerScrollGesture,
 } from "./composerScrollGesture";
 import { prepareVideoFirstFrame } from "../../lib/videoFirstFrame";
+import { ComposerPromptShortcuts } from "./ComposerPromptShortcuts";
 
 function ComposerVideoThumbnail({ file }: { file: File }) {
   const setVideo = useCallback(
@@ -1278,6 +1279,7 @@ export interface ChatComposerProps {
   attachmentUploadsCapabilityKnown: boolean;
   supportsAttachmentUploads: boolean;
   supportsQuestionAttachments: boolean;
+  supportsCustomPrompts: boolean;
   maxFileAttachmentBytes: number | null;
   routeKind: "server" | "draft";
   routeThreadRef: ScopedThreadRef;
@@ -1435,6 +1437,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     attachmentUploadsCapabilityKnown,
     supportsAttachmentUploads,
     supportsQuestionAttachments,
+    supportsCustomPrompts,
     maxFileAttachmentBytes,
     routeKind,
     routeThreadRef,
@@ -2632,6 +2635,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setComposerDraftPrompt(composerDraftTarget, nextPrompt);
     },
     [composerDraftTarget, setComposerDraftPrompt],
+  );
+
+  const selectCustomPrompt = useCallback(
+    (savedPrompt: UnifiedSettings["customPrompts"][number]) => {
+      promptRef.current = savedPrompt.prompt;
+      setPrompt(savedPrompt.prompt);
+      setComposerCursor(
+        collapseExpandedComposerCursor(savedPrompt.prompt, savedPrompt.prompt.length),
+      );
+      setComposerTrigger(null);
+      setComposerHighlightedItemId(null);
+      setIsComposerModelPickerOpen(false);
+      setIsStashMenuOpen(false);
+      setIsTasksDrawerOpen(false);
+      scheduleComposerFocus();
+    },
+    [promptRef, scheduleComposerFocus, setPrompt],
   );
 
   const addComposerImage = useCallback(
@@ -5925,6 +5945,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       className="mx-auto w-full min-w-0 max-w-3xl"
       data-chat-composer-form="true"
     >
+      {supportsCustomPrompts &&
+      settings.customPrompts.length > 0 &&
+      prompt.trim().length === 0 &&
+      !isConnecting &&
+      !composerHasExpandedChrome &&
+      !isComposerModelPickerOpen &&
+      !isComposerApprovalState &&
+      !projectSelectionRequired &&
+      !isChoiceOnlyPendingQuestion &&
+      !activePendingIsResponding ? (
+        <ComposerPromptShortcuts prompts={settings.customPrompts} onSelect={selectCustomPrompt} />
+      ) : null}
       {composerControlsInStrip && restingControlsHost
         ? createPortal(
             <div

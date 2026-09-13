@@ -9,6 +9,7 @@
 import {
   CommandId,
   IsoDateTime,
+  MessageId,
   ModelSelection,
   NonNegativeInt,
   ProjectId,
@@ -37,6 +38,8 @@ export const ProjectionThread = Schema.Struct({
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   latestTurnId: Schema.NullOr(TurnId),
+  forkSourceThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  forkSourceMessageId: Schema.optional(Schema.NullOr(MessageId)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime),

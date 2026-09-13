@@ -76,6 +76,8 @@ import { Dialog } from "../ui/dialog";
 import { toastManager } from "../ui/toast";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime } from "../../timestampFormat";
+import { T3DesktopMigrationFlow } from "./T3DesktopMigration";
+import { getT3DesktopMigrationBridge } from "./T3DesktopMigration.logic";
 
 /**
  * First-run welcome wizard. Rendered over the workspace at `/welcome` on a
@@ -86,11 +88,12 @@ import { formatRelativeTime } from "../../timestampFormat";
  * re-runnable by clearing the flag.
  */
 
-type WizardStep = "connection" | "agents" | "import";
+type WizardStep = "migration" | "connection" | "agents" | "import";
 const NO_ENVIRONMENTS: readonly EnvironmentId[] = [];
 
 const AGENT_ONBOARDING_THREAD_ID = ThreadId.make("onboarding-agent-setup");
 const ONBOARDING_STAGES = ["Connect", "Agents", "Projects"] as const;
+const MIGRATION_ONBOARDING_STAGES = ["Switch", ...ONBOARDING_STAGES] as const;
 const SCAN_LIMIT_MESSAGE = "Scan limit reached. Some projects or conversations may be missing.";
 
 export function WelcomeWizard({
@@ -102,7 +105,12 @@ export function WelcomeWizard({
   readonly onDone: (projectRef?: ScopedProjectRef) => void;
 }) {
   const completeOnboarding = useCompleteOnboarding();
-  const [step, setStep] = useState<WizardStep>("connection");
+  const migrationBridge = getT3DesktopMigrationBridge(
+    typeof window === "undefined" ? undefined : window.desktopBridge,
+  );
+  const [step, setStep] = useState<WizardStep>(() =>
+    migrationBridge ? "migration" : "connection",
+  );
   const { environments } = useEnvironments();
   const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(null);
   const autoSelectedComputers = useRef(new Set<EnvironmentId>());
@@ -140,6 +148,7 @@ export function WelcomeWizard({
     setStep("agents");
   };
   const stageIndex = step === "agents" ? 1 : step === "import" ? 2 : 0;
+  const onboardingStages = step === "migration" ? MIGRATION_ONBOARDING_STAGES : ONBOARDING_STAGES;
   const finish = useCallback(
     (projectRef?: ScopedProjectRef) => {
       if (finishingPromiseRef.current !== null) return finishingPromiseRef.current;
@@ -189,18 +198,18 @@ export function WelcomeWizard({
         initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
       >
         <WizardHeader
-          title="Set up T3 Code"
+          title="Set up Hotlap"
           identity={
-            <div className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
+            <div className="flex items-baseline gap-1.5" role="img" aria-label="Hotlap">
               <T3Wordmark className="h-4 w-auto shrink-0" aria-hidden />
               <span className="text-[1.4rem] font-medium tracking-tight text-muted-foreground">
-                Code
+                Hotlap
               </span>
             </div>
           }
         >
           <WizardSteps
-            steps={ONBOARDING_STAGES}
+            steps={onboardingStages}
             currentStep={stageIndex}
             isStepDisabled={(index) => isImporting || index >= stageIndex}
             onStepChange={(index) => {
@@ -211,7 +220,16 @@ export function WelcomeWizard({
         </WizardHeader>
 
         <WizardPanel holdHeight={isLoadingProjects}>
-          {step === "connection" ? (
+          {step === "migration" ? (
+            migrationBridge ? (
+              <T3DesktopMigrationFlow
+                bridge={migrationBridge}
+                surface="onboarding"
+                onContinue={() => setStep("connection")}
+                onUnavailable={() => setStep("connection")}
+              />
+            ) : null
+          ) : step === "connection" ? (
             <ConnectionStep
               expandPairingInitially={!localAvailable && !hasCloudPublicConfig()}
               selectedIds={selectedIds}
@@ -475,9 +493,9 @@ function ConnectAccountOption({
           <p className="text-sm text-muted-foreground">
             Run this on each computer you want to connect.
           </p>
-          <CommandBlock command="npx t3 connect" className="mt-3" />
+          <CommandBlock command="npx hotlap connect" className="mt-3" />
           <p className="mt-3 text-xs text-muted-foreground">
-            Keep T3 Code running. Select the computers you want to set up above.
+            Keep Hotlap running. Select the computers you want to set up above.
           </p>
         </div>
       </CollapsiblePanel>
@@ -592,9 +610,9 @@ function PairingForm({
             <p className="text-sm text-muted-foreground">
               Run this on the computer with your code.
             </p>
-            <CommandBlock command="npx t3 pair" className="mt-2" />
+            <CommandBlock command="npx hotlap pair" className="mt-2" />
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Start T3 Code first, or run <code className="font-mono">npx t3 serve</code>. Add{" "}
+              Start Hotlap first, or run <code className="font-mono">npx hotlap serve</code>. Add{" "}
               <code className="font-mono">--tailscale</code> to use your tailnet.
             </p>
           </CollapsiblePanel>
