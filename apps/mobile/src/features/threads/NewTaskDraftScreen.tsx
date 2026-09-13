@@ -123,6 +123,11 @@ import { selectIncomingShareAttachmentsForServer } from "../sharing/incoming-sha
 import { appAtomRegistry } from "../../state/atom-registry";
 import { serverEnvironment } from "../../state/server";
 import { fileRoutePathSegments } from "../files/filePath";
+import { CustomPromptSheet } from "./CustomPromptSheet";
+import {
+  prefillComposerWithCustomPrompt,
+  shouldShowCustomPromptControl,
+} from "./customPromptPresentation";
 
 function NewTaskWorkspaceIcon(props: {
   readonly workspaceMode: "local" | "worktree";
@@ -192,6 +197,15 @@ export function NewTaskDraftScreen(props: {
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
     selectedProject?.environmentId ?? null,
   );
+  const serverSettings = useAtomValue(
+    serverEnvironment.settingsValueAtom(
+      selectedProject?.environmentId ?? ("unavailable" as EnvironmentId),
+    ),
+  );
+  const customPrompts =
+    selectedEnvironmentServerConfig?.environment.capabilities.customPrompts === true
+      ? (serverSettings?.customPrompts ?? [])
+      : [];
   const environmentConnected =
     selectedProject !== null &&
     connectedEnvironments.find(
@@ -223,6 +237,7 @@ export function NewTaskDraftScreen(props: {
   const promptInputRef = useRef<ComposerEditorHandle>(null);
   const loadedBranchesProjectKeyRef = useRef<string | null>(null);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [customPromptSheetOpen, setCustomPromptSheetOpen] = useState(false);
   const [previewVideo, setPreviewVideo] = useState<VideoPreviewSource | null>(null);
   const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
   const wasFocusedBeforePreviewRef = useRef(false);
@@ -402,6 +417,23 @@ export function NewTaskDraftScreen(props: {
     voiceInput.elapsedSeconds,
   );
   const isVoiceInputPresented = voicePresentation.statusLabel !== null;
+  const showCustomPromptControl = shouldShowCustomPromptControl({
+    supported: selectedEnvironmentServerConfig?.environment.capabilities.customPrompts === true,
+    promptCount: customPrompts.length,
+    draftMessage: flow.prompt,
+    editorReadOnly: isComposerInteractionLocked || isImportingShare || voiceInput.freezesEditor,
+  });
+  const selectCustomPrompt = useCallback(
+    (savedPrompt: (typeof customPrompts)[number]) => {
+      setCustomPromptSheetOpen(false);
+      prefillComposerWithCustomPrompt({
+        prompt: savedPrompt.prompt,
+        onChangeDraftMessage: flow.setPrompt,
+        editorRef: promptInputRef,
+      });
+    },
+    [flow.setPrompt],
+  );
   const preventRemove =
     (isIncomingShareTransferPending && !isProjectPickerReturnActive) ||
     isCancellingShareImport ||
@@ -1565,6 +1597,17 @@ export function NewTaskDraftScreen(props: {
                     onPickMedia={handlePickMedia}
                     onPickFiles={handlePickFiles}
                   />
+                  {showCustomPromptControl ? (
+                    <ComposerInlineControl
+                      accessibilityLabel="Custom prompts"
+                      accessibilityHint="Choose a saved prompt to fill the composer"
+                      icon="text.bubble"
+                      label="Prompts"
+                      maxWidth={104}
+                      showChevron={false}
+                      onPress={() => setCustomPromptSheetOpen(true)}
+                    />
+                  ) : null}
                   <View className="min-w-0 flex-1 flex-row items-center justify-end gap-2">
                     <View className="min-w-0 shrink">
                       <ComposerInlineControl
@@ -1640,6 +1683,12 @@ export function NewTaskDraftScreen(props: {
       </ComposerSurface>
       <VideoPreviewModal source={previewVideo} onRequestClose={closeMediaPreview} />
       <FilePreviewModal source={previewFile} onRequestClose={closeMediaPreview} />
+      <CustomPromptSheet
+        visible={customPromptSheetOpen && showCustomPromptControl}
+        prompts={customPrompts}
+        onClose={() => setCustomPromptSheetOpen(false)}
+        onSelect={selectCustomPrompt}
+      />
     </View>
   );
 

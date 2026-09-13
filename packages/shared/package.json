@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./t3MigrationManifest": {
+      "types": "./src/t3MigrationManifest.ts",
+      "import": "./src/t3MigrationManifest.ts"
+    },
     "./delimitedPreview": {
       "types": "./src/delimitedPreview.ts",
       "import": "./src/delimitedPreview.ts"
@@ -207,6 +211,10 @@
       "types": "./src/assistantCitations.ts",
       "import": "./src/assistantCitations.ts"
     },
+    "./readableThreadTranscript": {
+      "types": "./src/readableThreadTranscript.ts",
+      "import": "./src/readableThreadTranscript.ts"
+    },
     "./composerContextReferences": {
       "types": "./src/composerContextReferences.ts",
       "import": "./src/composerContextReferences.ts"
@@ -314,6 +322,10 @@
     "./nodeSqliteClient": {
       "types": "./src/nodeSqliteClient.ts",
       "import": "./src/nodeSqliteClient.ts"
+    },
+    "./sqliteSnapshot": {
+      "types": "./src/sqliteSnapshot.ts",
+      "import": "./src/sqliteSnapshot.ts"
     },
     "./hostClassification": {
       "types": "./src/hostClassification.ts",

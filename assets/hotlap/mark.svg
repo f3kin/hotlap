@@ -1,0 +1,11 @@
+<svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Hotlap</title>
+  <defs>
+    <linearGradient id="hotlap-arc" x1="50" y1="6" x2="50" y2="94" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF3B30"/>
+      <stop offset="1" stop-color="#FF8A2A"/>
+    </linearGradient>
+  </defs>
+  <path d="M6 50A44 44 0 1 1 94 50A44 44 0 1 1 6 50ZM12 50A38 38 0 1 0 88 50A38 38 0 1 0 12 50Z" fill="url(#hotlap-arc)"/>
+  <path d="M34 22.287L34 34L22.287 34A32 32 0 0 1 34 22.287ZM66 22.287L66 34L50 34L50 18A32 32 0 0 1 66 22.287ZM34 34L50 34L50 50L34 50L34 34ZM66 34L77.713 34A32 32 0 0 1 82 50L66 50L66 34ZM18 50L34 50L34 66L22.287 66A32 32 0 0 1 18 50ZM50 50L66 50L66 66L50 66L50 50ZM34 66L50 66L50 82A32 32 0 0 1 34 77.713L34 66ZM66 66L77.713 66A32 32 0 0 1 66 77.713L66 66Z" fill="url(#hotlap-arc)"/>
+</svg>

@@ -55,6 +55,18 @@ describe("buildThreadActionMenuItems", () => {
     expect(allIds(baseState)).not.toContain("copy-branch");
   });
 
+  it("adds transcript copy to the Copy submenu only when the header enables it", () => {
+    const copyChildren = (state: ThreadActionMenuState) =>
+      buildThreadActionMenuItems(state)
+        .find((item) => item.id === "copy")
+        ?.children?.map((item) => item.id);
+
+    expect(copyChildren(baseState)).not.toContain("copy-transcript");
+    expect(copyChildren({ ...baseState, includeTranscriptCopy: true })).toContain(
+      "copy-transcript",
+    );
+  });
+
   it("flips lifecycle labels with thread state", () => {
     expect(ids({ ...baseState, isPinned: true, isSettled: true, isSnoozed: true })).toEqual(
       expect.arrayContaining(["unpin", "unsettle", "unsnooze"]),

@@ -190,7 +190,7 @@ const createVpPmPublishArgs = (config: PublishCommandConfig): ReadonlyArray<stri
   const args = [
     "publish",
     "--filter",
-    "t3",
+    "./apps/server",
     "--access",
     config.access,
     "--tag",
@@ -242,9 +242,9 @@ const publishCmd = Command.make(
           const workspaceCatalog = workspaceConfig.catalog ?? {};
           const workspaceOverrides = workspaceConfig.overrides ?? {};
           const pkg: PackageJson = {
-            name: serverPackageJson.name,
+            name: "hotlap",
             repository: serverPackageJson.repository,
-            bin: serverPackageJson.bin,
+            bin: { hotlap: "./dist/bin.mjs" },
             type: serverPackageJson.type,
             version,
             engines: serverPackageJson.engines,

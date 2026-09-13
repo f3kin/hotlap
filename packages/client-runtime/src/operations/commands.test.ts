@@ -1,6 +1,7 @@
 import {
   CommandId,
   EnvironmentId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ThreadId,
@@ -24,6 +25,7 @@ import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
   createProject,
+  forkThread,
   revertThreadCheckpoint,
   reorderActiveThread,
   settleThread,
@@ -160,6 +162,32 @@ describe("environment commands", () => {
           type: "thread.archive",
           commandId: "archive-command",
           threadId: "thread-1",
+        },
+      ]);
+    }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
+
+  it.effect("dispatches a fork using only source and destination references", () =>
+    Effect.gen(function* () {
+      const dispatched: ClientOrchestrationCommand[] = [];
+      const supervisor = yield* makeSupervisor(dispatched);
+
+      yield* forkThread({
+        commandId: CommandId.make("fork-command"),
+        threadId: ThreadId.make("forked-thread"),
+        sourceThreadId: ThreadId.make("source-thread"),
+        sourceMessageId: MessageId.make("assistant-message"),
+        createdAt: "2026-06-06T00:02:00.000Z",
+      }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+      expect(dispatched).toEqual([
+        {
+          type: "thread.fork",
+          commandId: "fork-command",
+          threadId: "forked-thread",
+          sourceThreadId: "source-thread",
+          sourceMessageId: "assistant-message",
+          createdAt: "2026-06-06T00:02:00.000Z",
         },
       ]);
     }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),

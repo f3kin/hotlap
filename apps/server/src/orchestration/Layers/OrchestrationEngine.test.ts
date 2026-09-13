@@ -419,6 +419,9 @@ describe("OrchestrationEngine", () => {
     const layer = OrchestrationEngineLive.pipe(
       Layer.provide(
         Layer.succeed(ProjectionSnapshotQuery, {
+          getThreadTranscriptSource: () => Effect.die("unused"),
+          getThreadForkSource: () => Effect.die("unused"),
+          getPendingForkHandoffSource: () => Effect.die("unused"),
           getUserInputActivity: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.succeed(commandReadModel),
           getSnapshot: () =>
@@ -633,6 +636,38 @@ describe("OrchestrationEngine", () => {
           })
           .pipe(Effect.flip);
         expect(staleError._tag).toBe("OrchestrationCommandInvariantError");
+        const reconcileAction = {
+          type: "replaceHistory" as const,
+          projectId,
+          title: "Repaired import",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access" as const,
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+          messages: [
+            {
+              messageId: MessageId.make("import:codex:guarded:000000"),
+              role: "user" as const,
+              text: "Visible imported prompt",
+              createdAt: now(),
+            },
+          ],
+        };
+        const staleReconcileError = yield* engine
+          .dispatch({
+            type: "thread.history.reconcile",
+            commandId: CommandId.make("cmd-reconcile-stale-snapshot"),
+            threadId: guardedThreadId,
+            snapshotSequence,
+            action: reconcileAction,
+          })
+          .pipe(Effect.flip);
+        expect(staleReconcileError._tag).toBe("OrchestrationCommandInvariantError");
 
         const livenessSnapshotSequence = yield* engine.latestSequence;
         for (const [taskType, expectedLiveness] of [
@@ -661,6 +696,17 @@ describe("OrchestrationEngine", () => {
             })
             .pipe(Effect.flip);
           expect(livenessError._tag).toBe("OrchestrationCommandInvariantError");
+          expect(yield* engine.latestSequence).toBe(livenessSnapshotSequence);
+          const reconcileLivenessError = yield* engine
+            .dispatch({
+              type: "thread.history.reconcile",
+              commandId: CommandId.make(`cmd-reconcile-${expectedLiveness}`),
+              threadId: liveThreadId,
+              snapshotSequence: livenessSnapshotSequence,
+              action: reconcileAction,
+            })
+            .pipe(Effect.flip);
+          expect(reconcileLivenessError._tag).toBe("OrchestrationCommandInvariantError");
           expect(yield* engine.latestSequence).toBe(livenessSnapshotSequence);
           backgroundLiveness.clearThreadLiveness(liveThreadId);
         }
@@ -756,6 +802,258 @@ describe("OrchestrationEngine", () => {
     const readModelB = await system.readModel();
     expect(readModelB).toEqual(readModelA);
     await system.dispose();
+  });
+
+  it("persists inherited provider input only for a fork's first continuation", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+    const projectId = asProjectId("project-fork-handoff");
+    const sourceThreadId = ThreadId.make("thread-fork-source");
+    const destinationThreadId = ThreadId.make("thread-fork-destination");
+    const sourceTurnId = asTurnId("turn-fork-source");
+    const sourceAssistantMessageId = asMessageId("message-fork-source-answer");
+    const createdAt = now();
+
+    try {
+      await system.run(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-fork-handoff-project-create"),
+          projectId,
+          title: "Fork handoff",
+          workspaceRoot: "/tmp/project-fork-handoff",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-fork-handoff-source-create"),
+          threadId: sourceThreadId,
+          projectId,
+          title: "Source conversation",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: "feature/fork-handoff",
+          worktreePath: "/tmp/project-fork-handoff-worktree",
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-fork-handoff-source-turn"),
+          threadId: sourceThreadId,
+          message: {
+            messageId: asMessageId("message-fork-source-question"),
+            role: "user",
+            text: "What should the inherited setting be?",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-fork-handoff-source-running"),
+          threadId: sourceThreadId,
+          session: {
+            threadId: sourceThreadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: sourceTurnId,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: CommandId.make("cmd-fork-handoff-source-answer-delta"),
+          threadId: sourceThreadId,
+          messageId: sourceAssistantMessageId,
+          delta: "Use the inherited value.",
+          turnId: sourceTurnId,
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make("cmd-fork-handoff-source-answer-complete"),
+          threadId: sourceThreadId,
+          messageId: sourceAssistantMessageId,
+          turnId: sourceTurnId,
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-fork-handoff-source-ready"),
+          threadId: sourceThreadId,
+          session: {
+            threadId: sourceThreadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+
+      expect(Option.getOrThrow(await system.readThread(sourceThreadId)).latestTurn).toMatchObject({
+        turnId: sourceTurnId,
+        state: "completed",
+        assistantMessageId: sourceAssistantMessageId,
+      });
+
+      await system.run(
+        engine.dispatch({
+          type: "thread.fork",
+          commandId: CommandId.make("cmd-fork-handoff-create"),
+          threadId: destinationThreadId,
+          sourceThreadId,
+          sourceMessageId: sourceAssistantMessageId,
+          createdAt,
+        }),
+      );
+
+      const firstTurnCommandId = CommandId.make("cmd-fork-handoff-first-turn");
+      await system.run(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: firstTurnCommandId,
+          threadId: destinationThreadId,
+          message: {
+            messageId: asMessageId("message-fork-first-continuation"),
+            role: "user",
+            text: "Continue with that choice.",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+
+      const firstDestinationTurnId = asTurnId("turn-fork-destination-first");
+      await system.run(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-fork-handoff-first-running"),
+          threadId: destinationThreadId,
+          session: {
+            threadId: destinationThreadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: firstDestinationTurnId,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make("cmd-fork-handoff-first-complete"),
+          threadId: destinationThreadId,
+          messageId: asMessageId("message-fork-first-answer"),
+          turnId: firstDestinationTurnId,
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-fork-handoff-first-ready"),
+          threadId: destinationThreadId,
+          session: {
+            threadId: destinationThreadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+
+      const secondTurnCommandId = CommandId.make("cmd-fork-handoff-second-turn");
+      await system.run(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: secondTurnCommandId,
+          threadId: destinationThreadId,
+          message: {
+            messageId: asMessageId("message-fork-second-continuation"),
+            role: "user",
+            text: "And now continue normally.",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+
+      const events = Array.from(await system.run(Stream.runCollect(engine.readEvents(0))));
+      const firstTurnEvent = events.find(
+        (event) =>
+          event.commandId === firstTurnCommandId && event.type === "thread.turn-start-requested",
+      );
+      const secondTurnEvent = events.find(
+        (event) =>
+          event.commandId === secondTurnCommandId && event.type === "thread.turn-start-requested",
+      );
+      expect(firstTurnEvent).toMatchObject({
+        type: "thread.turn-start-requested",
+        payload: {
+          providerInput: expect.stringContaining("## Assistant\n\nUse the inherited value."),
+        },
+      });
+      if (firstTurnEvent?.type === "thread.turn-start-requested") {
+        expect(firstTurnEvent.payload.providerInput).toContain(
+          "## New user message\n\nContinue with that choice.",
+        );
+      }
+      expect(secondTurnEvent).toMatchObject({
+        type: "thread.turn-start-requested",
+      });
+      if (secondTurnEvent?.type === "thread.turn-start-requested") {
+        expect(secondTurnEvent.payload.providerInput).toBeUndefined();
+      }
+
+      const destination = Option.getOrThrow(await system.readThread(destinationThreadId));
+      expect(
+        destination.messages.find(
+          (message) => message.id === asMessageId("message-fork-first-continuation"),
+        )?.text,
+      ).toBe("Continue with that choice.");
+    } finally {
+      await system.dispose();
+    }
   });
 
   it("archives and unarchives threads through orchestration commands", async () => {

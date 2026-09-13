@@ -2,6 +2,7 @@ import {
   AgentSessionImportSource,
   ApprovalRequestId,
   ChatAttachment,
+  ComposerContextKind,
   OrchestrationMessageContext,
   CheckpointRef,
   IsoDateTime,
@@ -32,6 +33,9 @@ import {
   ThreadId,
   ThreadPullRequestSnapshot,
   ThreadPullRequestStack,
+  THREAD_FORK_MAX_BYTES,
+  THREAD_FORK_MAX_MESSAGES,
+  THREAD_TRANSCRIPT_MAX_BYTES,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import { legacyLinkedPullRequestOf } from "@t3tools/shared/threadPullRequests";
@@ -76,7 +80,9 @@ import {
   type ProjectionSnapshotCounts,
   type ProjectionThreadCheckpointContext,
   type ProjectionThreadDetailQuery,
+  type ProjectionThreadForkSource,
   type ProjectionSnapshotQueryShape,
+  type ProjectionThreadTranscriptSource,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
@@ -148,6 +154,34 @@ const ProjectionThreadRuntimeContextDbRowSchema = Schema.Struct({
   title: Schema.String,
   session: Schema.NullOr(ProjectionThreadSessionDbRowSchema),
 });
+const ProjectionReadableThreadMessageDbRowSchema = Schema.Struct({
+  id: MessageId,
+  role: Schema.Literals(["user", "assistant", "system"]),
+  text: Schema.String,
+  streaming: Schema.Number,
+  createdAt: IsoDateTime,
+  attachmentNames: Schema.fromJsonString(Schema.Array(Schema.String)),
+  contextRecords: Schema.fromJsonString(
+    Schema.Array(
+      Schema.Struct({
+        contextId: Schema.String,
+        kind: ComposerContextKind,
+        label: Schema.String,
+      }),
+    ),
+  ),
+});
+const ProjectionForkSelectedTurnDbRowSchema = Schema.Struct({
+  state: Schema.String,
+  assistantMessageId: Schema.NullOr(MessageId),
+});
+const ProjectionCompletedTurnExistsDbRowSchema = Schema.Struct({
+  exists: Schema.Number,
+});
+const ProjectionReadableThreadStatsDbRowSchema = Schema.Struct({
+  messageCount: Schema.Number,
+  payloadBytes: Schema.Number,
+});
 const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
   Struct.assign({
     files: Schema.fromJsonString(Schema.Array(OrchestrationCheckpointFile)),
@@ -200,6 +234,14 @@ const ProjectionImportedAgentSessionSourcesRowSchema = Schema.Struct({
 });
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
+});
+const ReadableThreadLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  forkHistoryOnly: Schema.optionalKey(Schema.Boolean),
+});
+const ThreadMessageEndpointLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
 });
 const TurnStartMessageLookupInput = Schema.Struct({
   threadId: ThreadId,
@@ -368,6 +410,17 @@ function mapTitleRegeneration(row: Schema.Schema.Type<typeof ProjectionThreadDbR
     : null;
 }
 
+function mapForkedFrom(row: Schema.Schema.Type<typeof ProjectionThreadDbRowSchema>) {
+  return row.forkSourceThreadId != null && row.forkSourceMessageId != null
+    ? {
+        forkedFrom: {
+          threadId: row.forkSourceThreadId,
+          messageId: row.forkSourceMessageId,
+        },
+      }
+    : {};
+}
+
 function mapSessionRow(
   row: Schema.Schema.Type<typeof ProjectionThreadSessionDbRowSchema>,
 ): OrchestrationSession {
@@ -475,6 +528,22 @@ function mapThreadActivityRow(
   };
 }
 
+function mapReadableThreadMessages(
+  rows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionReadableThreadMessageDbRowSchema>>,
+) {
+  return rows.map((row) => ({
+    id: row.id,
+    role: row.role,
+    text: row.text,
+    streaming: row.streaming === 1,
+    createdAt: row.createdAt,
+    ...(row.attachmentNames.length > 0
+      ? { attachments: row.attachmentNames.map((name) => ({ name })) }
+      : {}),
+    ...(row.contextRecords.length > 0 ? { context: { records: row.contextRecords } } : {}),
+  }));
+}
+
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown): ProjectionRepositoryError =>
     Schema.isSchemaError(cause)
@@ -567,6 +636,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
+          fork_source_thread_id AS "forkSourceThreadId",
+          fork_source_message_id AS "forkSourceMessageId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -607,6 +678,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
+          fork_source_thread_id AS "forkSourceThreadId",
+          fork_source_message_id AS "forkSourceMessageId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -649,6 +722,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
+          fork_source_thread_id AS "forkSourceThreadId",
+          fork_source_message_id AS "forkSourceMessageId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -1209,6 +1284,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
+          fork_source_thread_id AS "forkSourceThreadId",
+          fork_source_message_id AS "forkSourceMessageId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -1233,6 +1310,290 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           AND archived_at IS NULL
         LIMIT 1
       `,
+  });
+
+  const getThreadRowIncludingArchivedById = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadDbRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          project_id AS "projectId",
+          title,
+          model_selection_json AS "modelSelection",
+          runtime_mode AS "runtimeMode",
+          interaction_mode AS "interactionMode",
+          branch,
+          worktree_path AS "worktreePath",
+          linked_pull_request_json AS "linkedPullRequest",
+          branch_pull_request_json AS "branchPullRequest",
+          latest_turn_id AS "latestTurnId",
+          fork_source_thread_id AS "forkSourceThreadId",
+          fork_source_message_id AS "forkSourceMessageId",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          archived_at AS "archivedAt",
+          settled_override AS "settledOverride",
+          settled_at AS "settledAt",
+          unsettled_at AS "unsettledAt",
+          snoozed_until AS "snoozedUntil",
+          snoozed_at AS "snoozedAt",
+          pinned_at AS "pinnedAt",
+          pin_order_key AS "pinOrderKey",
+          active_order_key AS "activeOrderKey",
+          title_regeneration_request_id AS "titleRegenerationRequestId",
+          title_regeneration_started_at AS "titleRegenerationStartedAt",
+          latest_user_message_at AS "latestUserMessageAt",
+          pending_approval_count AS "pendingApprovalCount",
+          pending_user_input_count AS "pendingUserInputCount",
+          has_actionable_proposed_plan AS "hasActionableProposedPlan",
+          deleted_at AS "deletedAt"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+          AND deleted_at IS NULL
+        LIMIT 1
+      `,
+  });
+
+  const listReadableThreadMessageRows = SqlSchema.findAll({
+    Request: ReadableThreadLookupInput,
+    Result: ProjectionReadableThreadMessageDbRowSchema,
+    execute: ({ threadId, forkHistoryOnly }) =>
+      sql`
+        SELECT
+          message.message_id AS id,
+          message.role,
+          message.text,
+          message.is_streaming AS streaming,
+          message.created_at AS "createdAt",
+          COALESCE((
+            SELECT json_group_array(json_extract(attachment.value, '$.name'))
+            FROM json_each(
+              CASE
+                WHEN json_valid(message.attachments_json) THEN message.attachments_json
+                ELSE '[]'
+              END
+            ) AS attachment
+            WHERE json_type(attachment.value, '$.name') = 'text'
+          ), '[]') AS "attachmentNames",
+          COALESCE((
+            SELECT json_group_array(json_object(
+              'contextId', json_extract(record.value, '$.contextId'),
+              'kind', json_extract(record.value, '$.kind'),
+              'label', json_extract(record.value, '$.label')
+            ))
+            FROM json_each(
+              CASE
+                WHEN json_valid(message.context_json)
+                  THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
+                ELSE json('[]')
+              END
+            ) AS record
+            WHERE json_type(record.value, '$.contextId') = 'text'
+              AND json_type(record.value, '$.kind') = 'text'
+              AND json_type(record.value, '$.label') = 'text'
+          ), '[]') AS "contextRecords"
+        FROM projection_thread_messages AS message
+        WHERE message.thread_id = ${threadId}
+          AND message.role != 'system'
+          ${forkHistoryOnly === true ? sql`AND message.message_id GLOB 'fork-history:*'` : sql``}
+        ORDER BY message.created_at ASC, message.message_id ASC
+      `,
+  });
+
+  const listReadableThreadMessageRowsThrough = SqlSchema.findAll({
+    Request: ThreadMessageEndpointLookupInput,
+    Result: ProjectionReadableThreadMessageDbRowSchema,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        WITH endpoint AS (
+          SELECT created_at AS "createdAt", message_id AS "messageId"
+          FROM projection_thread_messages
+          WHERE thread_id = ${threadId} AND message_id = ${messageId}
+          LIMIT 1
+        )
+        SELECT
+          message.message_id AS id,
+          message.role,
+          message.text,
+          message.is_streaming AS streaming,
+          message.created_at AS "createdAt",
+          COALESCE((
+            SELECT json_group_array(json_extract(attachment.value, '$.name'))
+            FROM json_each(
+              CASE
+                WHEN json_valid(message.attachments_json) THEN message.attachments_json
+                ELSE '[]'
+              END
+            ) AS attachment
+            WHERE json_type(attachment.value, '$.name') = 'text'
+          ), '[]') AS "attachmentNames",
+          COALESCE((
+            SELECT json_group_array(json_object(
+              'contextId', json_extract(record.value, '$.contextId'),
+              'kind', json_extract(record.value, '$.kind'),
+              'label', json_extract(record.value, '$.label')
+            ))
+            FROM json_each(
+              CASE
+                WHEN json_valid(message.context_json)
+                  THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
+                ELSE json('[]')
+              END
+            ) AS record
+            WHERE json_type(record.value, '$.contextId') = 'text'
+              AND json_type(record.value, '$.kind') = 'text'
+              AND json_type(record.value, '$.label') = 'text'
+          ), '[]') AS "contextRecords"
+        FROM projection_thread_messages AS message
+        CROSS JOIN endpoint
+        WHERE message.thread_id = ${threadId}
+          AND message.role != 'system'
+          AND (
+            message.created_at < endpoint."createdAt"
+            OR (
+              message.created_at = endpoint."createdAt"
+              AND message.message_id <= endpoint."messageId"
+            )
+          )
+        ORDER BY message.created_at ASC, message.message_id ASC
+      `,
+  });
+
+  // Preflight the safe projection in SQLite before decoding any message bodies.
+  // The fixed per-message allowance covers Markdown headings/separators and also
+  // ensures a very large collection of otherwise-empty rows trips the byte cap.
+  const getReadableThreadMessageStats = SqlSchema.findOne({
+    Request: ReadableThreadLookupInput,
+    Result: ProjectionReadableThreadStatsDbRowSchema,
+    execute: ({ threadId, forkHistoryOnly }) =>
+      sql`
+        SELECT
+          COUNT(*) AS "messageCount",
+          COALESCE(SUM(
+            length(CAST(message.text AS BLOB))
+            + COALESCE((
+              SELECT SUM(length(CAST(json_extract(attachment.value, '$.name') AS BLOB)) + 2)
+              FROM json_each(
+                CASE
+                  WHEN json_valid(message.attachments_json) THEN message.attachments_json
+                  ELSE '[]'
+                END
+              ) AS attachment
+              WHERE json_type(attachment.value, '$.name') = 'text'
+            ), 0)
+            + COALESCE((
+              SELECT SUM(
+                length(CAST(json_extract(record.value, '$.contextId') AS BLOB))
+                + length(CAST(json_extract(record.value, '$.kind') AS BLOB))
+                + length(CAST(json_extract(record.value, '$.label') AS BLOB))
+                + 8
+              )
+              FROM json_each(
+                CASE
+                  WHEN json_valid(message.context_json)
+                    THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
+                  ELSE json('[]')
+                END
+              ) AS record
+              WHERE json_type(record.value, '$.contextId') = 'text'
+                AND json_type(record.value, '$.kind') = 'text'
+                AND json_type(record.value, '$.label') = 'text'
+            ), 0)
+            + 64
+          ), 0) AS "payloadBytes"
+        FROM projection_thread_messages AS message
+        WHERE message.thread_id = ${threadId}
+          AND message.role != 'system'
+          ${forkHistoryOnly === true ? sql`AND message.message_id GLOB 'fork-history:*'` : sql``}
+      `,
+  });
+
+  const getReadableThreadMessageStatsThrough = SqlSchema.findOne({
+    Request: ThreadMessageEndpointLookupInput,
+    Result: ProjectionReadableThreadStatsDbRowSchema,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        WITH endpoint AS (
+          SELECT created_at AS "createdAt", message_id AS "messageId"
+          FROM projection_thread_messages
+          WHERE thread_id = ${threadId} AND message_id = ${messageId}
+          LIMIT 1
+        )
+        SELECT
+          COUNT(*) AS "messageCount",
+          COALESCE(SUM(
+            length(CAST(message.text AS BLOB))
+            + COALESCE((
+              SELECT SUM(length(CAST(json_extract(attachment.value, '$.name') AS BLOB)) + 2)
+              FROM json_each(
+                CASE
+                  WHEN json_valid(message.attachments_json) THEN message.attachments_json
+                  ELSE '[]'
+                END
+              ) AS attachment
+              WHERE json_type(attachment.value, '$.name') = 'text'
+            ), 0)
+            + COALESCE((
+              SELECT SUM(
+                length(CAST(json_extract(record.value, '$.contextId') AS BLOB))
+                + length(CAST(json_extract(record.value, '$.kind') AS BLOB))
+                + length(CAST(json_extract(record.value, '$.label') AS BLOB))
+                + 8
+              )
+              FROM json_each(
+                CASE
+                  WHEN json_valid(message.context_json)
+                    THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
+                  ELSE json('[]')
+                END
+              ) AS record
+              WHERE json_type(record.value, '$.contextId') = 'text'
+                AND json_type(record.value, '$.kind') = 'text'
+                AND json_type(record.value, '$.label') = 'text'
+            ), 0)
+            + 64
+          ), 0) AS "payloadBytes"
+        FROM projection_thread_messages AS message
+        CROSS JOIN endpoint
+        WHERE message.thread_id = ${threadId}
+          AND message.role != 'system'
+          AND (
+            message.created_at < endpoint."createdAt"
+            OR (
+              message.created_at = endpoint."createdAt"
+              AND message.message_id <= endpoint."messageId"
+            )
+          )
+      `,
+  });
+
+  const getForkSelectedTurnRow = SqlSchema.findOneOption({
+    Request: Schema.Struct({ threadId: ThreadId, messageId: MessageId }),
+    Result: ProjectionForkSelectedTurnDbRowSchema,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        SELECT turns.state, turns.assistant_message_id AS "assistantMessageId"
+        FROM projection_thread_messages AS message
+        INNER JOIN projection_turns AS turns
+          ON turns.thread_id = message.thread_id AND turns.turn_id = message.turn_id
+        WHERE message.thread_id = ${threadId}
+          AND message.message_id = ${messageId}
+        LIMIT 1
+      `,
+  });
+
+  const getCompletedTurnExistsRow = SqlSchema.findOne({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionCompletedTurnExistsDbRowSchema,
+    execute: ({ threadId }) => sql`
+      SELECT EXISTS(
+        SELECT 1
+        FROM projection_turns
+        WHERE thread_id = ${threadId} AND state = 'completed'
+      ) AS "exists"
+    `,
   });
 
   const getThreadRuntimeContextRow = SqlSchema.findOneOption({
@@ -2260,6 +2621,7 @@ pending_approval_requests AS (
                 pinOrderKey: row.pinOrderKey ?? null,
                 activeOrderKey: row.activeOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                ...mapForkedFrom(row),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2504,6 +2866,7 @@ pending_approval_requests AS (
                   pinOrderKey: row.pinOrderKey ?? null,
                   activeOrderKey: row.activeOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  ...mapForkedFrom(row),
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2659,6 +3022,7 @@ pending_approval_requests AS (
                         pinOrderKey: row.pinOrderKey ?? null,
                         activeOrderKey: row.activeOrderKey ?? null,
                         titleRegeneration: mapTitleRegeneration(row),
+                        ...mapForkedFrom(row),
                         session: sessionByThread.get(row.threadId) ?? null,
                         latestUserMessageAt: row.latestUserMessageAt,
                         hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2821,6 +3185,7 @@ pending_approval_requests AS (
                   pinOrderKey: row.pinOrderKey ?? null,
                   activeOrderKey: row.activeOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  ...mapForkedFrom(row),
                   session: sessionByThread.get(row.threadId) ?? null,
                   latestUserMessageAt: row.latestUserMessageAt,
                   hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -3104,6 +3469,225 @@ pending_approval_requests AS (
       });
     });
 
+  const readThreadTranscriptSource = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const threadRow = yield* getThreadRowIncludingArchivedById({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadTranscriptSource:getThread:query",
+          "ProjectionSnapshotQuery.getThreadTranscriptSource:getThread:decodeRow",
+        ),
+      ),
+    );
+    if (Option.isNone(threadRow)) {
+      return { overLimit: false as const, source: Option.none<ProjectionThreadTranscriptSource>() };
+    }
+    const stats = yield* getReadableThreadMessageStats({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadTranscriptSource:getStats:query",
+          "ProjectionSnapshotQuery.getThreadTranscriptSource:getStats:decodeRow",
+        ),
+      ),
+    );
+    if (stats.payloadBytes > THREAD_TRANSCRIPT_MAX_BYTES) {
+      return { overLimit: true as const };
+    }
+    const messageRows = yield* listReadableThreadMessageRows({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getThreadTranscriptSource:listMessages:query",
+          "ProjectionSnapshotQuery.getThreadTranscriptSource:listMessages:decodeRows",
+        ),
+      ),
+    );
+    return {
+      overLimit: false as const,
+      source: Option.some({
+        threadId: threadRow.value.threadId,
+        title: threadRow.value.title,
+        messages: mapReadableThreadMessages(messageRows),
+      }),
+    };
+  });
+
+  const transactionError = (operation: string) => (error: unknown) =>
+    isPersistenceError(error) ? error : toPersistenceSqlError(operation)(error);
+
+  const getThreadTranscriptSource: ProjectionSnapshotQueryShape["getThreadTranscriptSource"] = (
+    threadId,
+  ) =>
+    sql
+      .withTransaction(readThreadTranscriptSource(threadId))
+      .pipe(
+        Effect.mapError(
+          transactionError("ProjectionSnapshotQuery.getThreadTranscriptSource:transaction"),
+        ),
+      );
+
+  const getThreadForkSource: ProjectionSnapshotQueryShape["getThreadForkSource"] = (input) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const [threadRow, selectedTurn, session, latestTurn] = yield* Effect.all([
+            getThreadRowIncludingArchivedById({ threadId: input.threadId }),
+            getForkSelectedTurnRow(input),
+            getThreadSessionRowByThread({ threadId: input.threadId }),
+            getLatestTurnRowByThread({ threadId: input.threadId }),
+          ]).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getThreadForkSource:query",
+                "ProjectionSnapshotQuery.getThreadForkSource:decode",
+              ),
+            ),
+          );
+          if (Option.isNone(threadRow)) {
+            return {
+              overLimit: false as const,
+              source: Option.none<ProjectionThreadForkSource>(),
+            };
+          }
+          const stats = yield* getReadableThreadMessageStatsThrough(input).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getThreadForkSource:getStats:query",
+                "ProjectionSnapshotQuery.getThreadForkSource:getStats:decode",
+              ),
+            ),
+          );
+          if (
+            stats.messageCount > THREAD_FORK_MAX_MESSAGES ||
+            stats.payloadBytes > THREAD_FORK_MAX_BYTES
+          ) {
+            return { overLimit: true as const };
+          }
+          const messageRows = yield* listReadableThreadMessageRowsThrough(input).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getThreadForkSource:listMessages:query",
+                "ProjectionSnapshotQuery.getThreadForkSource:listMessages:decode",
+              ),
+            ),
+          );
+          const sessionBusy =
+            Option.isSome(session) &&
+            (session.value.status === "starting" || session.value.status === "running");
+          const latestTurnBusy =
+            Option.isSome(latestTurn) &&
+            (latestTurn.value.state === "pending" || latestTurn.value.state === "running");
+          return {
+            overLimit: false as const,
+            source: Option.some({
+              threadId: threadRow.value.threadId,
+              projectId: threadRow.value.projectId,
+              title: threadRow.value.title,
+              modelSelection: threadRow.value.modelSelection,
+              runtimeMode: threadRow.value.runtimeMode,
+              interactionMode: threadRow.value.interactionMode,
+              branch: threadRow.value.branch,
+              worktreePath: threadRow.value.worktreePath,
+              archivedAt: threadRow.value.archivedAt,
+              messages: mapReadableThreadMessages(messageRows),
+              selectedTurn: Option.getOrNull(selectedTurn),
+              busy:
+                sessionBusy ||
+                latestTurnBusy ||
+                threadRow.value.pendingApprovalCount > 0 ||
+                threadRow.value.pendingUserInputCount > 0 ||
+                threadBackgroundLiveness.getThreadBackgroundLiveness(input.threadId) !== null,
+            }),
+          };
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          transactionError("ProjectionSnapshotQuery.getThreadForkSource:transaction"),
+        ),
+      );
+
+  const getPendingForkHandoffSource: ProjectionSnapshotQueryShape["getPendingForkHandoffSource"] = (
+    threadId,
+  ) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const row = yield* getThreadRowIncludingArchivedById({ threadId }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getThread:query",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getThread:decode",
+              ),
+            ),
+          );
+          if (
+            Option.isNone(row) ||
+            row.value.archivedAt !== null ||
+            row.value.forkSourceThreadId == null ||
+            row.value.forkSourceMessageId == null
+          ) {
+            return {
+              overLimit: false as const,
+              source: Option.none<ProjectionThreadTranscriptSource>(),
+            };
+          }
+          const completedTurn = yield* getCompletedTurnExistsRow({ threadId }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getCompletedTurn:query",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getCompletedTurn:decodeRow",
+              ),
+            ),
+          );
+          if (completedTurn.exists === 1) {
+            return {
+              overLimit: false as const,
+              source: Option.none<ProjectionThreadTranscriptSource>(),
+            };
+          }
+          const stats = yield* getReadableThreadMessageStats({
+            threadId,
+            forkHistoryOnly: true,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getStats:query",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getStats:decodeRow",
+              ),
+            ),
+          );
+          if (
+            stats.messageCount > THREAD_FORK_MAX_MESSAGES ||
+            stats.payloadBytes > THREAD_FORK_MAX_BYTES
+          ) {
+            return { overLimit: true as const };
+          }
+          const messages = yield* listReadableThreadMessageRows({
+            threadId,
+            forkHistoryOnly: true,
+          }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:listMessages:query",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:listMessages:decodeRows",
+              ),
+            ),
+          );
+          return {
+            overLimit: false as const,
+            source: Option.some({
+              threadId: row.value.threadId,
+              title: row.value.title,
+              messages: mapReadableThreadMessages(messages),
+            }),
+          };
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          transactionError("ProjectionSnapshotQuery.getPendingForkHandoffSource:transaction"),
+        ),
+      );
+
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
     Effect.gen(function* () {
       const [threadRow, latestTurnRow, sessionRow, pullRequestRows] = yield* Effect.all([
@@ -3176,6 +3760,7 @@ pending_approval_requests AS (
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        ...mapForkedFrom(threadRow.value),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
@@ -3475,6 +4060,7 @@ pending_approval_requests AS (
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        ...mapForkedFrom(threadRow.value),
         deletedAt: null,
         messages: messageRows.map((row) => {
           const message = {
@@ -3674,6 +4260,9 @@ pending_approval_requests AS (
       );
 
   return {
+    getThreadTranscriptSource,
+    getThreadForkSource,
+    getPendingForkHandoffSource,
     getCommandReadModel,
     getUserInputActivity,
     getSnapshot,

@@ -12,6 +12,8 @@ import {
   TurnId,
   ProviderInstanceId,
   OrchestrationMessageContext,
+  THREAD_FORK_MAX_MESSAGES,
+  THREAD_TRANSCRIPT_MAX_BYTES,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -3407,6 +3409,253 @@ projectionSnapshotLayer("ProjectionSnapshotQuery imported sources", (it) => {
         WHERE thread_id = ${imported.threadId}
       `;
       assert.deepEqual(yield* query.getImportedAgentSessionSources(projectId), [imported, valid]);
+    }),
+  );
+});
+
+projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => {
+  it.effect("reads archived transcript and terminal fork sources without hydrating payloads", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('fork-project', 'Project', '/tmp/fork', '[]', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+         branch, worktree_path, archived_at, created_at, updated_at)
+        VALUES ('fork-source', 'fork-project', 'Source', '{"instanceId":"codex","model":"gpt-5"}',
+          'full-access', 'default', 'feature', '/tmp/fork-worktree', '2026-09-12T00:05:00Z',
+          '2026-09-12T00:00:00Z', '2026-09-12T00:05:00Z')`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, turn_id, role, text, attachments_json, context_json,
+         is_streaming, created_at, updated_at)
+        VALUES
+        ('question', 'fork-source', 'turn-1', 'user', 'See [file](t3-context://v1/file/context-1)',
+          '[{"type":"file","id":"secret-attachment-id","name":"README.md","mimeType":"text/plain","sizeBytes":10}]',
+          '{"version":1,"records":[{"version":1,"contextId":"context-1","kind":"file","label":"file","attachmentId":"secret-attachment-id","name":"README.md","mimeType":"text/plain","sizeBytes":10}]}',
+          0, '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z'),
+        ('answer', 'fork-source', 'turn-1', 'assistant', 'Done', NULL, NULL, 0,
+          '2026-09-12T00:02:00Z', '2026-09-12T00:02:00Z')`;
+      yield* sql`INSERT INTO projection_turns
+        (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
+         started_at, completed_at, checkpoint_files_json)
+        VALUES ('fork-source', 'turn-1', 'question', 'answer', 'completed',
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', '2026-09-12T00:02:00Z', '[]')`;
+
+      const transcriptResult = yield* query.getThreadTranscriptSource(ThreadId.make("fork-source"));
+      assert.isFalse(transcriptResult.overLimit);
+      if (transcriptResult.overLimit) return;
+      const transcript = Option.getOrThrow(transcriptResult.source);
+      assert.equal(transcript.title, "Source");
+      assert.deepEqual(
+        transcript.messages.map(({ id }) => id),
+        [MessageId.make("question"), MessageId.make("answer")],
+      );
+      assert.deepEqual(transcript.messages[0]?.attachments, [{ name: "README.md" }]);
+      assert.deepEqual(transcript.messages[0]?.context?.records, [
+        { contextId: "context-1", kind: "file", label: "file" },
+      ]);
+
+      const forkResult = yield* query.getThreadForkSource({
+        threadId: ThreadId.make("fork-source"),
+        messageId: MessageId.make("answer"),
+      });
+      assert.isFalse(forkResult.overLimit);
+      if (forkResult.overLimit) return;
+      const fork = Option.getOrThrow(forkResult.source);
+      assert.equal(fork.archivedAt, "2026-09-12T00:05:00Z");
+      assert.deepEqual(fork.selectedTurn, {
+        state: "completed",
+        assistantMessageId: MessageId.make("answer"),
+      });
+      assert.isFalse(fork.busy);
+    }),
+  );
+
+  it.effect("returns destination-owned handoff until a provider turn completes", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('handoff-project', 'Project', '/tmp/handoff', '[]', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+         fork_source_thread_id, fork_source_message_id, created_at, updated_at)
+        VALUES ('handoff-thread', 'handoff-project', 'Fork', '{"instanceId":"codex","model":"gpt-5"}',
+          'full-access', 'default', 'source', 'answer', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('fork-history:handoff-thread:0000', 'handoff-thread', NULL, 'assistant', 'Inherited', 0,
+          '2026-09-11T00:00:00Z', '2026-09-11T00:00:00Z')`;
+
+      const handoff = yield* query.getPendingForkHandoffSource(ThreadId.make("handoff-thread"));
+      assert.isFalse(handoff.overLimit);
+      if (handoff.overLimit) return;
+      assert.equal(Option.getOrThrow(handoff.source).messages[0]?.text, "Inherited");
+      yield* sql`UPDATE projection_threads
+        SET latest_user_message_at = '2026-09-12T00:01:00Z'
+        WHERE thread_id = 'handoff-thread'`;
+      yield* sql`WITH RECURSIVE sequence(value) AS (
+          SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 399
+        )
+        INSERT INTO projection_thread_messages
+          (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        SELECT printf('fork-history:handoff-thread:%04d', value), 'handoff-thread', 'user',
+          'Inherited', 0, '2026-09-11T00:00:00Z', '2026-09-11T00:00:00Z'
+        FROM sequence`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('message-first', 'handoff-thread', 'turn-first', 'user', 'Try once', 0,
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z')`;
+      yield* sql`INSERT INTO projection_turns
+        (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
+         started_at, completed_at, checkpoint_files_json)
+        VALUES ('handoff-thread', 'turn-first', 'message-first', NULL, 'error',
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', NULL, '[]')`;
+      const afterFailedTurn = yield* query.getPendingForkHandoffSource(
+        ThreadId.make("handoff-thread"),
+      );
+      assert.isFalse(afterFailedTurn.overLimit);
+      if (afterFailedTurn.overLimit) return;
+      assert.equal(Option.getOrThrow(afterFailedTurn.source).messages[0]?.text, "Inherited");
+      assert.lengthOf(Option.getOrThrow(afterFailedTurn.source).messages, 400);
+      assert.notInclude(
+        Option.getOrThrow(afterFailedTurn.source).messages.map(({ id }) => id),
+        MessageId.make("message-first"),
+      );
+
+      yield* sql`UPDATE projection_turns
+        SET state = 'completed', assistant_message_id = 'answer-first',
+          completed_at = '2026-09-12T00:03:00Z'
+        WHERE thread_id = 'handoff-thread' AND turn_id = 'turn-first'`;
+      const consumed = yield* query.getPendingForkHandoffSource(ThreadId.make("handoff-thread"));
+      assert.isFalse(consumed.overLimit);
+      if (consumed.overLimit) return;
+      assert.equal(consumed.source._tag, "None");
+    }),
+  );
+
+  it.effect("rejects an oversized transcript before hydrating message text", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('large-transcript-project', 'Project', '/tmp/large', '[]',
+          '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+         created_at, updated_at)
+        VALUES ('large-transcript', 'large-transcript-project', 'Large',
+          '{"instanceId":"codex","model":"gpt-5"}', 'full-access', 'default',
+          '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('large-message', 'large-transcript', 'user',
+          lower(hex(zeroblob(${Math.ceil((THREAD_TRANSCRIPT_MAX_BYTES + 1) / 2)}))), 0,
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z')`;
+
+      assert.deepEqual(yield* query.getThreadTranscriptSource(ThreadId.make("large-transcript")), {
+        overLimit: true,
+      });
+    }),
+  );
+
+  it.effect("bounds a fork through the selected response without reading a large tail", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('bounded-fork-project', 'Project', '/tmp/bounded-fork', '[]',
+          '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+         created_at, updated_at)
+        VALUES ('bounded-fork', 'bounded-fork-project', 'Fork',
+          '{"instanceId":"codex","model":"gpt-5"}', 'full-access', 'default',
+          '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES
+          ('bounded-question', 'bounded-fork', 'bounded-turn', 'user', 'Question', 0,
+            '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z'),
+          ('bounded-answer', 'bounded-fork', 'bounded-turn', 'assistant', 'Answer', 0,
+            '2026-09-12T00:02:00Z', '2026-09-12T00:02:00Z'),
+          ('oversized-tail', 'bounded-fork', NULL, 'assistant',
+            lower(hex(zeroblob(${Math.ceil((THREAD_TRANSCRIPT_MAX_BYTES + 1) / 2)}))), 0,
+            '2026-09-12T00:03:00Z', '2026-09-12T00:03:00Z')`;
+      yield* sql`INSERT INTO projection_turns
+        (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
+         started_at, completed_at, checkpoint_files_json)
+        VALUES ('bounded-fork', 'bounded-turn', 'bounded-question', 'bounded-answer', 'completed',
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', '2026-09-12T00:02:00Z', '[]')`;
+
+      const result = yield* query.getThreadForkSource({
+        threadId: ThreadId.make("bounded-fork"),
+        messageId: MessageId.make("bounded-answer"),
+      });
+      assert.isFalse(result.overLimit);
+      if (result.overLimit) return;
+      assert.deepEqual(
+        Option.getOrThrow(result.source).messages.map(({ id }) => id),
+        [MessageId.make("bounded-question"), MessageId.make("bounded-answer")],
+      );
+    }),
+  );
+
+  it.effect("rejects over-limit fork and pending handoff message counts", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('count-project', 'Project', '/tmp/count', '[]',
+          '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+         fork_source_thread_id, fork_source_message_id, created_at, updated_at)
+        VALUES ('count-fork', 'count-project', 'Source',
+          '{"instanceId":"codex","model":"gpt-5"}', 'full-access', 'default', NULL, NULL,
+          '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z'),
+          ('count-handoff', 'count-project', 'Handoff',
+          '{"instanceId":"codex","model":"gpt-5"}', 'full-access', 'default',
+          'count-fork', 'count-answer', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
+      yield* sql`WITH RECURSIVE sequence(value) AS (
+          SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ${THREAD_FORK_MAX_MESSAGES}
+        )
+        INSERT INTO projection_thread_messages
+          (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        SELECT printf('count-%03d', value), 'count-fork', 'user', 'history', 0,
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z'
+        FROM sequence`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('count-answer', 'count-fork', 'count-turn', 'assistant', 'Answer', 0,
+          '2026-09-12T00:02:00Z', '2026-09-12T00:02:00Z')`;
+      yield* sql`INSERT INTO projection_turns
+        (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
+         started_at, completed_at, checkpoint_files_json)
+        VALUES ('count-fork', 'count-turn', NULL, 'count-answer', 'completed',
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', '2026-09-12T00:02:00Z', '[]')`;
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        SELECT 'fork-history:count-handoff:' || message_id, 'count-handoff', role, text, 0,
+          created_at, updated_at
+        FROM projection_thread_messages WHERE thread_id = 'count-fork'`;
+
+      assert.deepEqual(
+        yield* query.getThreadForkSource({
+          threadId: ThreadId.make("count-fork"),
+          messageId: MessageId.make("count-answer"),
+        }),
+        { overLimit: true },
+      );
+      assert.deepEqual(yield* query.getPendingForkHandoffSource(ThreadId.make("count-handoff")), {
+        overLimit: true,
+      });
     }),
   );
 });

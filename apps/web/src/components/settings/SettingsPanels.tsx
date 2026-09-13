@@ -160,6 +160,9 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
+import { CustomPromptsSettings } from "./CustomPromptsSettings";
+import { T3DesktopMigrationSettings } from "../onboarding/T3DesktopMigration";
+import { getT3DesktopMigrationBridge } from "../onboarding/T3DesktopMigration.logic";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -2073,6 +2076,9 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
+  const supportsCustomPrompts =
+    isEnvironmentScope &&
+    environment?.serverConfig?.environment.capabilities.customPrompts === true;
 
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
@@ -2125,6 +2131,10 @@ export function GeneralSettingsPanel() {
     settings.backgroundActivity,
     DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
   );
+  const canSwitchFromT3Code =
+    getT3DesktopMigrationBridge(
+      typeof window === "undefined" ? undefined : window.desktopBridge,
+    ) !== undefined;
 
   return (
     <SettingsPageContainer>
@@ -2247,6 +2257,15 @@ export function GeneralSettingsPanel() {
           </>
         ) : null}
       </SettingsSection>
+
+      {supportsCustomPrompts ? (
+        <SettingsSection id="custom-prompts" title="Custom prompts">
+          <CustomPromptsSettings
+            prompts={settings.customPrompts}
+            onChange={(customPrompts) => updateSettings({ customPrompts })}
+          />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection id="behavior" title="Behavior">
         <NotificationSettings />
@@ -2930,6 +2949,16 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+
+      {canSwitchFromT3Code ? (
+        <SettingsSection id="t3-code-switch" title="T3 Code">
+          <SettingsRow
+            title="Switch from T3 Code"
+            description="Move this Mac’s supported T3 Code workspace into Hotlap once."
+            control={<T3DesktopMigrationSettings />}
+          />
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection id="about" title="About">
         {isElectron || HOSTED_APP_CHANNEL ? (

@@ -24,6 +24,19 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("replaces and reorders the environment custom prompt library atomically", () => {
+    const first = { id: "first", title: "First", prompt: "First prompt" };
+    const second = { id: "second", title: "Second", prompt: "Second prompt" };
+    const saved = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      customPrompts: [first, second],
+    });
+
+    expect(
+      applyServerSettingsPatch(saved, { customPrompts: [second, first] }).customPrompts,
+    ).toEqual([second, first]);
+    expect(applyServerSettingsPatch(saved, { customPrompts: [] }).customPrompts).toEqual([]);
+  });
+
   it("replaces SSH host lists when saving, editing, and removing hosts", () => {
     const host = { id: "mini", label: "Mac mini", target: "mini" };
     const saved = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { deviceHosts: [host] });

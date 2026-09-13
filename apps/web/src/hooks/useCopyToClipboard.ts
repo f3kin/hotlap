@@ -51,6 +51,66 @@ export class ClipboardReadError extends Schema.TaggedError<ClipboardReadError>()
   }
 }
 
+export interface DeferredTextClipboardWrite {
+  readonly commit: (value: string) => Promise<boolean>;
+  readonly cancel: (cause?: unknown) => void;
+}
+
+/** Reserve transient clipboard permission while the initiating user gesture is still active. */
+export function beginDeferredTextClipboardWrite(
+  target = "text",
+): DeferredTextClipboardWrite | null {
+  if (
+    typeof window === "undefined" ||
+    typeof navigator === "undefined" ||
+    typeof navigator.clipboard?.write !== "function" ||
+    typeof ClipboardItem === "undefined"
+  ) {
+    return null;
+  }
+
+  let resolvePayload: (value: Blob) => void;
+  let rejectPayload: (cause?: unknown) => void;
+  const payload = new Promise<Blob>((resolve, reject) => {
+    resolvePayload = resolve;
+    rejectPayload = reject;
+  });
+  let write: Promise<boolean>;
+  try {
+    write = navigator.clipboard.write([new ClipboardItem({ "text/plain": payload })]).then(
+      () => true,
+      (cause: unknown) => {
+        throw new ClipboardWriteError({ target, cause });
+      },
+    );
+  } catch {
+    return null;
+  }
+  // A failed transcript request cancels the browser write before callers await it.
+  void write.catch(() => undefined);
+
+  let settled = false;
+  const cancel = (cause: unknown = new Error("Deferred clipboard write cancelled.")) => {
+    if (settled) return;
+    settled = true;
+    rejectPayload(cause);
+  };
+  return {
+    commit: (value) => {
+      if (!value) {
+        cancel();
+        return Promise.resolve(false);
+      }
+      if (!settled) {
+        settled = true;
+        resolvePayload(new Blob([value], { type: "text/plain" }));
+      }
+      return write;
+    },
+    cancel,
+  };
+}
+
 /** Copy fallback for remote web pages served over plain HTTP. */
 function writeTextWithExecCommand(
   value: string,

@@ -91,6 +91,10 @@ describe("applyThreadDetailEvent", () => {
           interactionMode: "default",
           branch: "main",
           worktreePath: null,
+          forkedFrom: {
+            threadId: ThreadId.make("thread-source"),
+            messageId: MessageId.make("assistant-source"),
+          },
           createdAt: "2026-04-01T01:00:00.000Z",
           updatedAt: "2026-04-01T01:00:00.000Z",
         },
@@ -101,6 +105,10 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.id).toBe("thread-2");
         expect(result.thread.title).toBe("New Thread");
         expect(result.thread.branch).toBe("main");
+        expect(result.thread.forkedFrom).toEqual({
+          threadId: "thread-source",
+          messageId: "assistant-source",
+        });
         expect(result.thread.messages).toEqual([]);
         expect(result.thread.session).toBeNull();
       }

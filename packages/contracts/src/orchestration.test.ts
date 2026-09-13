@@ -577,6 +577,38 @@ it.effect("decodes thread.created runtime mode for historical events", () =>
   }),
 );
 
+it.effect("decodes a capability-gated thread fork command and durable lineage", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.fork",
+      commandId: "command-fork",
+      threadId: "thread-fork",
+      sourceThreadId: "thread-source",
+      sourceMessageId: "message-answer",
+      createdAt: "2026-09-12T00:00:00.000Z",
+    });
+    assert.strictEqual(command.type, "thread.fork");
+
+    const created = yield* decodeThreadCreatedPayload({
+      threadId: "thread-fork",
+      projectId: "project-1",
+      title: "Source (fork)",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: "main",
+      worktreePath: null,
+      forkedFrom: { threadId: "thread-source", messageId: "message-answer" },
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+    });
+    assert.deepStrictEqual(created.forkedFrom, {
+      threadId: "thread-source",
+      messageId: "message-answer",
+    });
+  }),
+);
+
 it.effect("decodes thread.meta-updated payloads with explicit provider", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadMetaUpdatedPayload({

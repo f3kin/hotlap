@@ -5,18 +5,31 @@ import {
   useNavigation,
   type StaticScreenProps,
 } from "@react-navigation/native";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import * as Option from "effect/Option";
+import type { MenuAction } from "@react-native-menu/menu";
 import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  type MessageId,
   ThreadId,
   type ProjectScript,
 } from "@t3tools/contracts";
 import {
+  deriveForkableAssistantMessageIds,
   requestOlderThreadTurns,
   threadHasOlderTurns,
+  waitForSynchronizedValue,
 } from "@t3tools/client-runtime/state/threads";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   projectScriptCwd,
   projectScriptRuntimeEnv,
@@ -34,6 +47,7 @@ import { vcsEnvironment } from "../../state/vcs";
 
 import { EmptyState } from "../../components/EmptyState";
 import {
+  AndroidHeaderIconButton,
   AndroidScreenHeader,
   type AndroidHeaderAction,
 } from "../../components/AndroidScreenHeader";
@@ -74,7 +88,19 @@ import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-s
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
-import { threadEnvironment } from "../../state/threads";
+import {
+  copyThreadTranscript,
+  environmentThreadShells,
+  threadEnvironment,
+} from "../../state/threads";
+import { appAtomRegistry } from "../../state/atom-registry";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { uuidv4 } from "../../lib/uuid";
+import { ControlPillMenu } from "../../components/ControlPill";
+import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
@@ -214,6 +240,10 @@ function ThreadRouteContent(
   } = useThreadSelection();
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
+  const forkableAssistantMessageIds = useMemo(
+    () => deriveForkableAssistantMessageIds(selectedThreadDetail?.checkpoints ?? []),
+    [selectedThreadDetail?.checkpoints],
+  );
   // "Load earlier turns" header state for windowed (paginated) thread loads.
   const loadEarlierTurns = useMemo(() => {
     if (selectedThread === null || !threadHasOlderTurns(selectedThreadDetailState)) {
@@ -234,6 +264,13 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
+  const loadThreadTranscript = useAtomCommand(copyThreadTranscript, { reportFailure: false });
+  const forkWaitAbortRef = useRef<AbortController | null>(null);
+  const cancelPendingFork = useCallback(() => {
+    forkWaitAbortRef.current?.abort();
+    forkWaitAbortRef.current = null;
+  }, []);
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
@@ -241,6 +278,7 @@ function ThreadRouteContent(
   const threadId = firstRouteParam(params.threadId);
   const routeThreadIdentity =
     environmentIdRaw !== null && threadId !== null ? `${environmentIdRaw}:${threadId}` : null;
+  const forkRouteIdentityRef = useRef(routeThreadIdentity);
   const [inspectorSelection, setInspectorSelection] = useState<ThreadInspectorSelection | null>(
     () => (props.renderInspector ? { routeThreadIdentity, mode: "route" } : null),
   );
@@ -290,6 +328,7 @@ function ThreadRouteContent(
   useFocusEffect(
     useCallback(() => {
       return () => {
+        cancelPendingFork();
         if (props.renderInspector === undefined) {
           // Inspectors are contextual to this chat destination. Clear the
           // hidden chat copy after a native push so returning from Files,
@@ -297,8 +336,15 @@ function ThreadRouteContent(
           setInspectorSelection(null);
         }
       };
-    }, [props.renderInspector]),
+    }, [cancelPendingFork, props.renderInspector]),
   );
+  // Abort during the route commit. A passive effect leaves a window where the
+  // old fork promise can settle and navigate from the newly selected thread.
+  useLayoutEffect(() => {
+    if (forkRouteIdentityRef.current === routeThreadIdentity) return;
+    forkRouteIdentityRef.current = routeThreadIdentity;
+    cancelPendingFork();
+  }, [cancelPendingFork, routeThreadIdentity]);
   const routeEnvironmentRuntime = useRemoteEnvironmentRuntime(environmentId);
   const routeConnectionState =
     routeEnvironmentRuntime?.connectionState ?? (environmentId ? "available" : connectionState);
@@ -315,6 +361,96 @@ function ThreadRouteContent(
         : null,
     [composer.interactionMode, composer.modelSelection, composer.runtimeMode, selectedThread],
   );
+  const canForkConversation =
+    routeEnvironmentRuntime?.serverConfig?.environment.capabilities.threadForking === true &&
+    selectedThread !== null &&
+    selectedThread.session?.status !== "running" &&
+    selectedThread.session?.status !== "starting" &&
+    !selectedThread.hasPendingApprovals &&
+    !selectedThread.hasPendingUserInput &&
+    selectedThread.backgroundLiveness == null;
+  const supportsTranscriptExport =
+    routeEnvironmentRuntime?.serverConfig?.environment.capabilities.threadTranscriptExport ===
+      true && selectedThread !== null;
+  const handleForkAssistantMessage = useCallback(
+    async (sourceMessageId: MessageId) => {
+      if (!canForkConversation || selectedThread === null) return;
+      const destinationThreadId = ThreadId.make(uuidv4());
+      cancelPendingFork();
+      const forkWaitAbort = new AbortController();
+      forkWaitAbortRef.current = forkWaitAbort;
+      const result = await forkThread({
+        environmentId: selectedThread.environmentId,
+        input: {
+          threadId: destinationThreadId,
+          sourceThreadId: selectedThread.id,
+          sourceMessageId,
+          createdAt: new Date().toISOString(),
+        },
+      });
+      if (forkWaitAbort.signal.aborted) return;
+      if (result._tag === "Failure") {
+        if (forkWaitAbortRef.current === forkWaitAbort) forkWaitAbortRef.current = null;
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          Alert.alert(
+            "Couldn’t fork conversation",
+            error instanceof Error ? error.message : "An error occurred.",
+          );
+        }
+        return;
+      }
+      const destinationThreadRef = scopeThreadRef(
+        selectedThread.environmentId,
+        destinationThreadId,
+      );
+      const destinationThreadAtom = environmentThreadShells.threadShellAtom(destinationThreadRef);
+      const forkSynced = await waitForSynchronizedValue({
+        read: () => appAtomRegistry.get(destinationThreadAtom),
+        subscribe: (listener) => appAtomRegistry.subscribe(destinationThreadAtom, listener),
+        isReady: (thread) => thread !== null,
+        timeoutMs: 10_000,
+        signal: forkWaitAbort.signal,
+      });
+      if (forkWaitAbortRef.current === forkWaitAbort) forkWaitAbortRef.current = null;
+      if (forkWaitAbort.signal.aborted) return;
+      if (!forkSynced) {
+        Alert.alert(
+          "Fork created but not ready",
+          "The new conversation has not finished syncing yet.",
+        );
+        return;
+      }
+      navigation.navigate("Thread", {
+        environmentId: String(selectedThread.environmentId),
+        threadId: String(destinationThreadId),
+      });
+    },
+    [canForkConversation, cancelPendingFork, forkThread, navigation, selectedThread],
+  );
+  const handleCopyTranscript = useCallback(async () => {
+    if (!supportsTranscriptExport || selectedThread === null) return;
+    const result = await loadThreadTranscript({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id },
+    });
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        Alert.alert(
+          "Couldn’t copy transcript",
+          error instanceof Error ? error.message : "An error occurred.",
+        );
+      }
+      return;
+    }
+    const copied = await tryCopyTextWithHaptic(result.value.markdown, {
+      target: "thread transcript",
+    });
+    if (!copied) {
+      Alert.alert("Couldn’t copy transcript", "The clipboard is unavailable.");
+    }
+  }, [loadThreadTranscript, selectedThread, supportsTranscriptExport]);
 
   /* ─── Native header theming ──────────────────────────────────────── */
   const usesNativeHeaderGlass = NATIVE_LIQUID_GLASS_SUPPORTED;
@@ -662,6 +798,48 @@ function ThreadRouteContent(
   };
   const threadCenterHeaderItems = useThreadGitCenterHeaderItems(threadGitControlProps);
   const compactRightHeaderItems = useThreadGitRightHeaderItems(threadGitControlProps);
+  const transcriptHeaderItems = useMemo<NativeHeaderItems>(
+    () =>
+      supportsTranscriptExport
+        ? [
+            withNativeGlassHeaderItem({
+              accessibilityLabel: "Thread actions",
+              icon: { name: "ellipsis", type: "sfSymbol" as const },
+              identifier: "thread-right-actions",
+              label: "",
+              menu: {
+                title: "Thread actions",
+                items: [
+                  {
+                    description: "Copy the complete readable chat",
+                    icon: { name: "doc.on.doc", type: "sfSymbol" as const },
+                    label: "Copy transcript",
+                    onPress: () => void handleCopyTranscript(),
+                    type: "action" as const,
+                  },
+                ],
+              },
+              type: "menu" as const,
+            }),
+          ]
+        : [],
+    [handleCopyTranscript, supportsTranscriptExport],
+  );
+  const androidTranscriptActions = useMemo<MenuAction[]>(
+    () =>
+      supportsTranscriptExport
+        ? [{ id: "copy-transcript", title: "Copy transcript", image: "doc.on.doc" }]
+        : [],
+    [supportsTranscriptExport],
+  );
+  const handleAndroidTranscriptAction = useCallback(
+    (event: { nativeEvent: { event: string } }) => {
+      if (event.nativeEvent.event === "copy-transcript") {
+        void handleCopyTranscript();
+      }
+    },
+    [handleCopyTranscript],
+  );
   const splitLeftHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       {
@@ -895,6 +1073,8 @@ function ThreadRouteContent(
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}
           onStopThread={handleStopThread}
+          forkableAssistantMessageIds={forkableAssistantMessageIds}
+          onForkAssistantMessage={canForkConversation ? handleForkAssistantMessage : undefined}
           onSendMessage={composer.onSendMessage}
           onReconnectEnvironment={handleReconnectEnvironment}
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}
@@ -914,7 +1094,7 @@ function ThreadRouteContent(
     <>
       {activeInspectorRenderer ? <InspectorPaneRoleActivation /> : null}
       <NativeStackScreenOptions
-        optionsVersion={threadGitControlProps.projectScripts}
+        optionsVersion={[threadGitControlProps.projectScripts, supportsTranscriptExport]}
         options={{
           // Android draws its own in-flow header (AndroidScreenHeader below);
           // the native stack header stays iOS-only.
@@ -944,7 +1124,10 @@ function ThreadRouteContent(
           // reserved for future breadcrumbs/status).
           unstable_headerRightItems:
             Platform.OS === "ios"
-              ? () => (layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems)
+              ? () => [
+                  ...(layout.usesSplitView ? threadCenterHeaderItems : compactRightHeaderItems),
+                  ...transcriptHeaderItems,
+                ]
               : undefined,
           unstable_headerSubtitle: usesNativeHeaderGlass ? headerSubtitle : undefined,
           contentStyle:
@@ -969,6 +1152,18 @@ function ThreadRouteContent(
                 }
           }
           actions={androidHeaderActions}
+          trailing={
+            androidTranscriptActions.length > 0 ? (
+              <ControlPillMenu
+                actions={androidTranscriptActions}
+                isAnchoredToRight
+                title="Thread actions"
+                onPressAction={handleAndroidTranscriptAction}
+              >
+                <AndroidHeaderIconButton accessibilityLabel="Thread actions" icon="ellipsis" />
+              </ControlPillMenu>
+            ) : undefined
+          }
           hideBottomBorder={materialYouStyleLayoutActive}
         />
       ) : null}

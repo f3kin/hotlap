@@ -1,70 +1,51 @@
-# T3 Code
+# Hotlap
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+Hotlap is a friends-and-family fork of [T3 Code](https://github.com/pingdotgg/t3code), the open-source control surface for coding agents. It is the same app with a different name and no hosted services: you run the server on your own machine, pair your phone and laptop to it over your LAN or Tailscale, and nothing phones home. Telemetry is off.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, Hotlap can control them.
 
-## "Wait, what are you selling me?"
+## Install
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+Install and sign in to at least one provider first:
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
+- Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
+- Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
+- Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
+- Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
+- OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
+- Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
 
-## Installation
+| Surface              | How                                                                                                                        |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Terminal, no install | `npx hotlap@latest` (Node.js 22.16+, 23.11+, or 24.10+). Starts the server and the local web app.                          |
+| macOS                | Download the DMG from [Releases](https://github.com/shwarmadev/hotlap/releases). Signed and notarized.                     |
+| Windows and Linux    | Installers on the same [Releases](https://github.com/shwarmadev/hotlap/releases) page.                                     |
+| iPhone               | TestFlight, link on the [Releases](https://github.com/shwarmadev/hotlap/releases) page once the first build clears review. |
+| Android              | Sideload the APK from [Releases](https://github.com/shwarmadev/hotlap/releases).                                           |
 
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
+Hotlap keeps its data in `~/.hotlap`, so it runs side by side with a T3 Code install.
 
-### Try it out (install-free)
+## Pair your phone or another machine
 
-The easiest way to test T3 Code is to run the server in your terminal (requires Node.js 22.16+, 23.11+, or 24.10+):
+On the machine that runs your agents, open **Settings → Connections** in the desktop app, enable **Network access**, and create a pairing link (or run `npx hotlap serve --host <tailnet-or-lan-ip>` and then `npx hotlap pair`). Scan the QR code with the phone app or paste the link into **Add environment** on another device. Over Tailscale this works from anywhere; over a LAN it works at home. Details in [Remote access](./docs/user/remote-access.md). There is no hosted relay, so the "T3 Connect" tunnel described there is unavailable.
 
-```bash
-npx t3@latest
-```
+## How this fork stays current
 
-This will launch T3 Code's backend on your machine as well as the local web app to control your agents.
+Upstream lands hundreds of commits a week. A job on Anish's box merges `pingdotgg/t3code` into `main` every three hours, runs typecheck and tests for the packages the merge touched, and pushes when they pass. Merge conflicts, when they happen, are resolved by an agent that keeps the fork's identity files and takes upstream everywhere else; a merge that fails its checks lands on a `sync-failed/*` branch for a human instead.
 
-Tip: Use `npx t3@latest --help` for the full CLI reference.
+The fork's own changes are deliberately tiny: product name, bundle ids, npm package name, home folder, icons, and the release pipeline. Bug fixes go upstream first.
 
-### Desktop app
+## Fork Hotlap
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
+Want your own build? Fork this repository, then:
 
-#### Windows (`winget`)
+1. Search for `Hotlap`, `hotlap`, `ai.usefastlane.code`, and `shwarmadev/hotlap` and replace them with your own name, bundle id, and repository.
+2. Drop your mark into `assets/hotlap/mark.svg` and run `node scripts/export-hotlap-icons.ts`.
+3. Add the signing and publishing secrets listed in [`.github/workflows/release.yml`](./.github/workflows/release.yml) and run the **Release** workflow.
 
-```bash
-winget install T3Tools.T3Code
-```
+The rest of this file is T3 Code's README, kept so the fork stays easy to merge. Where it says `t3`, read `hotlap`.
 
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
+---
 
 ## Some notes
 

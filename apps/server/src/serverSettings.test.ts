@@ -30,6 +30,9 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
+const decodePersistedServerSettings = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ServerSettings),
+);
 
 const makeServerSettingsLayer = () =>
   ServerSettingsModule.layer.pipe(
@@ -251,6 +254,25 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           ],
         ),
       );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("persists ordered custom prompts as whole-library replacements", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const first = { id: "first", title: "First", prompt: "First prompt" };
+      const second = { id: "second", title: "Second", prompt: "Second prompt" };
+
+      yield* serverSettings.updateSettings({ customPrompts: [first, second] });
+      const next = yield* serverSettings.updateSettings({ customPrompts: [second, first] });
+      assert.deepEqual(next.customPrompts, [second, first]);
+
+      const persisted = yield* decodePersistedServerSettings(
+        yield* fileSystem.readFileString(serverConfig.settingsPath),
+      );
+      assert.deepEqual(persisted.customPrompts, [second, first]);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
