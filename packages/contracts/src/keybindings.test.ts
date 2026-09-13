@@ -122,6 +122,13 @@ it.effect("parses keybinding rules", () =>
     });
     assert.strictEqual(parsedThreadCopyReference.command, "thread.copyReference");
 
+    const parsedThreadCopyTranscript = yield* decode(KeybindingRule, {
+      key: "mod+alt+c",
+      command: "thread.copyTranscript",
+      when: "!terminalFocus",
+    });
+    assert.strictEqual(parsedThreadCopyTranscript.command, "thread.copyTranscript");
+
     const parsedThreadStop = yield* decode(KeybindingRule, {
       key: "mod+escape",
       command: "thread.stop",

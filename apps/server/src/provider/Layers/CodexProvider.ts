@@ -344,7 +344,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
   return {
     clientInfo: {
       name: "t3code_desktop",
-      title: "T3 Code Desktop",
+      title: "Hotlap Desktop",
       version: packageJson.version,
     },
     capabilities: {

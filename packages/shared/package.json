@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./upstreamMigrationManifest": {
+      "types": "./src/upstreamMigrationManifest.ts",
+      "import": "./src/upstreamMigrationManifest.ts"
+    },
     "./delimitedPreview": {
       "types": "./src/delimitedPreview.ts",
       "import": "./src/delimitedPreview.ts"
@@ -206,6 +210,10 @@
     "./assistantCitations": {
       "types": "./src/assistantCitations.ts",
       "import": "./src/assistantCitations.ts"
+    },
+    "./readableThreadTranscript": {
+      "types": "./src/readableThreadTranscript.ts",
+      "import": "./src/readableThreadTranscript.ts"
     },
     "./composerContextReferences": {
       "types": "./src/composerContextReferences.ts",

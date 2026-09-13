@@ -159,6 +159,8 @@ export interface ThreadDetailScreenProps {
   readonly onNativePasteText: (paste: ComposerTextPaste) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  readonly forkableAssistantMessageIds: ReadonlySet<MessageId>;
+  readonly onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
   readonly onSendMessage: () => Promise<MessageId | null>;
   readonly onReconnectEnvironment: () => void;
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
@@ -902,6 +904,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             skills={selectedProviderSkills}
             onUseArtifactTemplate={handleUseArtifactTemplate}
             loadEarlier={props.loadEarlier ?? null}
+            forkableAssistantMessageIds={props.forkableAssistantMessageIds}
+            onForkAssistantMessage={props.onForkAssistantMessage}
           />
         </BlurTargetView>
       ) : (

@@ -3,7 +3,7 @@ import { CommandId, EnvironmentId, MessageId, ProjectId, ThreadId } from "@t3too
 
 import type { QueuedThreadMessage } from "./thread-outbox-model";
 import type { ComposerDraft } from "./use-composer-drafts";
-import { buildPendingNewTasks } from "./pending-new-tasks-model";
+import { buildPendingNewTasks, composerDraftHasUserContent } from "./pending-new-tasks-model";
 
 const environmentId = EnvironmentId.make("env-1");
 const projectId = ProjectId.make("project-1");
@@ -39,7 +39,43 @@ function draft(
   };
 }
 
+describe("composerDraftHasUserContent", () => {
+  it("counts persisted composer context without visible text as unsent content", () => {
+    expect(
+      composerDraftHasUserContent({
+        text: "",
+        attachments: [],
+        context: { version: 1, records: [{} as never] },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not count an empty context envelope or settings alone", () => {
+    expect(
+      composerDraftHasUserContent({
+        text: "   ",
+        attachments: [],
+        context: { version: 1, records: [] },
+        runtimeMode: "full-access",
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("buildPendingNewTasks", () => {
+  it("gives a context-only draft a readable title", () => {
+    const tasks = buildPendingNewTasks({
+      queuedMessages: [],
+      drafts: {
+        "new-task:context-only": draft("", "2026-09-05T11:00:00.000Z", {
+          context: { version: 1, records: [{} as never] },
+        }),
+      },
+    });
+
+    expect(tasks.map((task) => task.title)).toEqual(["1 context item"]);
+  });
+
   it("surfaces every new-task draft with content alongside queued creations", () => {
     const tasks = buildPendingNewTasks({
       queuedMessages: [queuedCreation("a", "2026-09-05T10:00:00.000Z")],
