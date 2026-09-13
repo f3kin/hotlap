@@ -945,6 +945,35 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+export const CUSTOM_PROMPTS_MAX_COUNT = 20;
+export const CUSTOM_PROMPT_TITLE_MAX_CHARS = 60;
+export const CUSTOM_PROMPT_BODY_MAX_CHARS = 10_000;
+export const CUSTOM_PROMPTS_MAX_BYTES = 64 * 1_024;
+
+export const CustomPrompt = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString.check(Schema.isMaxLength(CUSTOM_PROMPT_TITLE_MAX_CHARS)),
+  prompt: TrimmedNonEmptyString.check(Schema.isMaxLength(CUSTOM_PROMPT_BODY_MAX_CHARS)),
+});
+export type CustomPrompt = typeof CustomPrompt.Type;
+
+const customPromptsTextEncoder = new TextEncoder();
+export const CustomPrompts = Schema.Array(CustomPrompt).check(
+  Schema.isMaxLength(CUSTOM_PROMPTS_MAX_COUNT),
+  Schema.makeFilter((prompts) => {
+    const ids = new Set(prompts.map((prompt) => prompt.id));
+    if (ids.size !== prompts.length) {
+      return "Custom prompt ids must be unique.";
+    }
+    return (
+      customPromptsTextEncoder.encode(JSON.stringify(prompts)).byteLength <=
+        CUSTOM_PROMPTS_MAX_BYTES ||
+      `Custom prompts must not exceed ${CUSTOM_PROMPTS_MAX_BYTES} UTF-8 bytes.`
+    );
+  }),
+);
+export type CustomPrompts = typeof CustomPrompts.Type;
+
 /**
  * Server settings a project may override. Every other server setting is
  * environment-wide: providers, keybindings, observability, device hosts,
@@ -1119,6 +1148,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  customPrompts: CustomPrompts.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({
@@ -1384,6 +1414,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
+  customPrompts: Schema.optionalKey(CustomPrompts),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   sourceControlWritingStyle: Schema.optionalKey(
     Schema.Struct({

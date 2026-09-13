@@ -4,6 +4,7 @@ import {
   type EnvironmentAuthInvalidError,
   type EnvironmentInternalError,
   type EnvironmentOperationForbiddenError,
+  type EnvironmentPayloadTooLargeError,
   type EnvironmentRequestInvalidError,
   type EnvironmentResourceNotFoundError,
   type EnvironmentScopeRequiredError,
@@ -71,6 +72,7 @@ export type RemoteEnvironmentRequestError =
   | EnvironmentAuthInvalidError
   | EnvironmentScopeRequiredError
   | EnvironmentOperationForbiddenError
+  | EnvironmentPayloadTooLargeError
   | EnvironmentResourceNotFoundError
   | EnvironmentInternalError
   | RemoteEnvironmentAuthFetchError

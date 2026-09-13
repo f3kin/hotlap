@@ -506,6 +506,12 @@ export const OrchestrationMessage = Schema.Struct({
 });
 export type OrchestrationMessage = typeof OrchestrationMessage.Type;
 
+export const ThreadForkSource = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+export type ThreadForkSource = typeof ThreadForkSource.Type;
+
 export const OrchestrationProposedPlanId = TrimmedNonEmptyString;
 export type OrchestrationProposedPlanId = typeof OrchestrationProposedPlanId.Type;
 
@@ -754,6 +760,8 @@ export const OrchestrationThread = Schema.Struct({
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  /** Durable lineage for a conversation fork. Missing on ordinary and older threads. */
+  forkedFrom: Schema.optional(ThreadForkSource),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -822,6 +830,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   activeOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  forkedFrom: Schema.optional(ThreadForkSource),
   session: Schema.NullOr(OrchestrationSession),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
   hasPendingApprovals: Schema.Boolean,
@@ -986,6 +995,21 @@ export const OrchestrationThreadDetailSnapshot = Schema.Struct({
 });
 export type OrchestrationThreadDetailSnapshot = typeof OrchestrationThreadDetailSnapshot.Type;
 
+export const THREAD_TRANSCRIPT_MAX_BYTES = 5 * 1024 * 1024;
+export const THREAD_FORK_MAX_MESSAGES = 400;
+export const THREAD_FORK_MAX_BYTES = 4 * 1024 * 1024;
+
+export const OrchestrationReadableThreadTranscript = Schema.Struct({
+  threadId: ThreadId,
+  title: TrimmedNonEmptyString,
+  // The server enforces the byte limit before responding. Keep the shared
+  // client schema free of TextEncoder so it is safe to evaluate in Hermes.
+  markdown: Schema.String.check(Schema.isMaxLength(THREAD_TRANSCRIPT_MAX_BYTES)),
+  messageCount: NonNegativeInt,
+});
+export type OrchestrationReadableThreadTranscript =
+  typeof OrchestrationReadableThreadTranscript.Type;
+
 export const ProjectCreateCommand = Schema.Struct({
   type: Schema.Literal("project.create"),
   commandId: CommandId,
@@ -1036,6 +1060,15 @@ const ThreadCreateCommand = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   historyImport: Schema.optional(Schema.Literal(true)),
+});
+
+const ThreadForkCommand = Schema.Struct({
+  type: Schema.Literal("thread.fork"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  sourceThreadId: ThreadId,
+  sourceMessageId: MessageId,
+  createdAt: IsoDateTime,
 });
 
 const ThreadDeleteCommand = Schema.Struct({
@@ -1325,6 +1358,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
+  ThreadForkCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
@@ -1358,6 +1392,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
   ThreadCreateCommand,
+  ThreadForkCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
@@ -1424,6 +1459,38 @@ const ThreadHistoryImportCommand = Schema.Struct({
       createdAt: IsoDateTime,
     }),
   ).check(Schema.isNonEmpty()),
+});
+
+const ThreadHistoryReconcileCommand = Schema.Struct({
+  type: Schema.Literal("thread.history.reconcile"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  snapshotSequence: NonNegativeInt,
+  action: Schema.Union([
+    Schema.Struct({
+      type: Schema.Literal("replaceHistory"),
+      projectId: ProjectId,
+      title: TrimmedNonEmptyString,
+      modelSelection: ModelSelection,
+      runtimeMode: RuntimeMode,
+      interactionMode: ProviderInteractionMode,
+      branch: Schema.NullOr(TrimmedNonEmptyString),
+      worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+      createdAt: IsoDateTime,
+      messages: Schema.Array(
+        Schema.Struct({
+          messageId: MessageId,
+          role: Schema.Literals(["user", "assistant"]),
+          text: Schema.String,
+          createdAt: IsoDateTime,
+        }),
+      ).check(Schema.isNonEmpty()),
+    }),
+    Schema.Struct({
+      type: Schema.Literal("archiveExcluded"),
+      archivedAt: IsoDateTime,
+    }),
+  ]),
 });
 
 const ThreadProposedPlanUpsertCommand = Schema.Struct({
@@ -1506,6 +1573,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadHistoryImportCommand,
+  ThreadHistoryReconcileCommand,
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
@@ -1606,6 +1674,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  forkedFrom: Schema.optional(ThreadForkSource),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1758,6 +1827,10 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  /** Exact first-turn provider input for a fork; the visible user message stays unchanged. */
+  providerInput: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+  ),
   createdAt: IsoDateTime,
 });
 

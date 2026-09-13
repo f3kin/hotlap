@@ -7,9 +7,9 @@
       "layers": [
         {
           "image-name": "text.svg",
-          "name": "Text",
+          "name": "Mark",
           "position": {
-            "scale": 8.5,
+            "scale": 7.7,
             "translation-in-points": [0, 0]
           }
         }

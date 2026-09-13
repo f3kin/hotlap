@@ -1130,9 +1130,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   });
   const terminalStatus = terminalStatusFromRunningIds(runningTerminalIds);
   const terminalProcessCount = runningTerminalIds.length;
-  // Unsent composer text on this thread. The open thread shows its own
-  // composer, so the marker only decorates rows you have navigated away from.
-  const hasUnsentDraft = useThreadHasUnsentDraft(threadRef) && !props.isActive;
+  const hasUnsentDraft = useThreadHasUnsentDraft(threadRef);
+  // Discard stays an inactive-row affordance: the active composer already
+  // exposes its own editable content and attachment removal controls.
+  const canDiscardDraft = hasUnsentDraft && !props.isActive;
   const clearComposerContent = useComposerDraftStore((store) => store.clearComposerContent);
   const handleDiscardDraftClick = useCallback(
     (event: ReactMouseEvent) => {
@@ -1241,13 +1242,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                     icon: "woke" as const,
                     className: "text-amber-700 dark:text-amber-300",
                   }
-                : isUnread
+                : hasUnsentDraft
                   ? {
-                      label: "Done",
-                      icon: "done" as const,
-                      className: "text-emerald-700 dark:text-emerald-300",
+                      label: "Draft",
+                      icon: null,
+                      className: "text-amber-700 dark:text-amber-300",
                     }
-                  : null;
+                  : isUnread
+                    ? {
+                        label: "Done",
+                        icon: "done" as const,
+                        className: "text-emerald-700 dark:text-emerald-300",
+                      }
+                    : null;
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -1606,23 +1613,24 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   ) : null;
   // Same pen the new-thread draft rows lead with, so both kinds of unsent
   // work read the same way in the list.
-  const draftIndicator = hasUnsentDraft ? (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <span
-            role="img"
-            aria-label="Unsent draft"
-            data-testid={`sidebar-draft-indicator-${thread.id}`}
-            className="inline-flex shrink-0 items-center"
-          />
-        }
-      >
-        <SquarePenIcon aria-hidden className={draftPenClassName} />
-      </TooltipTrigger>
-      <TooltipPopup side="top">Unsent draft</TooltipPopup>
-    </Tooltip>
-  ) : null;
+  const draftIndicator =
+    hasUnsentDraft && topStatus?.label !== "Draft" ? (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span
+              role="img"
+              aria-label="Unsent draft"
+              data-testid={`sidebar-draft-indicator-${thread.id}`}
+              className="inline-flex shrink-0 items-center"
+            />
+          }
+        >
+          <SquarePenIcon aria-hidden className={draftPenClassName} />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Unsent draft</TooltipPopup>
+      </Tooltip>
+    ) : null;
   const showPin =
     props.isPinned && (!sortable?.isDragging || (props.dragOverPinned && props.dropVerb === null));
   const pinIndicator = showPin ? (
@@ -2007,7 +2015,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                       threadTimeLabel(thread)
                     )}
                   </span>
-                  {props.settlementSupported || showSnoozeButton || hasUnsentDraft ? (
+                  {props.settlementSupported || showSnoozeButton || canDiscardDraft ? (
                     <span
                       className={cn(
                         // focus-visible, not focus-within: a mouse click leaves
@@ -2019,7 +2027,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                         snoozeMenuOpen && "pointer-events-auto static opacity-100",
                       )}
                     >
-                      {hasUnsentDraft ? (
+                      {canDiscardDraft ? (
                         <Tooltip>
                           <TooltipTrigger
                             render={

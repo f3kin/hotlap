@@ -24,6 +24,7 @@ import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import { useThreadPr, type ThreadPrPresentation } from "../../state/use-thread-pr";
+import { useComposerDraftHasUserContent } from "../../state/use-composer-drafts";
 import type { HomeGroupDisplayAction } from "../home/homeListItems";
 import { ThreadSwipeable } from "../home/thread-swipe-actions";
 import { buildThreadTitleRegenerationMenuItems } from "./thread-title-regeneration-menu";
@@ -493,13 +494,15 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     onRegenerateThreadTitle,
     onNewThreadOnBranch,
   } = props;
-  const status = resolveThreadStatus(thread);
+  const hasUnsentDraft = useComposerDraftHasUserContent(`${thread.environmentId}:${thread.id}`);
+  const status = resolveThreadStatus(thread, hasUnsentDraft);
   const pr = useThreadPr(thread);
   const timestamp = relativeTime(
     thread.latestUserMessageAt ?? thread.updatedAt ?? thread.createdAt,
   );
   const threadAccessibilityLabel = [
     thread.title,
+    status?.label,
     pr?.accessibilityLabel,
     props.hasQueuedMessages ? "messages queued to send" : null,
   ]

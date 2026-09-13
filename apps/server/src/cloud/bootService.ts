@@ -31,11 +31,11 @@ import {
   type ServiceState,
 } from "./serviceProtocol.ts";
 
-const BOOT_SERVICE_NAME = "t3code";
+const BOOT_SERVICE_NAME = "hotlap";
 const BOOT_SERVICE_UNIT_FILE = `${BOOT_SERVICE_NAME}.service`;
 // `.service` suffix keeps the label distinct from the desktop app's bundle id
-// (com.t3tools.t3code), so launchd and TCC records never collide.
-const BOOT_SERVICE_LAUNCHD_LABEL = "com.t3tools.t3code.service";
+// (ai.usefastlane.code), so launchd and TCC records never collide.
+const BOOT_SERVICE_LAUNCHD_LABEL = "ai.usefastlane.code.service";
 const BOOT_SERVICE_PLIST_FILE = `${BOOT_SERVICE_LAUNCHD_LABEL}.plist`;
 const BOOT_SERVICE_UNIT_ENV = "T3_BOOT_SERVICE_UNIT";
 
@@ -64,7 +64,7 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
   // The user manager has no reliable network-online target; server networking retries itself.
   return [
     "[Unit]",
-    "Description=T3 Code server",
+    "Description=Hotlap server",
     "StartLimitIntervalSec=300",
     "StartLimitBurst=5",
     "",
@@ -427,9 +427,9 @@ export function formatBootServiceProblem(problem: BootServiceProblem): string {
     case "linger-disabled":
       return 'Lingering is disabled. T3 Code will stop when your last login session ends and will not start at boot. Run `sudo loginctl enable-linger "$(id -un)"` on this machine, then retry the service command as your normal user.';
     case "service-disabled":
-      return "The service is not enabled to start automatically. Run `t3 service update` to repair it.";
+      return "The service is not enabled to start automatically. Run `hotlap service update` to repair it.";
     case "service-stopped":
-      return "The service is not running. Check the service log and `systemctl --user status t3code.service`, then run `t3 service update`.";
+      return "The service is not running. Check the service log and `systemctl --user status hotlap.service`, then run `hotlap service update`.";
   }
 }
 
@@ -459,7 +459,7 @@ export class BootServiceDowngradeRefusedError extends Schema.TaggedError<BootSer
   },
 ) {
   override get message(): string {
-    return `Refusing to replace t3@${this.installedVersion} with older t3@${this.targetVersion}. Run the command again with --allow-downgrade to continue.`;
+    return `Refusing to replace hotlap@${this.installedVersion} with older hotlap@${this.targetVersion}. Run the command again with --allow-downgrade to continue.`;
   }
 }
 

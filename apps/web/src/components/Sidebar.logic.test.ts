@@ -2021,6 +2021,42 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({ label: "Completed", pulse: false });
   });
+
+  it("shows draft instead of idle time when the composer has unsent content", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            activeTurnId: null,
+          },
+        },
+        hasUnsentDraft: true,
+      }),
+    ).toMatchObject({ label: "Draft", pulse: false });
+  });
+
+  it("shows an unsent draft ahead of an unseen completion", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: makeLatestTurn(),
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            activeTurnId: null,
+          },
+        },
+        hasUnsentDraft: true,
+      }),
+    ).toMatchObject({ label: "Draft", pulse: false });
+  });
 });
 
 describe("resolveThreadRowClassName", () => {
@@ -2092,6 +2128,25 @@ describe("resolveProjectStatusIndicator", () => {
         },
       ]),
     ).toMatchObject({ label: "Plan Ready", dotClass: "bg-violet-500" });
+  });
+
+  it("prefers a draft over a passive completed sibling", () => {
+    expect(
+      resolveProjectStatusIndicator([
+        {
+          label: "Completed",
+          colorClass: "text-emerald-600",
+          dotClass: "bg-emerald-500",
+          pulse: false,
+        },
+        {
+          label: "Draft",
+          colorClass: "text-amber-700",
+          dotClass: "bg-amber-500",
+          pulse: false,
+        },
+      ]),
+    ).toMatchObject({ label: "Draft" });
   });
 });
 

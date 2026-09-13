@@ -220,6 +220,16 @@ export function readEnvironmentSupportsTitleRegeneration(environmentId: Environm
   );
 }
 
+/** Older servers omit this capability, so transcript controls stay hidden under version skew. */
+export function readEnvironmentSupportsThreadTranscriptExport(
+  environmentId: EnvironmentId,
+): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .threadTranscriptExport === true
+  );
+}
+
 /** Whether the environment's server understands thread.pin.reorder (and
     orderKey on thread.pin). Same version-skew contract as settlement. */
 export function readEnvironmentSupportsPinReorder(environmentId: EnvironmentId): boolean {

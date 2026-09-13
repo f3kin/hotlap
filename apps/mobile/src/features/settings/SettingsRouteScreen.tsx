@@ -407,7 +407,7 @@ function ConfiguredSettingsRouteScreen() {
 
       Alert.alert(
         "Disable notifications",
-        "Open system Settings to disable notifications for T3 Code.",
+        "Open system Settings to disable notifications for Hotlap.",
         [
           { text: "Cancel", style: "cancel" },
           { text: "Open Settings", onPress: () => void Linking.openSettings() },
@@ -503,7 +503,7 @@ function ConfiguredSettingsRouteScreen() {
             />
           </SettingsSection>
           <Text className="px-2 text-sm text-foreground-muted">
-            T3 Code works locally without signing in. Cloud features are optional.
+            Hotlap works locally without signing in. Cloud features are optional.
           </Text>
         </View>
 
@@ -571,9 +571,16 @@ function ConfiguredSettingsRouteScreen() {
 }
 
 function GeneralSettingsSection() {
+  const { environments } = useEnvironments();
+  const supportsCustomPrompts = environments.some(
+    (environment) => environment.serverConfig?.environment.capabilities.customPrompts === true,
+  );
   return (
     <SettingsSection title="General">
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
+      {supportsCustomPrompts ? (
+        <SettingsRow icon="text.bubble" label="Custom Prompts" target="SettingsCustomPrompts" />
+      ) : null}
       <AutoSettleSettingsRows />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
     </SettingsSection>

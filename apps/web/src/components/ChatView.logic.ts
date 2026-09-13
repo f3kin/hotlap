@@ -20,6 +20,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
+import { waitForSynchronizedValue } from "@t3tools/client-runtime/state/threads";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   squashAtomCommandFailure,
@@ -1097,42 +1098,11 @@ export async function waitForStartedServerThread(
 ): Promise<boolean> {
   const threadAtom = environmentThreadDetails.detailAtom(threadRef);
   const getThread = () => appAtomRegistry.get(threadAtom);
-  const thread = getThread();
-
-  if (threadHasStarted(thread)) {
-    return true;
-  }
-
-  return await new Promise<boolean>((resolve) => {
-    let settled = false;
-    let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
-    const finish = (result: boolean) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      if (timeoutId !== null) {
-        globalThis.clearTimeout(timeoutId);
-      }
-      unsubscribe();
-      resolve(result);
-    };
-
-    const unsubscribe = appAtomRegistry.subscribe(threadAtom, (thread) => {
-      if (!threadHasStarted(thread)) {
-        return;
-      }
-      finish(true);
-    });
-
-    if (threadHasStarted(getThread())) {
-      finish(true);
-      return;
-    }
-
-    timeoutId = globalThis.setTimeout(() => {
-      finish(false);
-    }, timeoutMs);
+  return await waitForSynchronizedValue({
+    read: getThread,
+    subscribe: (listener) => appAtomRegistry.subscribe(threadAtom, listener),
+    isReady: threadHasStarted,
+    timeoutMs,
   });
 }
 
