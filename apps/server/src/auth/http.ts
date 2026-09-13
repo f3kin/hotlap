@@ -14,6 +14,7 @@ import {
   EnvironmentInternalError,
   type EnvironmentInternalErrorReason,
   EnvironmentOperationForbiddenError,
+  EnvironmentPayloadTooLargeError,
   EnvironmentRequestInvalidError,
   type EnvironmentRequestInvalidReason,
   EnvironmentResourceNotFoundError,
@@ -153,6 +154,20 @@ export function failEnvironmentNotFound(reason: EnvironmentResourceNotFoundReaso
   return currentEnvironmentTraceId.pipe(
     Effect.flatMap((traceId) =>
       Effect.fail(new EnvironmentResourceNotFoundError({ code: "not_found", reason, traceId })),
+    ),
+  );
+}
+
+export function failEnvironmentTranscriptTooLarge() {
+  return currentEnvironmentTraceId.pipe(
+    Effect.flatMap((traceId) =>
+      Effect.fail(
+        new EnvironmentPayloadTooLargeError({
+          code: "payload_too_large",
+          reason: "thread_transcript_too_large",
+          traceId,
+        }),
+      ),
     ),
   );
 }

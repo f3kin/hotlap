@@ -43,6 +43,7 @@ import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
   CornerLeftUpIcon,
+  CopyIcon,
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
@@ -74,6 +75,7 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { useClientSettings } from "../hooks/useSettings";
+import { useCopyThreadTranscript } from "../hooks/useCopyThreadTranscript";
 import { useTheme } from "../hooks/useTheme";
 import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
@@ -664,6 +666,12 @@ function OpenCommandPaletteDialog(props: {
   const activeThreadServerConfig = useServerConfigs().get(
     activeThread?.environmentId ?? ("" as EnvironmentId),
   );
+  const copyThreadTranscript = useCopyThreadTranscript();
+  const activeThreadTranscriptRef =
+    activeThread !== null &&
+    activeThreadServerConfig?.environment.capabilities.threadTranscriptExport === true
+      ? scopeThreadRef(activeThread.environmentId, activeThread.id)
+      : null;
   const activeThreadReferenceCopyTarget =
     referenceThreadRef === null || (pathname === "/pull-requests" && !openPanelPullRequestUrl)
       ? null
@@ -1696,6 +1704,21 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
+  if (activeThreadTranscriptRef !== null) {
+    actionItems.push({
+      kind: "action",
+      value: "action:copy-thread-transcript",
+      searchTerms: ["copy", "chat", "conversation", "markdown", "transcript"],
+      title: "Copy readable transcript",
+      description: "Copy the complete readable chat as Markdown",
+      icon: <CopyIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "thread.copyTranscript",
+      run: async () => {
+        await copyThreadTranscript(activeThreadTranscriptRef);
+      },
+    });
+  }
+
   if (
     activeThread !== null &&
     threadPullRequestLinkMode(activeThreadServerConfig?.environment.capabilities) !== "unsupported"
@@ -2414,6 +2437,14 @@ function OpenCommandPaletteDialog(props: {
       if (activeThreadReferenceCopyTarget === null) return;
       setOpen(false);
       void copyActiveThreadReference();
+      return;
+    }
+    if (command === "thread.copyTranscript") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (activeThreadTranscriptRef === null) return;
+      setOpen(false);
+      void copyThreadTranscript(activeThreadTranscriptRef);
       return;
     }
 

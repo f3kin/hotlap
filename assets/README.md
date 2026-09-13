@@ -1,5 +1,10 @@
 # Brand icons
 
+> **Hotlap:** every tracked icon below is rendered from `hotlap/mark.svg` by
+> `node scripts/export-hotlap-icons.ts`, which also rewrites the Icon Composer
+> projects' `text.svg` layer with a flattened copy of the mark. The upstream
+> Icon Composer workflow described in the rest of this file is not used.
+
 The three Icon Composer projects are the source of truth for full application icons:
 
 - `dev/app-icon.icon`

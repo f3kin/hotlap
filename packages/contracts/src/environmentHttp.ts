@@ -35,6 +35,7 @@ import {
   ClientOrchestrationCommand,
   DispatchResult,
   OrchestrationReadModel,
+  OrchestrationReadableThreadTranscript,
   OrchestrationShellSnapshot,
   OrchestrationThreadDetailSnapshot,
 } from "./orchestration.ts";
@@ -212,12 +213,31 @@ export class EnvironmentResourceNotFoundError extends Schema.TaggedError<Environ
   }
 }
 
+export class EnvironmentPayloadTooLargeError extends Schema.TaggedError<EnvironmentPayloadTooLargeError>()(
+  "EnvironmentPayloadTooLargeError",
+  {
+    code: Schema.Literal("payload_too_large"),
+    reason: Schema.Literal("thread_transcript_too_large"),
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 413 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentPayloadTooLargeError)(this, { status: 413 });
+  }
+
+  override get message(): string {
+    return "This thread is too large to copy as one readable transcript.";
+  }
+}
+
 export const EnvironmentHttpCommonError = Schema.Union([
   EnvironmentRequestInvalidError,
   EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
   EnvironmentResourceNotFoundError,
+  EnvironmentPayloadTooLargeError,
   EnvironmentInternalError,
 ]);
 export type EnvironmentHttpCommonError = typeof EnvironmentHttpCommonError.Type;
@@ -330,6 +350,12 @@ const EnvironmentOrchestrationSnapshotErrors = [
 const EnvironmentOrchestrationThreadSnapshotErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentOrchestrationThreadTranscriptErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentPayloadTooLargeError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationDispatchErrors = [
@@ -526,6 +552,14 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
       payload: EnvironmentOrchestrationThreadSnapshotQuery,
       success: OrchestrationThreadDetailSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadTranscript", "/api/orchestration/threads/:threadId/transcript", {
+      headers: OptionalBearerHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      success: OrchestrationReadableThreadTranscript,
+      error: EnvironmentOrchestrationThreadTranscriptErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

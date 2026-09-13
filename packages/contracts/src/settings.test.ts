@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  CUSTOM_PROMPTS_MAX_BYTES,
   DEFAULT_SERVER_SETTINGS,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -19,6 +20,61 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("ServerSettings custom prompts", () => {
+  it("defaults to an empty environment prompt library and accepts ordered entries", () => {
+    expect(decodeServerSettings({}).customPrompts).toEqual([]);
+    const customPrompts = [
+      { id: "review", title: "Review", prompt: "Review these changes." },
+      { id: "tests", title: "Tests", prompt: "Add focused tests." },
+    ];
+
+    expect(decodeServerSettingsPatch({ customPrompts }).customPrompts).toEqual(customPrompts);
+    expect(encodeServerSettings(decodeServerSettings({ customPrompts })).customPrompts).toEqual(
+      customPrompts,
+    );
+  });
+
+  it("rejects blank or individually oversized prompt entries", () => {
+    for (const customPrompts of [
+      [{ id: " ", title: "Title", prompt: "Prompt" }],
+      [{ id: "id", title: " ", prompt: "Prompt" }],
+      [{ id: "id", title: "Title", prompt: "   " }],
+      [{ id: "id", title: "x".repeat(61), prompt: "Prompt" }],
+      [{ id: "id", title: "Title", prompt: "x".repeat(10_001) }],
+      [
+        { id: "id", title: "One", prompt: "Prompt" },
+        { id: "id", title: "Two", prompt: "Another prompt" },
+      ],
+    ]) {
+      expect(() => decodeServerSettingsPatch({ customPrompts })).toThrow();
+    }
+  });
+
+  it("rejects more than twenty entries and aggregate UTF-8 payloads above the byte limit", () => {
+    expect(() =>
+      decodeServerSettingsPatch({
+        customPrompts: Array.from({ length: 21 }, (_, index) => ({
+          id: `id-${index}`,
+          title: `Title ${index}`,
+          prompt: "Prompt",
+        })),
+      }),
+    ).toThrow();
+
+    const multibytePrompt = "😀".repeat(2_400);
+    expect(multibytePrompt.length).toBeLessThan(CUSTOM_PROMPTS_MAX_BYTES);
+    expect(() =>
+      decodeServerSettingsPatch({
+        customPrompts: Array.from({ length: 7 }, (_, index) => ({
+          id: `emoji-${index}`,
+          title: "Emoji",
+          prompt: multibytePrompt,
+        })),
+      }),
+    ).toThrow();
+  });
+});
 
 describe("ServerSettings default permissions", () => {
   it("keeps full access for settings saved before a default was configured", () => {

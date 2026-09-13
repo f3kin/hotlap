@@ -1,11 +1,13 @@
 import {
   EventId,
+  FORK_HISTORY_MESSAGE_ID_PREFIX,
   MAX_SCRIPT_ID_LENGTH,
   SCRIPT_RUN_COMMAND_PATTERN,
   MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ThreadLinkedPullRequest,
   UserInputRequestedPayload,
-  isImportedAgentSessionMessageId,
+  isReadOnlyHistoryMessageId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -13,7 +15,13 @@ import {
   type ThreadPullRequestKey,
   type ThreadPullRequestLink,
   type OrchestrationThreadActivity,
+  THREAD_FORK_MAX_BYTES,
+  THREAD_FORK_MAX_MESSAGES,
 } from "@t3tools/contracts";
+import {
+  buildForkProviderInput,
+  projectReadableThreadMessages,
+} from "@t3tools/shared/readableThreadTranscript";
 import {
   legacyLinkedPullRequestOf,
   legacyThreadPullRequestKey,
@@ -46,6 +54,7 @@ import {
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
+import type { ProjectionThreadForkSource } from "./Services/ProjectionSnapshotQuery.ts";
 
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 
@@ -112,7 +121,7 @@ function hasQueuedTurnStartForThread(
   let latestUserMessageAt: string | null = null;
   let latestUserMessageAtMs = Number.NEGATIVE_INFINITY;
   for (const message of thread.messages) {
-    if (message.role !== "user" || isImportedAgentSessionMessageId(message.id)) continue;
+    if (message.role !== "user" || isReadOnlyHistoryMessageId(message.id)) continue;
     const messageAtMs = Date.parse(message.createdAt);
     latestUserMessageAtMs = Math.max(latestUserMessageAtMs, messageAtMs);
     if (messageAtMs === latestUserMessageAtMs) {
@@ -210,10 +219,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   command,
   readModel,
   userInputActivity,
+  forkSource,
+  providerInput,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   readonly userInputActivity?: OrchestrationThreadActivity;
+  readonly forkSource?: ProjectionThreadForkSource;
+  readonly providerInput?: string;
 }): Effect.fn.Return<
   DecideOrchestrationCommandResult,
   OrchestrationCommandRejection | PlatformError.PlatformError,
@@ -362,6 +375,116 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           deletedAt: occurredAt,
         },
       };
+    }
+
+    case "thread.fork": {
+      if (
+        forkSource === undefined ||
+        forkSource.threadId !== command.sourceThreadId ||
+        forkSource.busy
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The source thread is unavailable or still has active work.",
+        });
+      }
+      const selectedMessage = forkSource.messages.find(({ id }) => id === command.sourceMessageId);
+      if (
+        selectedMessage?.role !== "assistant" ||
+        selectedMessage.streaming ||
+        selectedMessage.text.trim().length === 0 ||
+        forkSource.selectedTurn?.state !== "completed" ||
+        forkSource.selectedTurn.assistantMessageId !== command.sourceMessageId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Only a terminal response from a completed turn can be forked.",
+        });
+      }
+      yield* requireProject({ readModel, command, projectId: forkSource.projectId });
+      yield* requireThreadAbsent({ readModel, command, threadId: command.threadId });
+
+      const history = projectReadableThreadMessages(forkSource.messages, {
+        throughMessageId: command.sourceMessageId,
+      });
+      const historyBytes = history.reduce(
+        (total, message) => total + new TextEncoder().encode(message.text).byteLength + 128,
+        0,
+      );
+      if (
+        history.length === 0 ||
+        history.length > THREAD_FORK_MAX_MESSAGES ||
+        historyBytes > THREAD_FORK_MAX_BYTES
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `The conversation is too large to fork safely (maximum ${THREAD_FORK_MAX_MESSAGES} readable messages and ${THREAD_FORK_MAX_BYTES} bytes).`,
+        });
+      }
+      if (
+        buildForkProviderInput({
+          messages: history,
+          continuation: "Continue.",
+          maxChars: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+        }) === null
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The selected response is too large to continue in a fork.",
+        });
+      }
+
+      const createdEvent: PlannedOrchestrationEvent = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.created",
+        payload: {
+          threadId: command.threadId,
+          projectId: forkSource.projectId,
+          title: `${forkSource.title} (fork)`,
+          modelSelection: forkSource.modelSelection,
+          runtimeMode: forkSource.runtimeMode,
+          interactionMode: forkSource.interactionMode,
+          branch: forkSource.branch,
+          worktreePath: forkSource.worktreePath,
+          forkedFrom: {
+            threadId: command.sourceThreadId,
+            messageId: command.sourceMessageId,
+          },
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+      const historyEvents: PlannedOrchestrationEvent[] = [];
+      for (const [index, message] of history.entries()) {
+        historyEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: MessageId.make(
+              `${FORK_HISTORY_MESSAGE_ID_PREFIX}${command.threadId}:${String(index).padStart(4, "0")}`,
+            ),
+            role: message.role,
+            text: message.text,
+            turnId: null,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+          },
+        });
+      }
+      return [createdEvent, ...historyEvents];
     }
 
     case "thread.create": {
@@ -1270,10 +1393,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.start": {
-      if (isImportedAgentSessionMessageId(command.message.messageId)) {
+      if (providerInput !== undefined && command.message.text.trim().toLowerCase() === "/compact") {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Message id '${command.message.messageId}' uses the reserved imported-session namespace.`,
+          detail: "Compact is unavailable until the fork has started its first provider turn.",
+        });
+      }
+      if (isReadOnlyHistoryMessageId(command.message.messageId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Message id '${command.message.messageId}' uses a reserved read-only history namespace.`,
         });
       }
       const targetThread = yield* requireThread({
@@ -1345,6 +1474,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(providerInput !== undefined ? { providerInput } : {}),
           createdAt: command.createdAt,
         },
       };
@@ -1759,10 +1889,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.message.assistant.delta": {
-      if (isImportedAgentSessionMessageId(command.messageId)) {
+      if (isReadOnlyHistoryMessageId(command.messageId)) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Message id '${command.messageId}' uses the reserved imported-session namespace.`,
+          detail: `Message id '${command.messageId}' uses a reserved read-only history namespace.`,
         });
       }
       yield* requireThread({
@@ -1792,10 +1922,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.message.assistant.complete": {
-      if (isImportedAgentSessionMessageId(command.messageId)) {
+      if (isReadOnlyHistoryMessageId(command.messageId)) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Message id '${command.messageId}' uses the reserved imported-session namespace.`,
+          detail: `Message id '${command.messageId}' uses a reserved read-only history namespace.`,
         });
       }
       yield* requireThread({
@@ -1875,6 +2005,118 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const settledAt = command.messages.reduce(
+        (latest, message) =>
+          compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
+        firstMessage.createdAt,
+      );
+      events.push({
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: settledAt,
+          commandId: command.commandId,
+          metadata: { historyImport: true },
+        })),
+        type: "thread.settled",
+        payload: {
+          threadId: command.threadId,
+          settledAt,
+          updatedAt: settledAt,
+        },
+      });
+      return events;
+    }
+
+    case "thread.history.reconcile": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (command.action.type === "archiveExcluded") {
+        if (thread.archivedAt !== null || thread.deletedAt !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Thread '${command.threadId}' must be active before imported history can be archived.`,
+          });
+        }
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.action.archivedAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.archived",
+          payload: {
+            threadId: command.threadId,
+            archivedAt: command.action.archivedAt,
+            updatedAt: command.action.archivedAt,
+          },
+        };
+      }
+
+      if (thread.projectId !== command.action.projectId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' changed projects before imported history reconciliation.`,
+        });
+      }
+      const events: Array<PlannedOrchestrationEvent> = [
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.action.createdAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.created",
+          payload: {
+            threadId: command.threadId,
+            projectId: command.action.projectId,
+            title: command.action.title,
+            modelSelection: command.action.modelSelection,
+            runtimeMode: command.action.runtimeMode,
+            interactionMode: command.action.interactionMode,
+            branch: command.action.branch,
+            worktreePath: command.action.worktreePath,
+            createdAt: command.action.createdAt,
+            updatedAt: command.action.createdAt,
+          },
+        },
+      ];
+      for (const message of command.action.messages) {
+        events.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: message.createdAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.messageId,
+            role: message.role,
+            text: message.text,
+            turnId: null,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+          },
+        });
+      }
+      const firstMessage = command.action.messages[0];
+      if (firstMessage === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Imported history reconciliation requires at least one message.",
+        });
+      }
+      const settledAt = command.action.messages.reduce(
         (latest, message) =>
           compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
         firstMessage.createdAt,

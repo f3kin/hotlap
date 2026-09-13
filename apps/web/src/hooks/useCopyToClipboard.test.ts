@@ -3,12 +3,43 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { COMPOSER_CONTEXT_CLIPBOARD_MIME } from "@t3tools/shared/composerContextClipboard";
 
 import {
+  beginDeferredTextClipboardWrite,
   ClipboardApiUnavailableError,
   ClipboardWriteError,
   writeTextToClipboard,
 } from "./useCopyToClipboard";
 
 describe("writeTextToClipboard", () => {
+  it("reserves clipboard access before deferred text is available", async () => {
+    const write = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { clipboard: { write } });
+    vi.stubGlobal(
+      "ClipboardItem",
+      class {
+        constructor(readonly data: Record<string, Blob | Promise<Blob>>) {}
+      },
+    );
+
+    const deferred = beginDeferredTextClipboardWrite("readable chat transcript");
+    expect(deferred).not.toBeNull();
+    expect(write).toHaveBeenCalledOnce();
+
+    const items = write.mock.calls[0]![0] as Array<{
+      data: Record<string, Blob | Promise<Blob>>;
+    }>;
+    const text = Promise.resolve(items[0]!.data["text/plain"]!);
+    let payloadResolved = false;
+    void text.then(() => {
+      payloadResolved = true;
+    });
+    await Promise.resolve();
+    expect(payloadResolved).toBe(false);
+
+    await expect(deferred!.commit("# Remote transcript")).resolves.toBe(true);
+    expect(await (await text).text()).toBe("# Remote transcript");
+  });
+
   it("reserves plain text even when an extra flavor attempts to replace it", async () => {
     const write = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("window", {});

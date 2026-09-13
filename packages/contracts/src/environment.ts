@@ -118,6 +118,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   usageLimitSources: Schema.optionalKey(Schema.Boolean),
   /** Server persists custom model rates and applies them to usage summaries. */
   usagePriceOverrides: Schema.optionalKey(Schema.Boolean),
+  /** Server persists the environment's ordered custom prompt library. */
+  customPrompts: Schema.optionalKey(Schema.Boolean),
+  /** Server exposes complete readable thread transcripts over HTTP. */
+  threadTranscriptExport: Schema.optionalKey(Schema.Boolean),
+  /** Server can fork a completed assistant response into a new thread. */
+  threadForking: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin / thread.unpin commands. Same
       version-skew contract as threadSettlement. */
   threadPinning: Schema.optionalKey(Schema.Boolean),

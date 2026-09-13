@@ -267,6 +267,8 @@ export interface ThreadFeedProps {
     readonly loading: boolean;
     readonly onLoadEarlier: () => void;
   } | null;
+  readonly forkableAssistantMessageIds: ReadonlySet<MessageId>;
+  readonly onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
 }
 
 function MessageAttachmentImage(props: {
@@ -1338,6 +1340,31 @@ function useMarkdownStyles(
   ]);
 }
 
+const ForkMessageButton = memo(function ForkMessageButton(props: {
+  readonly messageId: MessageId;
+  readonly tintColor: ColorValue;
+  readonly onFork: (messageId: MessageId) => Promise<void>;
+}) {
+  const [pending, setPending] = useState(false);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Fork conversation from this response"
+      accessibilityState={{ disabled: pending }}
+      disabled={pending}
+      hitSlop={8}
+      className="size-7 items-center justify-center"
+      onPress={() => {
+        if (pending) return;
+        setPending(true);
+        void props.onFork(props.messageId).finally(() => setPending(false));
+      }}
+    >
+      <SymbolView name="arrow.triangle.branch" size={14} tintColor={props.tintColor} />
+    </Pressable>
+  );
+});
+
 function renderFeedEntry(
   info: { item: PendingThreadFeedEntry; index: number },
   props: Pick<
@@ -1353,11 +1380,13 @@ function renderFeedEntry(
     readonly workRowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
     readonly workGroupScrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
+    readonly forkableAssistantMessageIds: ReadonlySet<MessageId>;
     readonly unsettledTurnId: TurnId | null;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey: string) => void;
     readonly onToggleTurnFold: (turnId: TurnId) => void;
+    readonly onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
@@ -1690,6 +1719,13 @@ function renderFeedEntry(
               buttonSize={28}
               iconSize={13}
             />
+            {props.forkableAssistantMessageIds.has(message.id) && props.onForkAssistantMessage ? (
+              <ForkMessageButton
+                messageId={message.id}
+                tintColor={iconSubtleColor}
+                onFork={props.onForkAssistantMessage}
+              />
+            ) : null}
             <Text className="font-t3-medium text-xs tabular-nums text-adaptive-neutral-600-400">
               {timestampLabel}
             </Text>
@@ -2667,11 +2703,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             workRowSizing,
             workGroupScrollPositions,
             terminalAssistantMessageIds,
+            forkableAssistantMessageIds: props.forkableAssistantMessageIds,
             unsettledTurnId,
             onCopyWorkRow,
             onToggleWorkGroup,
             onToggleWorkRow,
             onToggleTurnFold,
+            onForkAssistantMessage: props.onForkAssistantMessage,
             onPressPreview,
             onPressVideo,
             markdownLinkHandlers,
@@ -2701,6 +2739,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       workRowSizing,
       workGroupScrollPositions,
       terminalAssistantMessageIds,
+      props.forkableAssistantMessageIds,
       unsettledTurnId,
       iconSubtleColor,
       screenColor,
@@ -2716,6 +2755,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onPressPreview,
       onPressVideo,
       onToggleTurnFold,
+      props.onForkAssistantMessage,
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,

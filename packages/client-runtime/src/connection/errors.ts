@@ -146,6 +146,14 @@ export function mapRemoteEnvironmentError(
         detail: "The environment endpoint could not be found.",
         traceId: error.traceId,
       });
+    case "EnvironmentPayloadTooLargeError":
+      // Not expected during connection authorization; retained here because
+      // authenticated resource requests share the transport error union.
+      return new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "The environment response is too large.",
+        traceId: error.traceId,
+      });
     case "RemoteEnvironmentAuthTimeoutError":
       return new ConnectionTransientError({
         reason: "timeout",

@@ -494,7 +494,8 @@ export interface ThreadStatusPill {
     | "Completed"
     | "Pending Approval"
     | "Awaiting Input"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Draft";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
@@ -510,7 +511,8 @@ const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   Connecting: 4,
   "Plan Ready": 3,
   Monitoring: 2,
-  Completed: 1,
+  Draft: 1,
+  Completed: 0,
 };
 
 type ThreadStatusInput = Pick<
@@ -964,6 +966,7 @@ export function formatWorkingDurationLabel(elapsedMs: number): string {
 
 export function resolveThreadStatusPill(input: {
   thread: ThreadStatusInput;
+  hasUnsentDraft?: boolean;
 }): ThreadStatusPill | null {
   const { thread } = input;
 
@@ -1037,6 +1040,15 @@ export function resolveThreadStatusPill(input: {
       label: "Monitoring",
       colorClass: "text-sky-600 dark:text-sky-300/80",
       dotClass: "bg-sky-500 dark:bg-sky-300/80",
+      pulse: false,
+    };
+  }
+
+  if (input.hasUnsentDraft === true) {
+    return {
+      label: "Draft",
+      colorClass: "text-amber-700 dark:text-amber-300",
+      dotClass: "bg-amber-500 dark:bg-amber-300/90",
       pulse: false,
     };
   }

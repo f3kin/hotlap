@@ -167,6 +167,21 @@ describe("resolveThreadListV2Status", () => {
       "ready",
     );
   });
+
+  it("resolves draft for a quiescent thread with unsent composer content", () => {
+    expect(
+      resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }), true),
+    ).toBe("draft");
+  });
+
+  it("keeps approval ahead of an unsent draft", () => {
+    expect(
+      resolveThreadListV2Status(
+        makeThread({ id: ThreadId.make("t"), title: "t", hasPendingApprovals: true }),
+        true,
+      ),
+    ).toBe("approval");
+  });
 });
 
 describe("queued messages keep a settled thread active", () => {
