@@ -3155,6 +3155,30 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 });
 
 describe("parseAgentSessionTranscript", () => {
+  it("keeps Claude custom titles", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: [
+        JSON.stringify({
+          type: "custom-title",
+          customTitle: "Master: Fleet",
+          sessionId: "claude-session",
+        }),
+        JSON.stringify({
+          type: "user",
+          sessionId: "claude-session",
+          timestamp: "2026-09-14T10:00:00.000Z",
+          message: { role: "user", content: "Continue the fleet migration" },
+        }),
+      ].join("\n"),
+      source: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      fallbackSessionId: "fallback",
+      lastActiveAtMs: Date.parse("2026-09-14T12:00:00.000Z"),
+    });
+
+    expect(thread?.title).toBe("Master: Fleet");
+  });
+
   it.each([false, true])(
     "handles the exact record limit and an interior blank overflow=%s",
     (overflow) => {
