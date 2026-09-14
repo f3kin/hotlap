@@ -9,7 +9,6 @@ import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 
-import { legacyCliLauncherScript } from "@t3tools/shared/legacyCliLauncher";
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
   cliArchiveFileName,
@@ -235,26 +234,6 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   input: PinnedRuntimeInstallInput,
 ) {
   const { fs } = input;
-  // Old service launchers still use the npm entry point, including when an
-  // archive was cached before this compatibility wrapper existed. Node-managed
-  // installs already carry their own npm entry and have no archive executable.
-  const ensureLegacyEntry = Effect.fn("cloud.pinned_runtime.ensure_legacy_entry")(
-    function* (versionDir: string) {
-      if (input.nodePath !== undefined) return;
-      const legacyDir = input.path.join(versionDir, "node_modules", "t3", "dist");
-      const entryPath = input.path.join(legacyDir, "bin.mjs");
-      if (yield* fs.exists(entryPath)) return;
-      yield* fs.makeDirectory(legacyDir, { recursive: true });
-      yield* fs.writeFileString(entryPath, legacyCliLauncherScript("archive"));
-    },
-    Effect.mapError(
-      (cause) =>
-        new PinnedRuntimeInstallError({
-          step: "writing the legacy service entry point",
-          cause,
-        }),
-    ),
-  );
   const paths = pinnedRuntimePaths(
     input.path,
     input.baseDir,
@@ -274,7 +253,6 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   const alreadyPinned =
     entryExists && Option.isSome(sentinel) && sentinel.value.trim() === input.version;
   if (alreadyPinned) {
-    yield* ensureLegacyEntry(paths.versionDir);
     yield* input.validate(paths);
     return paths;
   }
@@ -374,8 +352,6 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
         );
     }
 
-    yield* ensureLegacyEntry(stagingDir);
-
     yield* input.validate(stagingPaths);
     yield* fs
       .writeFileString(stagingPaths.sentinelPath, `${input.version}\n`)
@@ -414,10 +390,7 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
         ),
       ),
     );
-    if (!published) {
-      yield* ensureLegacyEntry(paths.versionDir);
-      yield* input.validate(paths);
-    }
+    if (!published) yield* input.validate(paths);
     return paths;
   }).pipe(
     Effect.ensuring(fs.remove(stagingDir, { recursive: true, force: true }).pipe(Effect.ignore)),
