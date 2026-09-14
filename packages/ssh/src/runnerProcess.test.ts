@@ -23,6 +23,7 @@ const decodeStarted = Schema.decodeUnknownSync(Schema.fromJsonString(Started));
 describe.skipIf(HostProcessPlatform.defaultValue() === "win32")(
   "remote runner process ownership",
   () => {
+<<<<<<< HEAD
     it.live.each(["npx", "npm"] as const)(
       "keeps the server PID and graceful shutdown through the %s fallback",
       (packageManager) =>
@@ -40,6 +41,21 @@ describe.skipIf(HostProcessPlatform.defaultValue() === "win32")(
           yield* fs.writeFileString(
             cliPath,
             `#!/usr/bin/env node
+=======
+    it.live("keeps the server PID and graceful shutdown through the node-script runner", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-runner-" });
+        const bin = path.join(fixture, "bin");
+        const cliPath = path.join(fixture, "installed cli.mjs");
+        yield* fs.makeDirectory(bin);
+        yield* fs.symlink(process.execPath, path.join(bin, "node"));
+        yield* fs.writeFileString(
+          cliPath,
+          `#!/usr/bin/env node
+>>>>>>> 6f00d3881a197dd33c2cb43c6a11a9e759e56089
 import * as net from "node:net";
 const server = net.createServer((socket) => {
   socket.end();
@@ -56,94 +72,77 @@ server.listen(Number(process.env.T3_TEST_PORT ?? 0), "127.0.0.1", () => {
   }) + "\\n");
 });
 `,
-          );
-          yield* fs.chmod(cliPath, 0o700);
-          yield* fs.writeFileString(
-            path.join(bin, packageManager),
-            `#!/usr/bin/env node
-const fs = require("node:fs");
-const childProcess = require("node:child_process");
-const args = process.argv.slice(2);
-fs.appendFileSync(process.env.T3_TEST_CALLS, JSON.stringify(args) + "\\n");
-if (args.includes("--package")) {
-  process.stdout.write(process.env.T3_TEST_CLI + "\\n");
-} else {
-  const child = childProcess.spawn(process.execPath, [process.env.T3_TEST_CLI, ...args], { stdio: "inherit" });
-  child.once("exit", (code) => { process.exitCode = code ?? 1; });
-}
-`,
-          );
-          yield* fs.chmod(path.join(bin, packageManager), 0o700);
+        );
+        yield* fs.chmod(cliPath, 0o700);
 
-          const runServer = (port = 0) =>
-            Effect.gen(function* () {
-              const child = yield* spawner.spawn(
-                ChildProcess.make("/bin/sh", ["-s", "--", "serve", "a path with spaces"], {
-                  cwd: fixture,
-                  env: {
-                    PATH: bin,
-                    T3_TEST_CLI: cliPath,
-                    T3_TEST_CALLS: callsPath,
-                    T3_TEST_PORT: String(port),
-                  },
-                  detached: false,
-                  stdin: Stream.make(
-                    new TextEncoder().encode(buildRemoteT3RunnerScript({ packageSpec })),
-                  ),
-                }),
-              );
-              const ready = yield* Deferred.make<typeof Started.Type>();
-              const stdout: string[] = [];
-              const output = yield* child.stdout.pipe(
-                Stream.decodeText(),
-                Stream.splitLines,
-                Stream.runForEach((line) =>
-                  Effect.gen(function* () {
-                    stdout.push(line);
-                    if (stdout.length === 1) {
-                      yield* Deferred.succeed(ready, decodeStarted(line));
-                    }
-                  }),
+        const runServer = (port = 0) =>
+          Effect.gen(function* () {
+            const child = yield* spawner.spawn(
+              ChildProcess.make("/bin/sh", ["-s", "--", "serve", "a path with spaces"], {
+                cwd: fixture,
+                env: {
+                  PATH: bin,
+                  T3_TEST_PORT: String(port),
+                },
+                detached: false,
+                stdin: Stream.make(
+                  new TextEncoder().encode(buildRemoteT3RunnerScript({ nodeScriptPath: cliPath })),
                 ),
-                Effect.forkScoped,
-              );
-              const stderr = yield* child.stderr.pipe(
-                Stream.decodeText(),
-                Stream.mkString,
-                Effect.forkScoped,
-              );
-              const receipt = yield* Effect.raceFirst(
-                Deferred.await(ready),
-                Fiber.join(output).pipe(
-                  Effect.flatMap(() => Fiber.join(stderr)),
-                  Effect.flatMap((message) =>
-                    Effect.die(new Error(`Runner exited before listening: ${message}`)),
-                  ),
-                ),
-              );
-              // A failed PID assertion must still close the owned fixture server, including an npm child.
-              yield* Effect.addFinalizer(() =>
+              }),
+            );
+            const ready = yield* Deferred.make<typeof Started.Type>();
+            const stdout: string[] = [];
+            const output = yield* child.stdout.pipe(
+              Stream.decodeText(),
+              Stream.splitLines,
+              Stream.runForEach((line) =>
                 Effect.gen(function* () {
-                  if (yield* child.isRunning) {
-                    yield* Effect.callback<void>((resume) => {
-                      const connection = NodeNet.connect(receipt.port, "127.0.0.1");
-                      connection.on("error", () => undefined);
-                      connection.once("close", () => resume(Effect.void));
-                      return Effect.sync(() => connection.destroy());
-                    });
-                    yield* child.exitCode;
+                  stdout.push(line);
+                  if (stdout.length === 1) {
+                    yield* Deferred.succeed(ready, decodeStarted(line));
                   }
-                }).pipe(Effect.orDie),
-              );
-              assert.equal(receipt.pid, child.pid);
-              assert.deepEqual(receipt.args, ["serve", "a path with spaces"]);
-              yield* child.kill({ killSignal: "SIGTERM" });
-              assert.equal(yield* child.exitCode, 0);
-              yield* Fiber.join(output);
-              assert.include(stdout, "graceful shutdown");
-              return receipt.port;
-            }).pipe(Effect.scoped);
+                }),
+              ),
+              Effect.forkScoped,
+            );
+            const stderr = yield* child.stderr.pipe(
+              Stream.decodeText(),
+              Stream.mkString,
+              Effect.forkScoped,
+            );
+            const receipt = yield* Effect.raceFirst(
+              Deferred.await(ready),
+              Fiber.join(output).pipe(
+                Effect.flatMap(() => Fiber.join(stderr)),
+                Effect.flatMap((message) =>
+                  Effect.die(new Error(`Runner exited before listening: ${message}`)),
+                ),
+              ),
+            );
+            // A failed PID assertion must still close the owned fixture server.
+            yield* Effect.addFinalizer(() =>
+              Effect.gen(function* () {
+                if (yield* child.isRunning) {
+                  yield* Effect.callback<void>((resume) => {
+                    const connection = NodeNet.connect(receipt.port, "127.0.0.1");
+                    connection.on("error", () => undefined);
+                    connection.once("close", () => resume(Effect.void));
+                    return Effect.sync(() => connection.destroy());
+                  });
+                  yield* child.exitCode;
+                }
+              }).pipe(Effect.orDie),
+            );
+            assert.equal(receipt.pid, child.pid);
+            assert.deepEqual(receipt.args, ["serve", "a path with spaces"]);
+            yield* child.kill({ killSignal: "SIGTERM" });
+            assert.equal(yield* child.exitCode, 0);
+            yield* Fiber.join(output);
+            assert.include(stdout, "graceful shutdown");
+            return receipt.port;
+          }).pipe(Effect.scoped);
 
+<<<<<<< HEAD
           const port = yield* runServer();
           assert.equal(yield* runServer(port), port);
           const calls = (yield* fs.readFileString(callsPath))
@@ -162,6 +161,11 @@ if (args.includes("--package")) {
           ];
           assert.deepEqual(calls, [expectedCall, expectedCall]);
         }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+=======
+        const port = yield* runServer();
+        assert.equal(yield* runServer(port), port);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+>>>>>>> 6f00d3881a197dd33c2cb43c6a11a9e759e56089
     );
   },
 );
@@ -288,6 +292,7 @@ server.listen(0, "127.0.0.1", () => {
     );
   },
 );
+<<<<<<< HEAD
 
 describe.skipIf(HostProcessPlatform.defaultValue() === "win32")(
   "remote runner install diagnostics",
@@ -428,3 +433,5 @@ if (mode === "etarget" || mode === "failed-with-path") {
     );
   },
 );
+=======
+>>>>>>> 6f00d3881a197dd33c2cb43c6a11a9e759e56089

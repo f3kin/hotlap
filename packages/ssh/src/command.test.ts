@@ -14,7 +14,6 @@ import {
   baseSshArgs,
   getLastNonEmptyOutputLine,
   parseSshResolveOutput,
-  resolveRemoteT3CliPackageSpec,
   runSshCommand,
 } from "./command.ts";
 import { SshCommandError } from "./errors.ts";
@@ -99,6 +98,7 @@ describe("ssh command", () => {
     }),
   );
 
+<<<<<<< HEAD
   it.effect("resolves the remote t3 package spec from the desktop release channel", () =>
     Effect.sync(() => {
       assert.equal(
@@ -134,6 +134,8 @@ describe("ssh command", () => {
     }),
   );
 
+=======
+>>>>>>> 6f00d3881a197dd33c2cb43c6a11a9e759e56089
   it.effect("reads the last non-empty ssh output line", () =>
     Effect.sync(() => {
       assert.equal(
