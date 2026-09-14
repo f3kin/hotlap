@@ -1,13 +1,18 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
-import { HostProcessExecutablePath } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessArchitecture,
+  HostProcessPlatform,
+  HostProcessIsExecutable,
+} from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as ServerConfig from "../config.ts";
@@ -18,12 +23,35 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
 
 interface HarnessOptions {
+  readonly npm?: boolean;
   readonly mode?: "web" | "desktop";
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
 }
+
+// The staged runtime is a release archive: the fake client serves SHA256SUMS
+// and the tarball, and the fake runner stands in for tar before it answers
+// the staged preflight.
+const archiveBytes = new TextEncoder().encode("not really a tarball");
+const releaseHttpClient = (order: string[]) =>
+  HttpClient.make((request) =>
+    Effect.gen(function* () {
+      if (request.url.endsWith("/SHA256SUMS")) {
+        const digest = yield* Effect.promise(() => crypto.subtle.digest("SHA-256", archiveBytes));
+        const hex = Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join("");
+        return HttpClientResponse.fromWeb(
+          request,
+          new Response(`${hex}  hotlap-1.1.0-linux-x64.tar.gz\n`),
+        );
+      }
+      order.push("download");
+      return HttpClientResponse.fromWeb(request, new Response(archiveBytes));
+    }),
+  );
 
 const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   options: HarnessOptions = {},
@@ -35,13 +63,17 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.gen(function* () {
-        if (input.command === "npm") {
-          order.push("install");
-          const prefix = input.args[input.args.indexOf("--prefix") + 1];
-          if (prefix === undefined) return yield* Effect.die("missing npm prefix");
-          const entry = path.join(prefix, "node_modules", "hotlap", "dist", "bin.mjs");
+        if (input.command === "tar" || input.command === "npm") {
+          order.push(input.command === "npm" ? "npm" : "extract");
+          const stagingDir =
+            input.args[input.args.indexOf(input.command === "npm" ? "--prefix" : "-C") + 1];
+          if (stagingDir === undefined) return yield* Effect.die("missing tar target");
+          const entry =
+            input.command === "npm"
+              ? path.join(stagingDir, "node_modules", "hotlap", "dist", "bin.mjs")
+              : path.join(stagingDir, "t3");
           yield* fs.makeDirectory(path.dirname(entry), { recursive: true }).pipe(Effect.orDie);
-          yield* fs.writeFileString(entry, "export {};\n").pipe(Effect.orDie);
+          yield* fs.writeFileString(entry, "#!/bin/sh\n").pipe(Effect.orDie);
           return {
             stdout: "",
             stderr: "",
@@ -54,6 +86,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           };
         }
         order.push("preflight");
+        if (options.npm) expect(input.args[0]).toContain("/node_modules/hotlap/dist/bin.mjs");
         const result =
           options.preflight === "blocked"
             ? { status: "blocked", version: "1.1.0", reason: "local update required" }
@@ -99,13 +132,23 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         run: () => Effect.die("unexpected desktop app update run"),
       },
     ),
-    Effect.provideService(HostProcessExecutablePath, "/usr/bin/node"),
+    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
+    Effect.provideService(HostProcessPlatform, "linux"),
+    Effect.provideService(HostProcessIsExecutable, !options.npm),
+    Effect.provideService(HostProcessArchitecture, "x64"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
   return { selfUpdate, order };
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect("stages npm updates for existing Node service launchers", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ npm: true });
+      yield* selfUpdate.update({ targetVersion: "1.1.0" });
+      expect(order).toEqual(["npm", "preflight", "accept"]);
+    }),
+  );
   it.effect("marks running threads at the boot-service handoff", () =>
     Effect.gen(function* () {
       const events: string[] = [];
@@ -329,7 +372,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         method: "boot-service",
         updateId: "launcher-id",
       });
-      expect(order).toEqual(["install", "preflight", "accept"]);
+      expect(order).toEqual(["download", "extract", "preflight", "accept"]);
     }),
   );
 

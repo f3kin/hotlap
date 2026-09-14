@@ -43,7 +43,8 @@ function detectCliRunner(entryPath: string): CliRunner | null {
  * anything else suggests the bare package.
  */
 function suggestedPackageSpec(version: string): string {
-  return version.includes("-nightly.") ? "hotlap@nightly" : "hotlap";
+  const channel = /^[^-+]+-(nightly|preview)\./.exec(version)?.[1];
+  return channel === undefined ? "hotlap" : `hotlap@${channel}`;
 }
 
 /**

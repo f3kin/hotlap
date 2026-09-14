@@ -21,7 +21,6 @@ import {
   ensureTailscaleServe,
   readTailscaleStatus,
 } from "@t3tools/tailscale";
-import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -54,7 +53,8 @@ import {
   renderTerminalQrCode,
   resolveHeadlessConnectionString,
 } from "../startupAccess.ts";
-import { baseDirFlag, DurationFromString } from "./config.ts";
+import { baseDirFlag, dataHomeEnv, DurationFromString } from "./config.ts";
+import { HostProcessWorkingDirectory } from "@t3tools/shared/hostProcess";
 
 const WELL_KNOWN_ENVIRONMENT_PATH = "/.well-known/t3/environment";
 const PAIR_PROBE_TIMEOUT = Duration.millis(2_500);
@@ -237,7 +237,7 @@ interface DiscoveredPairTarget {
   readonly descriptor: ExecutionEnvironmentDescriptor;
 }
 
-const discoverPairTarget = Effect.fn("pair.discoverPairTarget")(function* (
+export const discoverPairTarget = Effect.fn("pair.discoverPairTarget")(function* (
   explicitBaseDir: string | undefined,
 ) {
   const bases: Array<string> = [];
@@ -247,11 +247,11 @@ const discoverPairTarget = Effect.fn("pair.discoverPairTarget")(function* (
     // Same precedence as dev-runner: inside a linked worktree its own `.t3`
     // outranks the shared home, so `t3 pair` in a worktree pairs with the dev
     // server under test rather than the daily-driver install.
-    const worktreeHome = yield* resolveWorktreeT3Home(process.cwd());
+    const worktreeHome = yield* resolveWorktreeT3Home(yield* HostProcessWorkingDirectory);
     if (worktreeHome !== undefined) {
       bases.push(worktreeHome);
     }
-    const envHome = yield* Config.string("T3CODE_HOME").pipe(Config.option);
+    const envHome = yield* dataHomeEnv;
     bases.push(yield* resolveBaseDir(Option.getOrUndefined(envHome)));
   }
 

@@ -16,7 +16,6 @@ import * as NodeReadlinePromises from "node:readline/promises";
 
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
-import * as Config from "effect/Config";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -30,7 +29,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
-import { baseDirFlag } from "./config.ts";
+import { baseDirFlag, dataHomeEnv } from "./config.ts";
 import { resolveCliCommand } from "./invocation.ts";
 import {
   buildTriageContext,
@@ -152,6 +151,16 @@ const modelFlag = Flag.string("model").pipe(
   Flag.optional,
 );
 
+export const resolveTriagePaths = Effect.fn("cli.triage.paths")(function* (
+  explicitBaseDir: Option.Option<string>,
+) {
+  const envHome = yield* dataHomeEnv;
+  const baseDir = yield* resolveBaseDir(
+    Option.getOrUndefined(Option.orElse(explicitBaseDir, () => envHome)),
+  );
+  return { baseDir, ...(yield* ServerConfig.deriveServerPaths(baseDir, undefined, {})) };
+});
+
 export const triageCommand = Command.make("triage", {
   baseDir: baseDirFlag,
   agent: agentFlag,
@@ -166,12 +175,7 @@ export const triageCommand = Command.make("triage", {
       const path = yield* Path.Path;
 
       // Triage is a user-facing feature: always the userdata state, never dev.
-      // --base-dir wins; T3CODE_HOME is its documented env equivalent (same
-      // precedence as `t3 pair`).
-      const explicitBaseDir = Option.getOrUndefined(flags.baseDir);
-      const envHome = yield* Config.string("T3CODE_HOME").pipe(Config.option);
-      const baseDir = yield* resolveBaseDir(explicitBaseDir ?? Option.getOrUndefined(envHome));
-      const paths = yield* ServerConfig.deriveServerPaths(baseDir, undefined, {});
+      const paths = yield* resolveTriagePaths(flags.baseDir);
 
       const now = yield* DateTime.now;
       const scratchDir = path.join(
@@ -189,8 +193,8 @@ export const triageCommand = Command.make("triage", {
         buildTriageContext({
           generatedAt: DateTime.formatIso(now),
           version,
-          releaseTag: version.includes("-nightly.")
-            ? `v${version} (nightly build; if this tag does not exist, clone main)`
+          releaseTag: /^[^-+]+-(?:nightly|preview)\./.test(version)
+            ? `v${version} (prerelease build; if this tag does not exist, clone main)`
             : `v${version}`,
           os: `${yield* HostProcessPlatform} ${yield* HostProcessArchitecture} (${NodeOS.release()})`,
           nodeVersion: process.version,
@@ -207,7 +211,7 @@ export const triageCommand = Command.make("triage", {
             terminalLogsDir: paths.terminalLogsDir,
             providerStatusCacheDir: paths.providerStatusCacheDir,
             secretsDir: paths.secretsDir,
-            sourceCacheDir: path.join(baseDir, "source"),
+            sourceCacheDir: path.join(paths.baseDir, "source"),
           },
         }),
       );

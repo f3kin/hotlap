@@ -6,12 +6,15 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { HostProcessEnvironment, HostProcessWorkingDirectory } from "@t3tools/shared/hostProcess";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/unstable/cli";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
 import { cli } from "../bin.ts";
 import {
@@ -26,6 +29,7 @@ import {
 } from "../serverRuntimeState.ts";
 import {
   DevServerNotProxiableError,
+  discoverPairTarget,
   resolveDirectPairingBaseUrl,
   resolveTailscaleLocalTarget,
 } from "./pair.ts";
@@ -33,6 +37,51 @@ import {
 import packageJson from "../../package.json" with { type: "json" };
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
+
+it.effect.each(["hotlap", "legacy", "flag", "worktree"] as const)(
+  "pair discovery preserves %s home precedence",
+  (source) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "hotlap-pair-home-" });
+      const hotlap = NodePath.join(root, "hotlap");
+      const legacy = NodePath.join(root, "legacy");
+      const explicit = NodePath.join(root, "explicit");
+      if (source === "worktree") {
+        yield* fs.writeFileString(
+          NodePath.join(root, ".git"),
+          "gitdir: /elsewhere/.git/worktrees/test\n",
+        );
+      }
+      const result = yield* discoverPairTarget(source === "flag" ? explicit : undefined).pipe(
+        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: {
+                T3CODE_HOME: legacy,
+                ...(source === "legacy" ? {} : { HOTLAP_HOME: hotlap }),
+              },
+            }),
+          ),
+        ),
+        Effect.flip,
+      );
+      assert.equal(result._tag, "NoRunningServerError");
+      if (result._tag === "NoRunningServerError") {
+        const selected = source === "flag" ? explicit : source === "legacy" ? legacy : hotlap;
+        const bases = source === "worktree" ? [NodePath.join(root, ".t3"), selected] : [selected];
+        assert.deepEqual(
+          result.checkedStatePaths,
+          bases.flatMap((base) =>
+            ["userdata", "dev"].map((variant) =>
+              NodePath.join(base, variant, "server-runtime.json"),
+            ),
+          ),
+        );
+      }
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(CliRuntimeLayer, FetchHttpClient.layer))),
+);
 
 const baseState = {
   version: 1,

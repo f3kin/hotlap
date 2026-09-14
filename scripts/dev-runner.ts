@@ -320,7 +320,7 @@ export function createDevRunnerEnv({
   return Effect.gen(function* () {
     const serverPort = port ?? BASE_SERVER_PORT + serverOffset;
     const webPort = BASE_WEB_PORT + webOffset;
-    // Precedence (--home-dir > worktree .t3 > ambient T3CODE_HOME) is resolved
+    // Precedence (--home-dir > worktree .t3 > ambient home aliases) is resolved
     // by the caller; an unset t3Home here genuinely means "use the default".
     const configuredBaseDir = t3Home?.trim() || undefined;
     const resolvedBaseDir = yield* resolveBaseDir(configuredBaseDir);
@@ -336,8 +336,10 @@ export function createDevRunnerEnv({
 
     if (configuredBaseDir !== undefined) {
       output.T3CODE_HOME = resolvedBaseDir;
+      output.HOTLAP_HOME = resolvedBaseDir;
     } else {
       delete output.T3CODE_HOME;
+      delete output.HOTLAP_HOME;
     }
 
     // A dev-runner server is never launcher-managed. When the shell that runs
@@ -388,6 +390,7 @@ export function createDevRunnerEnv({
       delete output.T3CODE_MODE;
       delete output.T3CODE_NO_BROWSER;
       delete output.T3CODE_HOST;
+      delete output.T3CODE_DEV_AUTH_TOKEN;
     }
 
     if (!isDesktopMode && host !== undefined) {
@@ -676,7 +679,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const hostEnvironment = yield* HostProcessEnvironment;
     // A dev server started inside a worktree defaults to that worktree's own
     // (gitignored) `.t3` — see @t3tools/shared/devHome for why this must
-    // outrank an ambient T3CODE_HOME. `--home-dir` still wins.
+    // outrank either ambient home alias. `--home-dir` still wins.
     const worktreeHome = yield* resolveWorktreeT3Home(yield* HostProcessWorkingDirectory);
     // Trim before choosing: `--home-dir ""` is not a selection, and treating it
     // as one would skip the worktree default and land on the shared home —
@@ -684,6 +687,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const resolvedT3Home =
       (input.t3Home?.trim() || undefined) ??
       worktreeHome ??
+      (hostEnvironment.HOTLAP_HOME?.trim() || undefined) ??
       (hostEnvironment.T3CODE_HOME?.trim() || undefined);
     const env = yield* createDevRunnerEnv({
       mode: input.mode,

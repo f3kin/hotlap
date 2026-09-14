@@ -25,7 +25,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command } from "effect/unstable/cli";
 
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
-import { baseDirFlag } from "./config.ts";
+import { baseDirFlag, dataHomeEnv } from "./config.ts";
 
 const CLI_RESPONSE_TIMEOUT_MS = 17_000;
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -178,7 +178,7 @@ function sendDesktopAppActivationRequest(input: {
 }
 
 const appEnvironment = Config.all({
-  t3Home: Config.string("T3CODE_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  t3Home: dataHomeEnv.pipe(Config.map(Option.getOrUndefined)),
   sshConnection: Config.string("SSH_CONNECTION").pipe(Config.option),
   sshTty: Config.string("SSH_TTY").pipe(Config.option),
 });

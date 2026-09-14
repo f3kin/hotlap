@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as LogLevel from "effect/LogLevel";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -65,7 +66,7 @@ const hostFlag = Flag.string("host").pipe(
 );
 export const baseDirFlag = Flag.string("base-dir").pipe(
   Flag.withDescription(
-    "Explicit T3 Code data directory; runtime state is stored under userdata (equivalent to T3CODE_HOME).",
+    "Explicit Hotlap data directory; overrides HOTLAP_HOME and legacy T3CODE_HOME. Runtime state is stored under userdata.",
   ),
   Flag.optional,
 );
@@ -108,6 +109,19 @@ const tailscaleServePortFlag = Flag.integer("tailscale-serve-port").pipe(
   Flag.optional,
 );
 
+/** Shared by every CLI command so alternate profiles cannot silently diverge. */
+export const dataHomeEnv = Config.all({
+  hotlap: Config.string("HOTLAP_HOME").pipe(Config.option),
+  legacy: Config.string("T3CODE_HOME").pipe(Config.option),
+}).pipe(
+  Config.map(({ hotlap, legacy }) =>
+    Option.orElse(
+      Option.filter(hotlap, (value) => value.trim().length > 0),
+      () => Option.filter(legacy, (value) => value.trim().length > 0),
+    ),
+  ),
+);
+
 const EnvServerConfig = Config.all({
   logLevel: Config.logLevel("T3CODE_LOG_LEVEL").pipe(Config.withDefault("Info")),
   traceMinLevel: Config.logLevel("T3CODE_TRACE_MIN_LEVEL").pipe(Config.withDefault("Info")),
@@ -137,7 +151,7 @@ const EnvServerConfig = Config.all({
   ),
   port: Config.port("T3CODE_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
   host: Config.string("T3CODE_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
-  t3Home: Config.string("T3CODE_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  t3Home: dataHomeEnv.pipe(Config.map(Option.getOrUndefined)),
   devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   devAllowedOrigins: Config.string("T3CODE_DEV_ALLOWED_ORIGINS").pipe(
     Config.withDefault(""),
@@ -173,6 +187,26 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
 });
+
+const DevAuthTokenConfig = Config.redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
+  Config.map((token) => Redacted.make(Redacted.value(token).trim())),
+  Config.mapOrFail((token) =>
+    Redacted.value(token).length === 0 || Redacted.value(token).length >= 32
+      ? Effect.succeed(token)
+      : Effect.fail(
+          new Config.ConfigError(
+            new Schema.SchemaError(
+              new SchemaIssue.InvalidValue({
+                message: "T3CODE_DEV_AUTH_TOKEN must contain at least 32 characters.",
+              }),
+            ),
+          ),
+        ),
+  ),
+  Config.option,
+  Config.map(Option.filter((token) => Redacted.value(token).length > 0)),
+  Config.map(Option.getOrUndefined),
+);
 
 export interface CliServerFlags {
   readonly mode: Option.Option<ServerConfig.RuntimeMode>;
@@ -301,6 +335,8 @@ export const resolveServerConfig = (
       resolveOptionPrecedence(normalizedFlags.devUrl, Option.fromUndefinedOr(env.devUrl)),
       () => undefined,
     );
+    const devAuthToken =
+      mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
     const explicitBaseDir = resolveOptionPrecedence(
       normalizedFlags.baseDir,
       Option.fromUndefinedOr(env.t3Home),
@@ -407,6 +443,7 @@ export const resolveServerConfig = (
       host,
       staticDir,
       devUrl,
+      ...(devAuthToken === undefined ? {} : { devAuthToken }),
       devAllowedOrigins: env.devAllowedOrigins,
       noBrowser,
       startupPresentation,
