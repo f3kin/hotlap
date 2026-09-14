@@ -10,6 +10,7 @@ import {
   decodeServiceState,
   isExactServiceVersion,
   SERVICE_LAUNCHER_PROTOCOL,
+  SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
 
@@ -75,6 +76,30 @@ it("rejects contradictory service state", () => {
   );
 });
 
+// A pinned runtime is an executable at <versionDir>/t3. The tests stand one up
+// as a Node shebang script so the launcher spawns it the way it spawns the
+// real single-executable, IPC channel included.
+const writeFakeRuntime = (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  versionDir: string,
+  childSource: string,
+  npm = false,
+) =>
+  Effect.gen(function* () {
+    const entryPath = npm
+      ? path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs")
+      : path.join(versionDir, "t3");
+    yield* fs.makeDirectory(path.dirname(entryPath), { recursive: true });
+    yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
+    yield* fs.chmod(entryPath, 0o755);
+    yield* fs.writeFileString(
+      path.join(versionDir, ".install-complete"),
+      `${path.basename(versionDir)}\n`,
+    );
+    return entryPath;
+  });
+
 it.layer(NodeServices.layer)("service state persistence", (it) => {
   it.effect("durably replaces and strictly reads one state document", () =>
     Effect.gen(function* () {
@@ -92,17 +117,63 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
-  it.effect("serializes shutdown with launcher recovery", () =>
+  it.effect("a fresh launcher clears a restart deferred by t3 update", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-restart-" });
+      const statePath = path.join(root, "runtime", "service-state.json");
+      const restartPending = path.join(root, "runtime", SERVICE_RESTART_PENDING_FILE);
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        "setInterval(() => {}, 1_000);\n",
+      );
+      yield* Effect.promise(() =>
+        writeServiceState(statePath, {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+        }),
+      );
+      const run = () =>
+        Effect.gen(function* () {
+          const launcher = new Launcher(
+            root,
+            yield* Effect.promise(() => readServiceState(statePath)),
+          );
+          const running = launcher.run();
+          yield* Effect.promise(() => launcher.stop("SIGTERM"));
+          yield* Effect.promise(() => running);
+        });
+
+      // A launcher that is still the old version leaves a marker that waits
+      // for a newer one.
+      yield* fs.writeFileString(restartPending, "1.0.1\n");
+      yield* run();
+      assert.isTrue(yield* fs.exists(restartPending));
+
+      // Whoever restarted the service, the launcher now runs what the unit
+      // names, so the deferred-restart marker is gone.
+      yield* fs.writeFileString(restartPending, "1.0.0\n");
+      yield* run();
+      assert.isFalse(yield* fs.exists(restartPending));
+    }),
+  );
+
+  it.effect.each([false, true])("serializes shutdown with launcher recovery (npm=%s)", (npm) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-stop-" });
       const statePath = path.join(root, "runtime", "service-state.json");
-      const versionDir = path.join(root, "runtime", "versions", "1.0.0");
-      const entryPath = path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs");
-      yield* fs.makeDirectory(path.dirname(entryPath), { recursive: true });
-      yield* fs.writeFileString(entryPath, "setInterval(() => {}, 1_000);\n");
-      yield* fs.writeFileString(path.join(versionDir, ".install-complete"), "1.0.0\n");
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        "setInterval(() => {}, 1_000);\n",
+        npm,
+      );
       yield* Effect.promise(() =>
         writeServiceState(statePath, {
           protocol: SERVICE_LAUNCHER_PROTOCOL,
@@ -122,7 +193,7 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
-  it.effect("commits only after the trial reports prepared", () =>
+  it.effect.each([false, true])("commits only after the trial reports prepared (npm=%s)", (npm) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -133,7 +204,10 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
       yield* fs.writeFileString(databasePath, "before trial");
       // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds a path in fake child source.
       const encodedDatabasePath = JSON.stringify(databasePath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off - embeds the expected home in fake child source.
+      const encodedRoot = JSON.stringify(root);
       const childSource = `
+if (process.env.HOTLAP_HOME !== ${encodedRoot} || process.env.T3CODE_HOME !== ${encodedRoot}) throw new Error("wrong child home");
 const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
 if (context.update?.status === "pending") {
   process.send({ type: "prepared", updateId: context.update.id });
@@ -148,11 +222,13 @@ if (context.update?.status === "pending") {
 }
 `;
       for (const version of ["1.0.0", "1.1.0"]) {
-        const versionDir = path.join(root, "runtime", "versions", version);
-        const entryPath = path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs");
-        yield* fs.makeDirectory(path.dirname(entryPath), { recursive: true });
-        yield* fs.writeFileString(entryPath, childSource);
-        yield* fs.writeFileString(path.join(versionDir, ".install-complete"), `${version}\n`);
+        yield* writeFakeRuntime(
+          fs,
+          path,
+          path.join(root, "runtime", "versions", version),
+          childSource,
+          npm,
+        );
       }
       yield* Effect.promise(() =>
         writeServiceState(statePath, {
@@ -198,11 +274,12 @@ if (context.update?.status === "pending") {
 }
 `;
       for (const version of ["1.0.0", "1.1.0"]) {
-        const versionDir = path.join(root, "runtime", "versions", version);
-        const entryPath = path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs");
-        yield* fs.makeDirectory(path.dirname(entryPath), { recursive: true });
-        yield* fs.writeFileString(entryPath, childSource);
-        yield* fs.writeFileString(path.join(versionDir, ".install-complete"), `${version}\n`);
+        yield* writeFakeRuntime(
+          fs,
+          path,
+          path.join(root, "runtime", "versions", version),
+          childSource,
+        );
       }
       yield* Effect.promise(() =>
         writeServiceState(statePath, {
@@ -257,11 +334,12 @@ if (context.update?.status === "pending") {
 }
 `;
       for (const version of ["1.0.0", "1.1.0"]) {
-        const versionDir = path.join(root, "runtime", "versions", version);
-        const entryPath = path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs");
-        yield* fs.makeDirectory(path.dirname(entryPath), { recursive: true });
-        yield* fs.writeFileString(entryPath, childSource);
-        yield* fs.writeFileString(path.join(versionDir, ".install-complete"), `${version}\n`);
+        yield* writeFakeRuntime(
+          fs,
+          path,
+          path.join(root, "runtime", "versions", version),
+          childSource,
+        );
       }
       yield* Effect.promise(() =>
         writeServiceState(statePath, {

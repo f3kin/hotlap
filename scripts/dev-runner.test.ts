@@ -152,6 +152,27 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("createDevRunnerEnv", () => {
+    it.effect("forwards the reusable auth token to web dev and removes it for desktop", () =>
+      Effect.gen(function* () {
+        const input = {
+          baseEnv: { T3CODE_DEV_AUTH_TOKEN: "reusable-dev-auth-token-that-is-long-enough" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        } as const;
+        const web = yield* createDevRunnerEnv({ ...input, mode: "dev" });
+        const desktop = yield* createDevRunnerEnv({ ...input, mode: "dev:desktop" });
+
+        assert.equal(web.T3CODE_DEV_AUTH_TOKEN, input.baseEnv.T3CODE_DEV_AUTH_TOKEN);
+        assert.equal(desktop.T3CODE_DEV_AUTH_TOKEN, undefined);
+      }),
+    );
     it.effect("leaves the shared home implicit and disables browser auto-open", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
@@ -897,7 +918,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
-          baseEnv: { T3CODE_HOME: "/home/user/.t3" },
+          baseEnv: { T3CODE_HOME: "/home/user/.t3", HOTLAP_HOME: "/live/hotlap" },
           serverOffset: 0,
           webOffset: 0,
           t3Home: undefined,
@@ -910,6 +931,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         });
 
         assert.equal(env.T3CODE_HOME, undefined);
+        assert.equal(env.HOTLAP_HOME, undefined);
       }),
     );
 
@@ -1238,6 +1260,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         readonly t3Home: string | undefined;
         readonly cwd: string;
         readonly ambientHome: string | undefined;
+        readonly hotlapHome?: string;
       }) =>
         Effect.gen(function* () {
           let captured: Record<string, string | undefined> | undefined;
@@ -1257,12 +1280,13 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
             Effect.provideService(HostProcessPlatform, "linux"),
             Effect.provideService(HostProcessWorkingDirectory, input.cwd),
-            Effect.provideService(
-              HostProcessEnvironment,
-              input.ambientHome === undefined ? {} : { T3CODE_HOME: input.ambientHome },
-            ),
+            Effect.provideService(HostProcessEnvironment, {
+              T3CODE_HOME: input.ambientHome,
+              HOTLAP_HOME: input.hotlapHome ?? input.ambientHome,
+            }),
           );
 
+          assert.equal(captured?.HOTLAP_HOME, captured?.T3CODE_HOME);
           return captured?.T3CODE_HOME;
         });
 
@@ -1325,6 +1349,18 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             ambientHome: undefined,
           });
           assert.equal(home, undefined);
+        }),
+      );
+
+      it.effect("prefers HOTLAP_HOME over the legacy alias outside a worktree", () =>
+        Effect.gen(function* () {
+          const home = yield* spawnedHome({
+            t3Home: undefined,
+            cwd: NodeOS.tmpdir(),
+            ambientHome: "/tmp/legacy-home",
+            hotlapHome: "/tmp/hotlap-home",
+          });
+          assert.equal(home, "/tmp/hotlap-home");
         }),
       );
     });

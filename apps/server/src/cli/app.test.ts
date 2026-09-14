@@ -196,9 +196,11 @@ describe("t3 app", () => {
         const desktop = yield* fakeDesktop({ baseDir });
 
         yield* runCli(["app"], { T3CODE_HOME: baseDir });
+        yield* runCli(["app"], { HOTLAP_HOME: baseDir, T3CODE_HOME: NodePath.join(root, "wrong") });
         yield* runCli(["app", explicitPath, "--base-dir", baseDir]);
 
         expect(desktop.received.map((request) => request.workspaceRoot)).toEqual([
+          workingDirectory,
           workingDirectory,
           explicitPath,
         ]);

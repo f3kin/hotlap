@@ -343,12 +343,14 @@ describe("t3 theme", () => {
     }),
   );
 
-  it.effect("honors T3CODE_HOME like the rest of the CLI", () =>
+  it.effect.each(["T3CODE_HOME", "HOTLAP_HOME"])("honors %s like the rest of the CLI", (homeKey) =>
     Effect.gen(function* () {
       const baseDir = makeBaseDir();
       yield* runCli(["theme", "set", "ocean"]).pipe(
         Effect.provide(
-          ConfigProvider.layer(ConfigProvider.fromEnv({ env: { T3CODE_HOME: baseDir } })),
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({ env: { T3CODE_HOME: makeBaseDir(), [homeKey]: baseDir } }),
+          ),
         ),
       );
       assert.equal(readSettings(baseDir).defaultTheme, "ocean");

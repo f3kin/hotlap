@@ -1,44 +1,75 @@
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Encoding from "effect/Encoding";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+
+import {
+  CLI_RELEASE_CHECKSUMS_FILE,
+  cliArchiveFileName,
+  cliArchivePlatformKey,
+  cliArchiveTarCommand,
+  cliReleaseDownloadBaseUrl,
+  parseChecksums,
+} from "@t3tools/shared/cliRelease";
 
 import * as ProcessRunner from "../processRunner.ts";
 
 /**
- * A pinned runtime is an exact `t3@<version>` npm-installed into
- * <baseDir>/runtime/versions/<version>. The boot service points its unit or
- * launch agent here, and server self-update installs the target version here before
- * switching over, never `npx t3`, whose cache is ephemeral and whose
- * registry fetch at boot would make startup depend on the network.
+ * Node-managed services keep the npm layout understood by already-installed
+ * Hotlap launchers. Standalone executables use verified release archives.
+ * Both publish an immutable version only after validation succeeds.
  */
-
 const PINNED_RUNTIME_DIR = "runtime";
 const PINNED_RUNTIME_INSTALL_TIMEOUT = Duration.minutes(10);
+const PINNED_RUNTIME_ARCHIVE_FILE = "t3-runtime-archive";
 // Boot-service setup and remote update can construct separate layers. Serialize
 // the complete install transaction across every caller in this process.
 const pinnedRuntimeInstallLock = Semaphore.makeUnsafe(1);
 
 export interface PinnedRuntimePaths {
   readonly versionDir: string;
+  /** Executable or npm entrypoint; usable only with its completion sentinel. */
   readonly entryPath: string;
   readonly sentinelPath: string;
+  readonly nodePath?: string;
+}
+
+/** The exact command that runs a pinned runtime. */
+export function pinnedRuntimeCommand(paths: PinnedRuntimePaths): {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+} {
+  return paths.nodePath === undefined
+    ? { command: paths.entryPath, args: [] }
+    : { command: paths.nodePath, args: [paths.entryPath] };
+}
+
+export function pinnedRuntimeVersionsDir(path: Path.Path, baseDir: string): string {
+  return path.join(baseDir, PINNED_RUNTIME_DIR, "versions");
 }
 
 export function pinnedRuntimePaths(
   path: Path.Path,
   baseDir: string,
   version: string,
+  platform: NodeJS.Platform,
+  nodePath?: string,
 ): PinnedRuntimePaths {
-  const versionDir = path.join(baseDir, PINNED_RUNTIME_DIR, "versions", version);
+  const versionDir = path.join(pinnedRuntimeVersionsDir(path, baseDir), version);
   return {
     versionDir,
-    entryPath: path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs"),
+    entryPath:
+      nodePath === undefined
+        ? path.join(versionDir, platform === "win32" ? "t3.exe" : "t3")
+        : path.join(versionDir, "node_modules", "hotlap", "dist", "bin.mjs"),
     sentinelPath: path.join(versionDir, ".install-complete"),
+    ...(nodePath === undefined ? {} : { nodePath }),
   };
 }
 
@@ -72,11 +103,12 @@ export class PinnedRuntimePreflightBlockedError extends Schema.TaggedError<Pinne
 }
 
 /**
- * Installs `t3@<version>` into the pinned runtime directory unless a complete
- * install is already there, and returns its paths. The sentinel is written
- * only after npm exits 0; checking the entry file alone is not enough. npm
- * extracts files before running native builds (node-pty), so a killed
- * install leaves a plausible-looking but broken tree behind.
+ * Installs the selected Hotlap distribution for `version` into the pinned runtime
+ * directory unless a complete install is already there, and returns its
+ * paths. The sentinel is written only after extraction and validation
+ * succeed; checking the entry file alone is not enough, since tar writes the
+ * executable before the last native package and a killed install leaves a
+ * plausible-looking but broken tree behind.
  */
 interface PinnedRuntimeInstallInput {
   readonly baseDir: string;
@@ -87,13 +119,128 @@ interface PinnedRuntimeInstallInput {
   readonly validate: (
     paths: PinnedRuntimePaths,
   ) => Effect.Effect<void, PinnedRuntimeInstallError | PinnedRuntimePreflightBlockedError>;
+  readonly platform: NodeJS.Platform;
+  readonly arch: string;
+  readonly httpClient: HttpClient.HttpClient;
+  readonly releaseBaseUrl?: string | undefined;
+  readonly nodePath?: string | undefined;
 }
+
+const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(function* (
+  httpClient: HttpClient.HttpClient,
+  url: string,
+  step: string,
+) {
+  // The install lock is held for the whole transaction, so a stalled download
+  // must fail rather than block every other caller.
+  return yield* httpClient.execute(HttpClientRequest.get(url)).pipe(
+    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap((response) => response.arrayBuffer),
+    Effect.map((buffer) => new Uint8Array(buffer)),
+    Effect.mapError((cause) => new PinnedRuntimeInstallError({ step, cause })),
+    Effect.timeoutOrElse({
+      duration: PINNED_RUNTIME_INSTALL_TIMEOUT,
+      orElse: () => Effect.fail(new PinnedRuntimeInstallError({ step: `${step} (timed out)` })),
+    }),
+  );
+});
+
+/**
+ * Downloads the release archive for this platform, verifies it against the
+ * release's checksum file, and unpacks it so the executable sits directly in
+ * the staging directory. Only `tar` is required on the host; every supported
+ * OS ships one that reads gzip and zip.
+ */
+const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(function* (
+  input: PinnedRuntimeInstallInput,
+  stagingDir: string,
+) {
+  const { fs, path } = input;
+  const platformKey = cliArchivePlatformKey(input.platform, input.arch);
+  if (platformKey === undefined) {
+    return yield* new PinnedRuntimeInstallError({
+      step: `selecting a t3 release archive for ${input.platform}-${input.arch}`,
+    });
+  }
+  const httpClient = input.httpClient;
+  const baseUrl = cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl);
+  const fileName = cliArchiveFileName(input.version, platformKey);
+
+  const checksums = parseChecksums(
+    new TextDecoder().decode(
+      yield* fetchReleaseAsset(
+        httpClient,
+        `${baseUrl}/${CLI_RELEASE_CHECKSUMS_FILE}`,
+        "downloading the t3 release checksums",
+      ),
+    ),
+  );
+  const expected = checksums.get(fileName);
+  if (expected === undefined) {
+    return yield* new PinnedRuntimeInstallError({
+      step: `finding ${fileName} in the t3 release checksums`,
+    });
+  }
+  const archive = yield* fetchReleaseAsset(
+    httpClient,
+    `${baseUrl}/${fileName}`,
+    "downloading the t3 release archive",
+  );
+  const digest = yield* Effect.tryPromise({
+    try: () => crypto.subtle.digest("SHA-256", archive),
+    catch: (cause) =>
+      new PinnedRuntimeInstallError({ step: "verifying the t3 release archive", cause }),
+  });
+  if (Encoding.encodeHex(new Uint8Array(digest)) !== expected) {
+    return yield* new PinnedRuntimeInstallError({
+      step: "verifying the t3 release archive checksum",
+    });
+  }
+
+  const archivePath = path.join(stagingDir, PINNED_RUNTIME_ARCHIVE_FILE);
+  yield* fs
+    .writeFile(archivePath, archive)
+    .pipe(
+      Effect.mapError(
+        (cause) => new PinnedRuntimeInstallError({ step: "writing the t3 release archive", cause }),
+      ),
+    );
+  const extractStep = "extracting the t3 release archive";
+  // The archive wraps everything in one directory named after its stem;
+  // strip it so the executable lands at <versionDir>/t3.
+  yield* input.runner
+    .run({
+      command: cliArchiveTarCommand(input.platform, process.env),
+      args: ["-xf", archivePath, "-C", stagingDir, "--strip-components=1"],
+      timeout: PINNED_RUNTIME_INSTALL_TIMEOUT,
+    })
+    .pipe(
+      Effect.mapError((cause) => new PinnedRuntimeInstallError({ step: extractStep, cause })),
+      Effect.filterOrFail(
+        (result) => result.code === 0,
+        (result) =>
+          new PinnedRuntimeInstallError({
+            step: extractStep,
+            exitCode: Number(result.code),
+            stdoutLength: result.stdout.length,
+            stderrLength: result.stderr.length,
+          }),
+      ),
+    );
+  yield* fs.remove(archivePath, { force: true }).pipe(Effect.ignore);
+});
 
 const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(function* (
   input: PinnedRuntimeInstallInput,
 ) {
-  const { fs, runner } = input;
-  const paths = pinnedRuntimePaths(input.path, input.baseDir, input.version);
+  const { fs } = input;
+  const paths = pinnedRuntimePaths(
+    input.path,
+    input.baseDir,
+    input.version,
+    input.platform,
+    input.nodePath,
+  );
   const [versionDirExists, entryExists, sentinel] = yield* Effect.all([
     fs.exists(paths.versionDir),
     fs.exists(paths.entryPath),
@@ -110,6 +257,13 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
     return paths;
   }
   if (versionDirExists) {
+    // A complete runtime may belong to an older launcher with a different
+    // layout. Never remove it as though it were an interrupted extraction.
+    if (Option.isSome(sentinel) && sentinel.value.trim() === input.version) {
+      return yield* new PinnedRuntimeInstallError({
+        step: "preserving an existing runtime with a different layout",
+      });
+    }
     yield* fs.remove(paths.versionDir, { recursive: true, force: true }).pipe(
       Effect.mapError(
         (cause) =>
@@ -147,53 +301,56 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
     );
   const stagingPaths: PinnedRuntimePaths = {
     versionDir: stagingDir,
-    entryPath: input.path.join(stagingDir, "node_modules", "hotlap", "dist", "bin.mjs"),
+    entryPath: input.path.join(stagingDir, input.path.relative(paths.versionDir, paths.entryPath)),
     sentinelPath: input.path.join(stagingDir, ".install-complete"),
+    ...(paths.nodePath === undefined ? {} : { nodePath: paths.nodePath }),
   };
 
   return yield* Effect.gen(function* () {
-    const installStep = "installing the pinned t3 runtime (this can take a few minutes)";
-    const installArgs = [
-      "install",
-      "--prefix",
-      stagingDir,
-      "--no-fund",
-      "--no-audit",
-      `hotlap@${input.version}`,
-    ];
-    yield* runner
-      .run({
-        command: "npm",
-        args: installArgs,
-        // Native dependencies may compile from source on slower machines.
-        timeout: PINNED_RUNTIME_INSTALL_TIMEOUT,
-      })
-      .pipe(
-        Effect.catchTags({
-          ProcessSpawnError: (error) =>
-            error.cause instanceof PlatformError.PlatformError &&
-            error.cause.reason._tag === "NotFound"
-              ? // pnpm-managed Node installations do not include npm. Keep npm
-                // installation semantics for the pinned runtime and native builds.
-                runner.run({
-                  command: "pnpm",
-                  args: ["--package=npm@11", "dlx", "npm", ...installArgs],
-                  timeout: PINNED_RUNTIME_INSTALL_TIMEOUT,
-                })
-              : Effect.fail(error),
-        }),
-        Effect.mapError((cause) => new PinnedRuntimeInstallError({ step: installStep, cause })),
-        Effect.filterOrFail(
-          (result) => result.code === 0,
-          (result) =>
-            new PinnedRuntimeInstallError({
-              step: installStep,
-              exitCode: Number(result.code),
-              stdoutLength: result.stdout.length,
-              stderrLength: result.stderr.length,
-            }),
-        ),
-      );
+    if (input.nodePath === undefined) {
+      yield* installFromArchive(input, stagingDir);
+    } else {
+      const installArgs = [
+        "install",
+        "--prefix",
+        stagingDir,
+        "--no-fund",
+        "--no-audit",
+        `hotlap@${input.version}`,
+      ];
+      yield* input.runner
+        .run({ command: "npm", args: installArgs, timeout: PINNED_RUNTIME_INSTALL_TIMEOUT })
+        .pipe(
+          Effect.catchTags({
+            ProcessSpawnError: (error) =>
+              error.cause instanceof PlatformError.PlatformError &&
+              error.cause.reason._tag === "NotFound"
+                ? input.runner.run({
+                    command: "pnpm",
+                    args: ["--package=npm@11", "dlx", "npm", ...installArgs],
+                    timeout: PINNED_RUNTIME_INSTALL_TIMEOUT,
+                  })
+                : Effect.fail(error),
+          }),
+          Effect.mapError(
+            (cause) =>
+              new PinnedRuntimeInstallError({
+                step: "installing the pinned Hotlap npm runtime",
+                cause,
+              }),
+          ),
+          Effect.filterOrFail(
+            (result) => result.code === 0,
+            (result) =>
+              new PinnedRuntimeInstallError({
+                step: "installing the pinned Hotlap npm runtime",
+                exitCode: Number(result.code),
+                stdoutLength: result.stdout.length,
+                stderrLength: result.stderr.length,
+              }),
+          ),
+        );
+    }
 
     yield* input.validate(stagingPaths);
     yield* fs

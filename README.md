@@ -1,6 +1,6 @@
 # Hotlap
 
-Hotlap is a friends-and-family fork of [T3 Code](https://github.com/pingdotgg/t3code), the open-source control surface for coding agents. It is the same app with a different name and no hosted services: you run the server on your own machine, pair your phone and laptop to it over your LAN or Tailscale, and nothing phones home. Telemetry is off.
+Hotlap is a friends-and-family fork of [T3 Code](https://github.com/pingdotgg/t3code), the open-source control surface for coding agents. It adds thread tools and runs without hosted Hotlap services: you run the server on your own machine and pair your phone and laptop to it over your LAN or Tailscale. Hotlap telemetry is off.
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, Hotlap can control them.
 
@@ -31,9 +31,9 @@ On the machine that runs your agents, open **Settings → Connections** in the d
 
 ## How this fork stays current
 
-Upstream lands hundreds of commits a week. A job on Anish's box merges `pingdotgg/t3code` into `main` every three hours, runs typecheck and tests for the packages the merge touched, and pushes when they pass. Merge conflicts, when they happen, are resolved by an agent that keeps the fork's identity files and takes upstream everywhere else; a merge that fails its checks lands on a `sync-failed/*` branch for a human instead.
+An hourly job on Anish's box checks `pingdotgg/t3code` for updates. Clean merges need no agent; conflicts go to a time-limited agent that preserves Hotlap's features, identity, data paths, and release setup. The job checks for unresolved conflicts and runs the required verification before pushing. Unsafe merges or failed checks are preserved on a `sync-failed/*` review branch instead of reaching `main`.
 
-The fork's own changes are deliberately tiny: product name, bundle ids, npm package name, home folder, icons, and the release pipeline. Bug fixes go upstream first.
+Hotlap also includes thread drafts, conversation forks, transcript copying, and saved prompts. Upstream sync must preserve these functional changes, not just branding.
 
 ## Fork Hotlap
 
