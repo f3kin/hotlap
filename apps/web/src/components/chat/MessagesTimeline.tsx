@@ -290,6 +290,7 @@ interface TimelineRowSharedState {
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
   onSteerQueuedMessage: (id: string) => void;
+  steerQueuedMessageShortcutLabel: string | null;
   onRemoveQueuedMessage: (id: string) => void;
 }
 
@@ -462,6 +463,7 @@ interface MessagesTimelineProps {
   /** Messages sent during the running turn. They render as ghost bubbles after the live rows. */
   queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
   onSteerQueuedMessage?: (id: string) => void;
+  steerQueuedMessageShortcutLabel?: string | null;
   onRemoveQueuedMessage?: (id: string) => void;
   forkSourceThreadId?: ThreadId | undefined;
   onOpenForkSource?: ((threadId: ThreadId) => void) | undefined;
@@ -520,6 +522,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onForkAssistantMessage,
   queuedMessages = EMPTY_QUEUED_MESSAGES,
   onSteerQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
+  steerQueuedMessageShortcutLabel = null,
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
   forkSourceThreadId,
   onOpenForkSource,
@@ -972,6 +975,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
       onSteerQueuedMessage,
+      steerQueuedMessageShortcutLabel,
       onRemoveQueuedMessage,
     }),
     [
@@ -1006,6 +1010,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
       onSteerQueuedMessage,
+      steerQueuedMessageShortcutLabel,
       onRemoveQueuedMessage,
     ],
   );
@@ -1603,7 +1608,12 @@ function QueuedMessageTimelineRow({
               >
                 <ArrowUpIcon className="size-3.5" aria-hidden />
               </TooltipTrigger>
-              <TooltipPopup side="bottom">Send now</TooltipPopup>
+              <TooltipPopup side="bottom">
+                Send now
+                {row.isNext && ctx.steerQueuedMessageShortcutLabel
+                  ? ` (${ctx.steerQueuedMessageShortcutLabel})`
+                  : null}
+              </TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
