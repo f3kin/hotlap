@@ -23,6 +23,18 @@ npm, desktop, and CLI archives. Relay/Clerk configuration is empty. Upstream-onl
 hosted deployment, AUR, announcement, and version-finalization jobs are guarded
 to run only in `pingdotgg/t3code`; they must remain disabled for Hotlap.
 
+## Pull request macOS previews
+
+Upstream's `preview:mac` label workflows
+(`.github/workflows/desktop-macos-preview.yml` and
+`.github/workflows/desktop-macos-preview-publish.yml`) build a PR's JS bundle
+without secrets, then package, sign, and notarize it from `main` and upload it to
+a rolling `desktop-preview` prerelease. They are not part of Hotlap's release
+process: they read public T3 Connect identifiers from `.env.example` and target
+upstream Blacksmith runners. Do not apply `preview:mac` in Hotlap unless those
+workflows are adapted to Hotlap's signing and empty Relay/Clerk policy; use the
+`channel=preview` release train for maintainer test builds.
+
 ## Artifacts and runtime compatibility
 
 The workflow builds the shared JavaScript bundle once, then uses
