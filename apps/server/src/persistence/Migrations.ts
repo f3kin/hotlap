@@ -64,6 +64,7 @@ import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts
 import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
+import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
 import { prepareMigrationLedgers, runHotlapMigrations } from "./HotlapMigrations.ts";
 
 /**
@@ -128,6 +129,7 @@ const migrationEffects = {
   49: Migration0049,
   50: Migration0050,
   51: Migration0051,
+  52: Migration0052,
 } as const;
 
 const migrationEntries = upstreamMigrationManifest.map(

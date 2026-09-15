@@ -93,8 +93,7 @@ const validateSharedLedger = (
 ): MigrationLedgerError | undefined => {
   const legacy = rows.at(-1);
   const hasExactLegacyMigration =
-    rows.length === upstreamManifest.length + 1 &&
-    upstreamManifest.length === LEGACY_FORK_MIGRATION[0] - 1 &&
+    rows.length === LEGACY_FORK_MIGRATION[0] &&
     legacy?.migrationId === LEGACY_FORK_MIGRATION[0] &&
     legacy.name === LEGACY_FORK_MIGRATION[1];
   return validateExactPrefix(

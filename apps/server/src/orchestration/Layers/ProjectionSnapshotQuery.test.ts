@@ -112,6 +112,44 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("returns fork lineage and title state together", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO projection_projects
+          (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('combined-project', 'Combined', '/tmp/combined', '[]', '2026-09-15', '2026-09-15')
+      `;
+      yield* sql`
+        INSERT INTO projection_threads
+          (thread_id, project_id, title, title_state_json, model_selection_json, runtime_mode,
+           interaction_mode, fork_source_thread_id, fork_source_message_id, created_at, updated_at)
+        VALUES
+          ('combined-thread', 'combined-project', 'Fork title',
+           '{"source":"manual","version":"rename-1","needsRefinement":false}',
+           '{"provider":"codex","model":"gpt-5-codex"}', 'full-access', 'default',
+           'source-thread', 'source-message',
+           '2026-09-15', '2026-09-15')
+      `;
+
+      const shell = yield* snapshotQuery.getThreadShellById(ThreadId.make("combined-thread"));
+      assert.isTrue(Option.isSome(shell));
+      if (Option.isNone(shell)) return;
+      assert.deepEqual(shell.value.forkedFrom, {
+        threadId: ThreadId.make("source-thread"),
+        messageId: MessageId.make("source-message"),
+      });
+      assert.deepEqual(shell.value.titleState, {
+        source: "manual",
+        version: "rename-1",
+        needsRefinement: false,
+      });
+      yield* sql`DELETE FROM projection_threads WHERE thread_id = 'combined-thread'`;
+      yield* sql`DELETE FROM projection_projects WHERE project_id = 'combined-project'`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -488,6 +526,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pinOrderKey: "gm",
           activeOrderKey: "hq",
           titleRegeneration: null,
+          titleState: null,
           deletedAt: null,
           messages: [
             {
@@ -613,6 +652,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           pinOrderKey: "gm",
           activeOrderKey: "hq",
           titleRegeneration: null,
+          titleState: null,
           session: {
             threadId: ThreadId.make("thread-1"),
             status: "running",
@@ -743,7 +783,8 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           id: ThreadId.make("thread-1"),
           projectId: asProjectId("project-1"),
           title: "Thread 1",
-          session: snapshot.threads[0]?.session,
+          titleState: null,
+          session: snapshot.threads[0]?.session ?? null,
         });
       }
 
@@ -3711,4 +3752,52 @@ it.effect("omits foreign-host PRs from legacy snapshots while preserving native 
       assert.equal(thread.linkedPullRequest?.url, "https://github.com/acme/web/pull/42");
     }
   }).pipe(Effect.provide(layer));
+});
+
+projectionSnapshotLayer("ProjectionSnapshotQuery activities by kind", (it) => {
+  it.effect("lists one kind across active threads only, without hydrating the threads", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const timestamp = "2026-03-02T00:00:00.000Z";
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES ('project-kinds', 'Project', '/tmp/project-kinds', '[]', ${timestamp}, ${timestamp})
+      `;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+          created_at, updated_at, deleted_at
+        ) VALUES
+          ('thread-live', 'project-kinds', 'Live', '{"instanceId":"codex","model":"gpt-5"}',
+            'full-access', 'default', ${timestamp}, ${timestamp}, NULL),
+          ('thread-gone', 'project-kinds', 'Gone', '{"instanceId":"codex","model":"gpt-5"}',
+            'full-access', 'default', ${timestamp}, ${timestamp}, ${timestamp}),
+          ('thread-shelved', 'project-kinds', 'Shelved', '{"instanceId":"codex","model":"gpt-5"}',
+            'full-access', 'default', ${timestamp}, ${timestamp}, NULL)
+      `;
+      yield* sql`UPDATE projection_threads SET archived_at = ${timestamp} WHERE thread_id = 'thread-shelved'`;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+        ) VALUES
+          ('setup-live', 'thread-live', NULL, 'info', 'worktree-setup', 'Setting up',
+            '{"phase":"running"}', ${timestamp}),
+          ('other-live', 'thread-live', NULL, 'info', 'tool.completed', 'Other',
+            '{}', ${timestamp}),
+          ('setup-gone', 'thread-gone', NULL, 'info', 'worktree-setup', 'Setting up',
+            '{"phase":"running"}', ${timestamp}),
+          ('setup-shelved', 'thread-shelved', NULL, 'info', 'worktree-setup', 'Setting up',
+            '{"phase":"running"}', ${timestamp})
+      `;
+
+      const setups = yield* query.listActivitiesByKind("worktree-setup");
+      assert.deepEqual(
+        setups.map((activity) => [activity.id, activity.kind, activity.payload]),
+        [["setup-live", "worktree-setup", { phase: "running" }]],
+      );
+      assert.deepEqual(yield* query.listActivitiesByKind("nope"), []);
+    }),
+  );
 });
