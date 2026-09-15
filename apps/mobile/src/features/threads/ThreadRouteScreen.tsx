@@ -90,7 +90,7 @@ import { useSelectedThreadWorktree } from "../../state/use-selected-thread-workt
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import {
   copyThreadTranscript,
-  environmentThreadShells,
+  environmentThreadDetails,
   threadEnvironment,
 } from "../../state/threads";
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -241,8 +241,12 @@ function ThreadRouteContent(
   const selectedThreadDetailState = props.selectedThreadDetailState;
   const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const forkableAssistantMessageIds = useMemo(
-    () => deriveForkableAssistantMessageIds(selectedThreadDetail?.checkpoints ?? []),
-    [selectedThreadDetail?.checkpoints],
+    () =>
+      deriveForkableAssistantMessageIds(
+        selectedThreadDetail?.checkpoints ?? [],
+        selectedThreadDetail?.latestTurn,
+      ),
+    [selectedThreadDetail?.checkpoints, selectedThreadDetail?.latestTurn],
   );
   // "Load earlier turns" header state for windowed (paginated) thread loads.
   const loadEarlierTurns = useMemo(() => {
@@ -267,9 +271,11 @@ function ThreadRouteContent(
   const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
   const loadThreadTranscript = useAtomCommand(copyThreadTranscript, { reportFailure: false });
   const forkWaitAbortRef = useRef<AbortController | null>(null);
+  const [forkPending, setForkPending] = useState(false);
   const cancelPendingFork = useCallback(() => {
     forkWaitAbortRef.current?.abort();
     forkWaitAbortRef.current = null;
+    setForkPending(false);
   }, []);
   const navigation = useNavigation();
   const params = props.route.params;
@@ -374,11 +380,13 @@ function ThreadRouteContent(
       true && selectedThread !== null;
   const handleForkAssistantMessage = useCallback(
     async (sourceMessageId: MessageId) => {
-      if (!canForkConversation || selectedThread === null) return;
+      if (!canForkConversation || selectedThread === null || forkWaitAbortRef.current !== null) {
+        return;
+      }
       const destinationThreadId = ThreadId.make(uuidv4());
-      cancelPendingFork();
       const forkWaitAbort = new AbortController();
       forkWaitAbortRef.current = forkWaitAbort;
+      setForkPending(true);
       const result = await forkThread({
         environmentId: selectedThread.environmentId,
         input: {
@@ -390,7 +398,10 @@ function ThreadRouteContent(
       });
       if (forkWaitAbort.signal.aborted) return;
       if (result._tag === "Failure") {
-        if (forkWaitAbortRef.current === forkWaitAbort) forkWaitAbortRef.current = null;
+        if (forkWaitAbortRef.current === forkWaitAbort) {
+          forkWaitAbortRef.current = null;
+          setForkPending(false);
+        }
         if (!isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           Alert.alert(
@@ -404,20 +415,23 @@ function ThreadRouteContent(
         selectedThread.environmentId,
         destinationThreadId,
       );
-      const destinationThreadAtom = environmentThreadShells.threadShellAtom(destinationThreadRef);
+      const destinationThreadAtom = environmentThreadDetails.stateAtom(destinationThreadRef);
       const forkSynced = await waitForSynchronizedValue({
         read: () => appAtomRegistry.get(destinationThreadAtom),
         subscribe: (listener) => appAtomRegistry.subscribe(destinationThreadAtom, listener),
-        isReady: (thread) => thread !== null,
-        timeoutMs: 10_000,
+        isReady: (state) => Option.isSome(state.data),
+        isUnavailable: (state) => state.status === "deleted",
         signal: forkWaitAbort.signal,
       });
-      if (forkWaitAbortRef.current === forkWaitAbort) forkWaitAbortRef.current = null;
+      if (forkWaitAbortRef.current === forkWaitAbort) {
+        forkWaitAbortRef.current = null;
+        setForkPending(false);
+      }
       if (forkWaitAbort.signal.aborted) return;
       if (!forkSynced) {
         Alert.alert(
-          "Fork created but not ready",
-          "The new conversation has not finished syncing yet.",
+          "Fork is no longer available",
+          "The destination was deleted before it could be opened.",
         );
         return;
       }
@@ -426,7 +440,7 @@ function ThreadRouteContent(
         threadId: String(destinationThreadId),
       });
     },
-    [canForkConversation, cancelPendingFork, forkThread, navigation, selectedThread],
+    [canForkConversation, forkThread, navigation, selectedThread],
   );
   const handleCopyTranscript = useCallback(async () => {
     if (!supportsTranscriptExport || selectedThread === null) return;
@@ -1077,6 +1091,9 @@ function ThreadRouteContent(
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
+          selectedThreadProviderSelectionPendingCount={
+            composer.selectedThreadProviderSelectionPendingCount
+          }
           queuedMessages={composer.selectedThreadQueuedMessages}
           dispatchingMessageId={composer.dispatchingQueuedMessageId}
           layoutVariant={layout.variant}
@@ -1091,7 +1108,9 @@ function ThreadRouteContent(
           serverConfig={serverConfig}
           onStopThread={handleStopThread}
           forkableAssistantMessageIds={forkableAssistantMessageIds}
-          onForkAssistantMessage={canForkConversation ? handleForkAssistantMessage : undefined}
+          onForkAssistantMessage={
+            canForkConversation && !forkPending ? handleForkAssistantMessage : undefined
+          }
           onSendMessage={composer.onSendMessage}
           onReconnectEnvironment={handleReconnectEnvironment}
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}

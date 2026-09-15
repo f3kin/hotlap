@@ -3514,7 +3514,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
     }),
   );
 
-  it.effect("returns destination-owned handoff until a provider turn completes", () =>
+  it.effect("reserves fork handoff for one provider turn while allowing start retries", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const query = yield* ProjectionSnapshotQuery;
@@ -3535,46 +3535,37 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
       assert.isFalse(handoff.overLimit);
       if (handoff.overLimit) return;
       assert.equal(Option.getOrThrow(handoff.source).messages[0]?.text, "Inherited");
-      yield* sql`UPDATE projection_threads
-        SET latest_user_message_at = '2026-09-12T00:01:00Z'
-        WHERE thread_id = 'handoff-thread'`;
-      yield* sql`WITH RECURSIVE sequence(value) AS (
-          SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < 399
-        )
-        INSERT INTO projection_thread_messages
-          (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
-        SELECT printf('fork-history:handoff-thread:%04d', value), 'handoff-thread', 'user',
-          'Inherited', 0, '2026-09-11T00:00:00Z', '2026-09-11T00:00:00Z'
-        FROM sequence`;
-      yield* sql`INSERT INTO projection_thread_messages
-        (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
-        VALUES ('message-first', 'handoff-thread', 'turn-first', 'user', 'Try once', 0,
-          '2026-09-12T00:01:00Z', '2026-09-12T00:01:00Z')`;
       yield* sql`INSERT INTO projection_turns
         (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
          started_at, completed_at, checkpoint_files_json)
-        VALUES ('handoff-thread', 'turn-first', 'message-first', NULL, 'error',
-          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', NULL, '[]')`;
-      const afterFailedTurn = yield* query.getPendingForkHandoffSource(
+        VALUES ('handoff-thread', NULL, 'message-pending', NULL, 'pending',
+          '2026-09-12T00:00:30Z', NULL, NULL, '[]')`;
+      const whileTurnIsPending = yield* query.getPendingForkHandoffSource(
         ThreadId.make("handoff-thread"),
       );
-      assert.isFalse(afterFailedTurn.overLimit);
-      if (afterFailedTurn.overLimit) return;
-      assert.equal(Option.getOrThrow(afterFailedTurn.source).messages[0]?.text, "Inherited");
-      assert.lengthOf(Option.getOrThrow(afterFailedTurn.source).messages, 400);
-      assert.notInclude(
-        Option.getOrThrow(afterFailedTurn.source).messages.map(({ id }) => id),
-        MessageId.make("message-first"),
+      assert.isFalse(whileTurnIsPending.overLimit);
+      if (whileTurnIsPending.overLimit) return;
+      assert.equal(whileTurnIsPending.source._tag, "None");
+      yield* sql`DELETE FROM projection_turns
+        WHERE thread_id = 'handoff-thread' AND turn_id IS NULL`;
+      const afterStartFailure = yield* query.getPendingForkHandoffSource(
+        ThreadId.make("handoff-thread"),
       );
+      assert.isFalse(afterStartFailure.overLimit);
+      if (afterStartFailure.overLimit) return;
+      assert.equal(Option.getOrThrow(afterStartFailure.source).messages[0]?.text, "Inherited");
 
-      yield* sql`UPDATE projection_turns
-        SET state = 'completed', assistant_message_id = 'answer-first',
-          completed_at = '2026-09-12T00:03:00Z'
-        WHERE thread_id = 'handoff-thread' AND turn_id = 'turn-first'`;
-      const consumed = yield* query.getPendingForkHandoffSource(ThreadId.make("handoff-thread"));
-      assert.isFalse(consumed.overLimit);
-      if (consumed.overLimit) return;
-      assert.equal(consumed.source._tag, "None");
+      yield* sql`INSERT INTO projection_turns
+        (thread_id, turn_id, pending_message_id, assistant_message_id, state, requested_at,
+         started_at, completed_at, checkpoint_files_json)
+        VALUES ('handoff-thread', 'turn-first', 'message-first', 'answer-first', 'error',
+          '2026-09-12T00:01:00Z', '2026-09-12T00:01:01Z', NULL, '[]')`;
+      const afterErroredTurn = yield* query.getPendingForkHandoffSource(
+        ThreadId.make("handoff-thread"),
+      );
+      assert.isFalse(afterErroredTurn.overLimit);
+      if (afterErroredTurn.overLimit) return;
+      assert.equal(afterErroredTurn.source._tag, "None");
     }),
   );
 

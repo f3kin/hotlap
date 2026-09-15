@@ -18,6 +18,7 @@ import {
   type MessageId,
   type ScopedThreadRef,
   type ServerProviderSkill,
+  type ThreadId,
   type ToolActivityIcon,
   type TurnId,
   type WorktreeSetupSnapshot,
@@ -343,6 +344,21 @@ function TimelineLoadEarlierHeader({
     </div>
   );
 }
+
+function TimelineForkHeader({ onOpenSource }: { onOpenSource: () => void }) {
+  return (
+    <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-2 gap-y-1 pb-3 text-xs text-muted-foreground">
+      <button
+        type="button"
+        onClick={onOpenSource}
+        className="font-medium text-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
+      >
+        Forked from source thread
+      </button>
+      <span>Uses the current shared workspace.</span>
+    </div>
+  );
+}
 function TimelineListFooter({ composerInset }: { readonly composerInset: number }) {
   return (
     <div aria-hidden>
@@ -447,6 +463,8 @@ interface MessagesTimelineProps {
   queuedMessages?: ReadonlyArray<QueuedComposerMessage>;
   onSteerQueuedMessage?: (id: string) => void;
   onRemoveQueuedMessage?: (id: string) => void;
+  forkSourceThreadId?: ThreadId | undefined;
+  onOpenForkSource?: ((threadId: ThreadId) => void) | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +521,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   queuedMessages = EMPTY_QUEUED_MESSAGES,
   onSteerQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
+  forkSourceThreadId,
+  onOpenForkSource,
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
@@ -753,8 +773,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
   const forkableAssistantMessageIds = useMemo(
-    () => deriveForkableAssistantMessageIds(turnDiffSummaries),
-    [turnDiffSummaries],
+    () => deriveForkableAssistantMessageIds(turnDiffSummaries, latestTurn),
+    [latestTurn, turnDiffSummaries],
   );
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
@@ -1075,17 +1095,22 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               topFadeEnabled && "topbar-scroll-fade",
             )}
             ListHeaderComponent={
-              loadEarlier !== null ? (
-                <TimelineLoadEarlierHeader
-                  loading={loadEarlier.loading}
-                  onLoadEarlier={loadEarlier.onLoadEarlier}
-                  fade={topFadeEnabled}
-                />
-              ) : topFadeEnabled ? (
-                TIMELINE_LIST_FADE_HEADER
-              ) : (
-                TIMELINE_LIST_HEADER
-              )
+              <>
+                {loadEarlier !== null ? (
+                  <TimelineLoadEarlierHeader
+                    loading={loadEarlier.loading}
+                    onLoadEarlier={loadEarlier.onLoadEarlier}
+                    fade={topFadeEnabled}
+                  />
+                ) : topFadeEnabled ? (
+                  TIMELINE_LIST_FADE_HEADER
+                ) : (
+                  TIMELINE_LIST_HEADER
+                )}
+                {forkSourceThreadId !== undefined && onOpenForkSource !== undefined ? (
+                  <TimelineForkHeader onOpenSource={() => onOpenForkSource(forkSourceThreadId)} />
+                ) : null}
+              </>
             }
             ListFooterComponent={timelineListFooter}
           />

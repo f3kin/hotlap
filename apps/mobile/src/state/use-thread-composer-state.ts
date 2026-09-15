@@ -19,6 +19,7 @@ import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { nextPastedTextFileName, pastedTextDisposition } from "@t3tools/client-runtime/text-paste";
 import {
+  isForkProviderSelectionUnlocked,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
@@ -68,6 +69,7 @@ import { setPendingConnectionError } from "../state/use-remote-environment-regis
 import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
+import { resolveThreadModelSelection } from "./thread-outbox-model";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
@@ -192,6 +194,15 @@ export function useThreadComposerState() {
   );
   const selectedThreadMessages = selectedThreadDetail?.messages;
   const selectedThreadActivities = selectedThreadDetail?.activities;
+  const selectedThreadAcknowledgedMessages = useMemo(
+    () =>
+      acknowledgedMessages.filter(
+        (message) =>
+          scopedThreadKey(message.environmentId, message.threadId) === selectedThreadKey &&
+          !selectedThreadQueuedMessages.some((queued) => queued.messageId === message.messageId),
+      ),
+    [acknowledgedMessages, selectedThreadKey, selectedThreadQueuedMessages],
+  );
   // A thread whose creation has not delivered its turn yet: the prompt only
   // exists in the outbox, so it is appended to whatever the server has. The
   // detail is usually present but empty during a worktree checkout, so this
@@ -210,24 +221,21 @@ export function useThreadComposerState() {
             activities: selectedThreadActivities ?? [],
           })
         : [];
-    const pendingAcknowledgments = acknowledgedMessages.filter(
-      (message) =>
-        scopedThreadKey(message.environmentId, message.threadId) === selectedThreadKey &&
-        !selectedThreadQueuedMessages.some((queued) => queued.messageId === message.messageId),
-    );
-    if (pendingAcknowledgments.length === 0) return feed;
-    return appendPendingThreadMessages(feed, feed, pendingAcknowledgments).map((entry) =>
-      entry.pendingMessage ? { ...entry, acknowledged: true } : entry,
+    if (selectedThreadAcknowledgedMessages.length === 0) return feed;
+    return appendPendingThreadMessages(feed, feed, selectedThreadAcknowledgedMessages).map(
+      (entry) => (entry.pendingMessage ? { ...entry, acknowledged: true } : entry),
     );
   }, [
     selectedThreadActivities,
     selectedThreadMessages,
     pendingCreationMessage,
-    selectedThreadKey,
-    selectedThreadQueuedMessages,
-    acknowledgedMessages,
+    selectedThreadAcknowledgedMessages,
   ]);
   useEffect(() => {
+    // A detail message can arrive before the thread shell reflects that the
+    // first fork turn started. Keep the acknowledgment through that gap so
+    // provider selection cannot reopen against a stale shell.
+    if (selectedThreadShell && isForkProviderSelectionUnlocked(selectedThreadShell)) return;
     const echoedIds = new Set(selectedThreadMessages?.map((message) => message.id));
     if (acknowledgedMessages.some((message) => echoedIds.has(message.messageId))) {
       appAtomRegistry.set(
@@ -237,14 +245,30 @@ export function useThreadComposerState() {
           .filter((message) => !echoedIds.has(message.messageId)),
       );
     }
-  }, [acknowledgedMessages, selectedThreadMessages]);
+  }, [acknowledgedMessages, selectedThreadMessages, selectedThreadShell]);
 
   const selectedDraft = selectedThreadKey ? composerDrafts[selectedThreadKey] : null;
   const draftMessage = selectedDraft?.text ?? "";
   const draftAttachments = selectedDraft?.attachments ?? [];
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
+  const selectedThreadProviderSelectionUnlocked =
+    isForkProviderSelectionUnlocked(selectedThreadShell) &&
+    (selectedThreadDetail === null || isForkProviderSelectionUnlocked(selectedThreadDetail));
+  const selectedThreadProviderSelectionPendingCount =
+    selectedThreadQueueCount +
+    selectedThreadAcknowledgedMessages.length +
+    (selectedThreadDetail !== null && !isForkProviderSelectionUnlocked(selectedThreadDetail)
+      ? 1
+      : 0);
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
-  const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
+  const authoritativeModelSelection = selectedThread?.modelSelection;
+  const modelSelection = authoritativeModelSelection
+    ? resolveThreadModelSelection(
+        authoritativeModelSelection,
+        selectedDraft?.modelSelection,
+        selectedThreadProviderSelectionUnlocked,
+      )
+    : null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const selectedProvider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
     (provider) => provider.instanceId === modelSelection?.instanceId,
@@ -372,7 +396,12 @@ export function useThreadComposerState() {
       return null;
     }
 
-    const modelSelection = draft.modelSelection ?? thread.modelSelection;
+    const modelSelection = resolveThreadModelSelection(
+      thread.modelSelection,
+      draft.modelSelection,
+      isForkProviderSelectionUnlocked(selectedThreadShell) &&
+        (selectedThreadDetail === null || isForkProviderSelectionUnlocked(selectedThreadDetail)),
+    );
     const serverConfig = selectedEnvironmentRuntime?.serverConfig;
     if (
       selectedEnvironmentRuntime?.connectionState === "connected" &&
@@ -800,6 +829,7 @@ export function useThreadComposerState() {
     dismissFeedback,
     selectedThreadFeed,
     selectedThreadQueueCount,
+    selectedThreadProviderSelectionPendingCount,
     selectedThreadQueuedMessages,
     dispatchingQueuedMessageId,
     activeWorkStartedAt,

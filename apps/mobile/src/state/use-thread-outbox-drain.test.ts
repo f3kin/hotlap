@@ -415,6 +415,19 @@ describe("thread outbox drain delivery cleanup", () => {
     expect(acknowledged).toEqual(new Set());
   });
 
+  it("keeps the acknowledgment when delivered-message cleanup fails", async () => {
+    const message = queuedMessage({ messageId: "cleanup-failure", text: "delivered" });
+    harness.removeOutboxMessage.mockRejectedValueOnce(new Error("storage unavailable"));
+    await harness.manager.enqueue(message);
+
+    await expect(
+      completeQueuedMessageDelivery(message, harness.manager.revisionOf(message.messageId)),
+    ).resolves.toBe("failed");
+
+    expect(remainingMessages()).toEqual([message]);
+    expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([message]);
+  });
+
   it("keeps an edited message and its files when delivery cleanup loses the revision race", async () => {
     const message = queuedMessage({
       messageId: "message-edited",

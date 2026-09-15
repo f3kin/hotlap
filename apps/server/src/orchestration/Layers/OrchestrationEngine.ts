@@ -340,7 +340,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               "The selected response and this message are too large to fit in the provider context.",
           });
         }
-        const providerInput = builtProviderInput ?? undefined;
+        const providerInput = builtProviderInput?.text;
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
@@ -349,6 +349,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             : {}),
           ...(Option.isSome(forkSource) ? { forkSource: forkSource.value } : {}),
           ...(providerInput !== undefined ? { providerInput } : {}),
+          ...(builtProviderInput !== undefined && builtProviderInput !== null
+            ? { forkHandoffOmittedMessageCount: builtProviderInput.omittedMessageCount }
+            : {}),
         }).pipe(
           Effect.provideService(Crypto.Crypto, crypto),
           Effect.mapError((cause) =>

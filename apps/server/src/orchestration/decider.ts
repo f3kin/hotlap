@@ -139,6 +139,19 @@ function hasQueuedTurnStartForThread(
   );
 }
 
+function forkHasStarted(
+  thread: Pick<OrchestrationThread, "forkedFrom" | "latestTurn" | "messages" | "session">,
+): boolean {
+  return (
+    thread.forkedFrom !== undefined &&
+    (thread.latestTurn !== null ||
+      thread.session !== null ||
+      thread.messages.some(
+        (message) => message.role === "user" && !isReadOnlyHistoryMessageId(message.id),
+      ))
+  );
+}
+
 function findPullRequestLink(
   thread: Pick<OrchestrationThread, "pullRequests">,
   key: ThreadPullRequestKey,
@@ -222,12 +235,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   userInputActivity,
   forkSource,
   providerInput,
+  forkHandoffOmittedMessageCount,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   readonly userInputActivity?: OrchestrationThreadActivity;
   readonly forkSource?: ProjectionThreadForkSource;
   readonly providerInput?: string;
+  readonly forkHandoffOmittedMessageCount?: number;
 }): Effect.fn.Return<
   DecideOrchestrationCommandResult,
   OrchestrationCommandRejection | PlatformError.PlatformError,
@@ -390,16 +405,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const selectedMessage = forkSource.messages.find(({ id }) => id === command.sourceMessageId);
+      const selectedTurnIsTerminal =
+        forkSource.selectedTurn?.state === "completed" ||
+        forkSource.selectedTurn?.state === "interrupted" ||
+        forkSource.selectedTurn?.state === "error";
       if (
         selectedMessage?.role !== "assistant" ||
         selectedMessage.streaming ||
         selectedMessage.text.trim().length === 0 ||
-        forkSource.selectedTurn?.state !== "completed" ||
+        !selectedTurnIsTerminal ||
         forkSource.selectedTurn.assistantMessageId !== command.sourceMessageId
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: "Only a terminal response from a completed turn can be forked.",
+          detail: "Only readable output from a terminal turn can be forked.",
         });
       }
       yield* requireProject({ readModel, command, projectId: forkSource.projectId });
@@ -1015,6 +1034,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.modelSelection !== undefined &&
+        command.modelSelection.instanceId !== thread.modelSelection.instanceId &&
+        forkHasStarted(thread)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A fork cannot change providers after its first submission.",
+        });
+      }
       // Old clients only see the derived single link. Unlink that request through
       // the same command path as modern clients, including stack dismissal, while
       // retaining other links they cannot see. Historical metadata events still replay unchanged.
@@ -1496,6 +1525,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        targetThread.forkedFrom !== undefined &&
+        command.modelSelection !== undefined &&
+        command.modelSelection.instanceId !== targetThread.modelSelection.instanceId
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "The fork provider changed before this turn started. Retry with the current provider.",
+        });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1576,6 +1616,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
+      const forkContextTruncatedEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        providerInput !== undefined && (forkHandoffOmittedMessageCount ?? 0) > 0
+          ? {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.activity-appended",
+              payload: {
+                threadId: command.threadId,
+                activity: {
+                  id: EventId.make(`fork-context-truncated:${command.commandId}`),
+                  tone: "info",
+                  kind: "fork.context-truncated",
+                  summary: "Older fork context was omitted to fit the provider limit",
+                  payload: { omittedMessageCount: forkHandoffOmittedMessageCount },
+                  turnId: null,
+                  createdAt: command.createdAt,
+                },
+              },
+            }
+          : null;
       // Real activity resets ANY override: it wakes an explicitly settled
       // thread, and it clears a keep-active pin back to neutral so the
       // thread can auto-settle again after this burst of work goes stale.
@@ -1617,6 +1681,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [
         ...lifecycleResetEvents,
         ...(userMessageEvent ? [userMessageEvent] : []),
+        ...(forkContextTruncatedEvent === null ? [] : [forkContextTruncatedEvent]),
         turnStartRequestedEvent,
       ];
     }

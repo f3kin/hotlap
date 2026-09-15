@@ -178,7 +178,7 @@ const ProjectionForkSelectedTurnDbRowSchema = Schema.Struct({
   state: Schema.String,
   assistantMessageId: Schema.NullOr(MessageId),
 });
-const ProjectionCompletedTurnExistsDbRowSchema = Schema.Struct({
+const ProjectionForkHandoffConsumedDbRowSchema = Schema.Struct({
   exists: Schema.Number,
 });
 const ProjectionReadableThreadStatsDbRowSchema = Schema.Struct({
@@ -1592,14 +1592,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  const getCompletedTurnExistsRow = SqlSchema.findOne({
+  const getForkHandoffConsumedRow = SqlSchema.findOne({
     Request: ThreadIdLookupInput,
-    Result: ProjectionCompletedTurnExistsDbRowSchema,
+    Result: ProjectionForkHandoffConsumedDbRowSchema,
     execute: ({ threadId }) => sql`
       SELECT EXISTS(
         SELECT 1
         FROM projection_turns
-        WHERE thread_id = ${threadId} AND state = 'completed'
+        WHERE thread_id = ${threadId}
       ) AS "exists"
     `,
   });
@@ -3678,15 +3678,15 @@ pending_approval_requests AS (
               source: Option.none<ProjectionThreadTranscriptSource>(),
             };
           }
-          const completedTurn = yield* getCompletedTurnExistsRow({ threadId }).pipe(
+          const consumedHandoff = yield* getForkHandoffConsumedRow({ threadId }).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getCompletedTurn:query",
-                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getCompletedTurn:decodeRow",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getConsumedHandoff:query",
+                "ProjectionSnapshotQuery.getPendingForkHandoffSource:getConsumedHandoff:decodeRow",
               ),
             ),
           );
-          if (completedTurn.exists === 1) {
+          if (consumedHandoff.exists === 1) {
             return {
               overLimit: false as const,
               source: Option.none<ProjectionThreadTranscriptSource>(),

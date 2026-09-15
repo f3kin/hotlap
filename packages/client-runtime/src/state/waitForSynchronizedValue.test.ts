@@ -58,4 +58,52 @@ describe("waitForSynchronizedValue", () => {
     await expect(waiting).resolves.toBe(false);
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
+
+  it("returns false and unsubscribes when synchronization becomes unavailable", async () => {
+    let value: "pending" | "failed" = "pending";
+    const observer: { listener: ((next: "pending" | "failed") => void) | null } = {
+      listener: null,
+    };
+    const waiting = waitForSynchronizedValue({
+      read: () => value,
+      subscribe: (next) => {
+        observer.listener = next;
+        return () => {
+          observer.listener = null;
+        };
+      },
+      isReady: () => false,
+      isUnavailable: (next) => next === "failed",
+    });
+
+    value = "failed";
+    observer.listener?.(value);
+
+    await expect(waiting).resolves.toBe(false);
+    expect(observer.listener).toBeNull();
+  });
+
+  it("can wait without turning a slow synchronization into a failure", async () => {
+    vi.useFakeTimers();
+    let value: string | null = null;
+    const observer: { listener: ((next: string | null) => void) | null } = { listener: null };
+    const waiting = waitForSynchronizedValue({
+      read: () => value,
+      subscribe: (next) => {
+        observer.listener = next;
+        return () => {
+          observer.listener = null;
+        };
+      },
+      isReady: (next) => next !== null,
+    });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    value = "ready";
+    observer.listener?.(value);
+
+    await expect(waiting).resolves.toBe(true);
+    expect(observer.listener).toBeNull();
+    vi.useRealTimers();
+  });
 });

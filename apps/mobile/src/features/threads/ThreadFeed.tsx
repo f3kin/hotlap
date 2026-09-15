@@ -8,6 +8,7 @@ import type {
   EnvironmentId,
   MessageId,
   OrchestrationMessageContext,
+  ThreadForkSource,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -267,6 +268,7 @@ export interface ThreadFeedProps {
     readonly loading: boolean;
     readonly onLoadEarlier: () => void;
   } | null;
+  readonly forkedFrom: ThreadForkSource | null;
   readonly forkableAssistantMessageIds: ReadonlySet<MessageId>;
   readonly onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
 }
@@ -2053,6 +2055,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const iconSubtleColor = theme["--color-icon-subtle"];
   const screenColor = theme["--color-screen"];
   const userBubbleColor = theme["--color-user-bubble"];
+  const openForkSource = useCallback(() => {
+    if (props.forkedFrom === null) return;
+    void Haptics.selectionAsync();
+    navigation.navigate("Thread", {
+      environmentId: String(props.environmentId),
+      threadId: String(props.forkedFrom.threadId),
+    });
+  }, [navigation, props.environmentId, props.forkedFrom]);
   const onMarkdownLinkPress = useCallback(
     (href: string) => {
       const presentation = resolveMarkdownLinkPresentation(href);
@@ -2914,6 +2924,21 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             ListHeaderComponent={
               <>
                 {usesNativeAutomaticInsets ? null : <View style={{ height: topContentInset }} />}
+                {props.forkedFrom !== null ? (
+                  <Pressable
+                    accessibilityRole="link"
+                    accessibilityLabel="Open source thread"
+                    onPress={openForkSource}
+                    className="items-center px-4 py-3"
+                  >
+                    <Text className="text-xs font-medium text-foreground">
+                      Forked from source thread
+                    </Text>
+                    <Text className="mt-0.5 text-xs text-foreground-secondary">
+                      Uses the current shared workspace.
+                    </Text>
+                  </Pressable>
+                ) : null}
                 {props.loadEarlier != null ? (
                   <Pressable
                     onPress={props.loadEarlier.onLoadEarlier}

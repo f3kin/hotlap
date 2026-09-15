@@ -145,6 +145,7 @@ export interface ThreadDetailScreenProps {
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
   readonly selectedThreadQueueCount: number;
+  readonly selectedThreadProviderSelectionPendingCount: number;
   readonly queuedMessages: ReadonlyArray<QueuedThreadMessage>;
   readonly dispatchingMessageId: MessageId | null;
   readonly serverConfig: T3ServerConfig | null;
@@ -904,6 +905,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             skills={selectedProviderSkills}
             onUseArtifactTemplate={handleUseArtifactTemplate}
             loadEarlier={props.loadEarlier ?? null}
+            forkedFrom={props.selectedThread.forkedFrom ?? null}
             forkableAssistantMessageIds={props.forkableAssistantMessageIds}
             onForkAssistantMessage={props.onForkAssistantMessage}
           />
@@ -1042,6 +1044,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     hasCompactableConversation={hasCompactableConversation && !props.isCompacting}
                     serverConfig={props.serverConfig}
                     queueCount={props.selectedThreadQueueCount}
+                    providerSelectionPendingCount={
+                      props.selectedThreadProviderSelectionPendingCount
+                    }
                     environmentId={props.environmentId}
                     projectCwd={props.threadCwd ?? props.projectWorkspaceRoot}
                     // Follow-ups typed during setup wait in the draft: queueing

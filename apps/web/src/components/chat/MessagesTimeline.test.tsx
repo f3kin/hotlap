@@ -3,6 +3,7 @@ import {
   CheckpointRef,
   EnvironmentId,
   MessageId,
+  ThreadId,
   TurnId,
   type ComposerContextRecord,
 } from "@t3tools/contracts";
@@ -274,6 +275,20 @@ function buildSnapShotTimelineEntry(previewUrl?: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("shows fork lineage and the shared-workspace clarification", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[buildUserTimelineEntry("Inherited prompt")]}
+        forkSourceThreadId={ThreadId.make("thread-source")}
+        onOpenForkSource={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Forked from source thread");
+    expect(markup).toContain("Uses the current shared workspace.");
+  });
+
   it("renders previous and next controls with the minimap", () => {
     const first = buildUserTimelineEntry("First turn");
     const secondBase = buildUserTimelineEntry("Second turn");
