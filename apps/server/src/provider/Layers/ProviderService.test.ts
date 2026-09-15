@@ -986,6 +986,162 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect(
+  "releases the old compatible Codex instance's native writer before the new instance resumes it",
+  () =>
+    Effect.gen(function* () {
+      // Two Codex account instances sharing one native Codex home (a temp
+      // dir standing in for CODEX_HOME) via authOverlay: same
+      // continuationKey, distinct instances/shadow homes. Codex itself
+      // refuses a second app-server process opening the same home's
+      // rollout file concurrently ("already has an active writer"), which
+      // is what `nativeWriter` reproduces deterministically here without a
+      // real Codex process.
+      const sharedHomePath = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "codex-shared-home-"),
+      );
+      const continuationKey = `codex:home:${sharedHomePath}`;
+      const personalInstanceId = ProviderInstanceId.make("codex_personal");
+      const workInstanceId = ProviderInstanceId.make("codex_work");
+      const nativeWriter: { current: ProviderInstanceId | undefined } = { current: undefined };
+
+      function makeCompatibleCodexInstance(instanceId: ProviderInstanceId) {
+        const fake = makeFakeCodexAdapter(CODEX_DRIVER);
+        const startSession = vi.fn((input: ProviderSessionStartInput) => {
+          if (nativeWriter.current !== undefined && nativeWriter.current !== instanceId) {
+            return Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: CODEX_DRIVER,
+                method: "thread.turn.start",
+                detail: `Codex home '${sharedHomePath}' already has an active writer (instance '${nativeWriter.current}').`,
+              }),
+            );
+          }
+          return fake.startSession(input).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                nativeWriter.current = instanceId;
+              }),
+            ),
+          );
+        });
+        const stopSession = vi.fn((threadId: ThreadId) =>
+          fake.stopSession(threadId).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (nativeWriter.current === instanceId) {
+                  nativeWriter.current = undefined;
+                }
+              }),
+            ),
+          ),
+        );
+        const adapter: ProviderAdapterShape<ProviderAdapterError> = {
+          ...fake.adapter,
+          startSession,
+          stopSession,
+        };
+        return { ...fake, adapter, startSession, stopSession };
+      }
+
+      const personal = makeCompatibleCodexInstance(personalInstanceId);
+      const work = makeCompatibleCodexInstance(workInstanceId);
+
+      const registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
+        getByInstance: (instanceId) => {
+          if (instanceId === personalInstanceId) return Effect.succeed(personal.adapter);
+          if (instanceId === workInstanceId) return Effect.succeed(work.adapter);
+          return Effect.fail(new ProviderUnsupportedError({ provider: CODEX_DRIVER }));
+        },
+        getInstanceInfo: (instanceId) => {
+          if (instanceId !== personalInstanceId && instanceId !== workInstanceId) {
+            return Effect.fail(new ProviderUnsupportedError({ provider: CODEX_DRIVER }));
+          }
+          return Effect.succeed({
+            instanceId,
+            driverKind: CODEX_DRIVER,
+            displayName: undefined,
+            enabled: true,
+            continuationIdentity: { driverKind: CODEX_DRIVER, continuationKey },
+          });
+        },
+        listInstances: () => Effect.succeed([personalInstanceId, workInstanceId]),
+        subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+          PubSub.subscribe(pubsub),
+        ),
+      };
+
+      const providerAdapterLayer = Layer.succeed(
+        ProviderAdapterRegistry.ProviderAdapterRegistry,
+        registry,
+      );
+      const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const providerLayer = makeProviderServiceLive().pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(providerAdapterLayer),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      );
+
+      const threadId = asThreadId("thread-compatible-writer-overlap");
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+
+        const initial = yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: personalInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-compatible-writer-overlap"),
+          runtimeMode: "full-access",
+        });
+        assert.equal(initial.providerInstanceId, personalInstanceId);
+        assert.equal(nativeWriter.current, personalInstanceId);
+
+        // Switching to the compatible "work" instance must stop the
+        // "personal" instance's session (releasing the shared native
+        // writer) before starting the new one. Before the fix, the new
+        // instance's startSession ran first and hit the simulated
+        // "already has an active writer" failure above.
+        const switched = yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: workInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-compatible-writer-overlap"),
+          resumeCursor: initial.resumeCursor,
+          runtimeMode: "full-access",
+        });
+
+        assert.equal(switched.providerInstanceId, workInstanceId);
+        assert.deepEqual(switched.resumeCursor, initial.resumeCursor);
+        assert.equal(nativeWriter.current, workInstanceId);
+        assert.equal(personal.stopSession.mock.calls.length, 1);
+        assert.equal(work.startSession.mock.calls.length, 1);
+
+        const sessions = yield* provider.listSessions();
+        assert.deepEqual(
+          sessions.filter((session) => session.threadId === threadId).map((s) => s.provider),
+          [CODEX_DRIVER],
+        );
+      }).pipe(Effect.provide(providerLayer));
+
+      NodeFS.rmSync(sharedHomePath, { recursive: true, force: true });
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 const routing = makeProviderServiceLayer();
 
 const customCompactionDriver = ProviderDriverKind.make("custom-compaction-provider");

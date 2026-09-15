@@ -471,7 +471,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const serverConfig = yield* ServerConfig.ServerConfig;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
   // Options-provided logger wins (test overrides); otherwise we take whatever
-  // the `ProviderEventLoggers` tag exposes — `undefined` means "no canonical
+  // the `ProviderEventLoggers` tag exposes  -  `undefined` means "no canonical
   // log writer is attached", which downstream code already handles as a
   // no-op.
   const canonicalEventLogger = options?.canonicalEventLogger ?? eventLoggers.canonical;
@@ -862,7 +862,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
    * Deny on an unreadable settings file rather than letting the read failure
    * escape: adding `ServerSettingsError` to `ProviderServiceError` would widen
    * a union every caller handles, for a branch that only decides whether one
-   * optional toolset is attached. Denying is the safe direction — an explicit
+   * optional toolset is attached. Denying is the safe direction  -  an explicit
    * "off" silently becoming "on" would violate the user's stated choice,
    * whereas the reverse costs an agent one toolset and is visible immediately.
    */
@@ -1174,7 +1174,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   // of live subscriptions (so `reconcileInstanceSubscriptions` can diff and
   // fork only the *new* or *rebuilt* ones) and serves as the dynamic adapter
   // list consumed by `stopStaleSessionsForThread`, `listSessions`, and
-  // `runStopAll` — replacing the pre-Slice-D startup snapshot so hot-added
+  // `runStopAll`  -  replacing the pre-Slice-D startup snapshot so hot-added
   // instances become visible to those call sites as soon as settings edits
   // land.
   const subscribedAdapters = yield* Ref.make(
@@ -1499,6 +1499,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }
         }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
+        // Stop any other compatible instance still holding this thread's
+        // session *before* starting the new one. Compatible instances (same
+        // continuation key, e.g. two Codex accounts sharing one Codex home)
+        // resume the same native thread, and Codex rejects a second writer
+        // over the same home while the old app-server process still owns it.
+        // Stopping first releases that writer; starting first raced it and
+        // surfaced as "already has an active writer". The thread's persisted
+        // binding is only updated below on success, so a target-start failure
+        // here leaves the old instance's resume state intact and recoverable.
+        yield* stopStaleSessionsForThread({
+          threadId,
+          currentInstanceId: resolvedInstanceId,
+        });
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
         yield* prepareMcpSession(threadId, resolvedInstanceId);
         const session = yield* adapter
@@ -1522,10 +1535,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           providerInstanceId: resolvedInstanceId,
         };
 
-        yield* stopStaleSessionsForThread({
-          threadId,
-          currentInstanceId: resolvedInstanceId,
-        });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
         });
