@@ -148,6 +148,7 @@ function makeFakeCodexAdapter(
       const now = "2026-01-01T00:00:00.000Z";
       const session: ProviderSession = {
         provider,
+        providerSessionId: `session-${String(input.threadId)}`,
         ...(input.providerInstanceId !== undefined
           ? { providerInstanceId: input.providerInstanceId }
           : {}),
@@ -225,6 +226,21 @@ function makeFakeCodexAdapter(
     }),
   );
 
+  const stopSessionIfCurrent = vi.fn(
+    (
+      threadId: ThreadId,
+      expectedProviderSessionId: string,
+    ): Effect.Effect<boolean, ProviderAdapterError> =>
+      Effect.sync(() => {
+        const session = sessions.get(threadId);
+        if (session?.providerSessionId !== expectedProviderSessionId) {
+          return false;
+        }
+        sessions.delete(threadId);
+        return true;
+      }),
+  );
+
   const listSessions = vi.fn((): Effect.Effect<ReadonlyArray<ProviderSession>> =>
     Effect.sync(() => Array.from(sessions.values())),
   );
@@ -290,6 +306,7 @@ function makeFakeCodexAdapter(
     respondToRequest,
     respondToUserInput,
     stopSession,
+    stopSessionIfCurrent,
     listSessions,
     hasSession,
     readThread,
@@ -327,6 +344,7 @@ function makeFakeCodexAdapter(
     respondToRequest,
     respondToUserInput,
     stopSession,
+    stopSessionIfCurrent,
     listSessions,
     hasSession,
     readThread,
@@ -1546,6 +1564,40 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("a guarded stop never terminates a replacement session", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("guarded-stop-replacement");
+      const original = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      routing.codex.updateSession(threadId, (session) => ({
+        ...session,
+        providerSessionId: "replacement-session",
+      }));
+
+      const stopSessionIfCurrent = provider.stopSessionIfCurrent;
+      assert.exists(stopSessionIfCurrent);
+      const stopped = yield* stopSessionIfCurrent({
+        threadId,
+        expectedProviderName: CODEX_DRIVER,
+        expectedProviderSessionId: original.providerSessionId ?? original.createdAt,
+      });
+
+      assert.equal(stopped, false);
+      assert.equal(
+        (yield* provider.listSessions()).some((session) => session.threadId === threadId),
+        true,
+      );
+      assert.equal(routing.codex.stopSession.mock.calls.length, 0);
+      assert.equal(routing.codex.stopSessionIfCurrent.mock.calls.length, 1);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect.each([CODEX_DRIVER, CLAUDE_AGENT_DRIVER, CURSOR_DRIVER])(
     "rejects missing, file, and saved workspace paths before starting %s",
     (driver) =>

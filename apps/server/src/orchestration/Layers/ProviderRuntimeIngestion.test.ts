@@ -464,6 +464,45 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
+  it("drops delayed runtime events from a replaced provider session", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-replacement-session"),
+      threadId,
+      session: {
+        threadId,
+        status: "ready",
+        providerName: "codex",
+        providerSessionId: "replacement-session",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: now,
+      },
+      createdAt: now,
+    });
+
+    await harness.emitAndDrain([
+      {
+        type: "session.exited",
+        eventId: asEventId("evt-stale-session-exited"),
+        provider: ProviderDriverKind.make("codex"),
+        providerSessionId: "old-session",
+        createdAt: "2026-01-01T00:00:01.000Z",
+        threadId,
+        payload: {},
+      },
+    ]);
+
+    const thread = await harness.readThreadShell();
+    expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.providerSessionId).toBe("replacement-session");
+  });
+
   it.each([
     { delivery: "buffered", responseStreamingMode: "paragraph" as const },
     { delivery: "streamed", responseStreamingMode: "token" as const },
@@ -3670,6 +3709,7 @@ describe("ProviderRuntimeIngestion", () => {
       type: "session.started",
       eventId: asEventId("evt-session-started"),
       provider: ProviderDriverKind.make("codex"),
+      providerSessionId: "provider-session-runtime-1",
       createdAt: now,
       threadId: asThreadId("thread-1"),
       message: "session started",
@@ -3722,6 +3762,7 @@ describe("ProviderRuntimeIngestion", () => {
     );
 
     expect(thread.session?.status).toBe("ready");
+    expect(thread.session?.providerSessionId).toBe("provider-session-runtime-1");
     const activity = thread.activities.find(
       (entry: ProviderRuntimeTestActivity) => entry.kind === "tool.started",
     );

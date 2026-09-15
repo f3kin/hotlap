@@ -145,8 +145,12 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
             Effect.tapError(() =>
               cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
             ),
-            Effect.catch((cause) =>
-              failEnvironmentInternal("orchestration_dispatch_failed", cause),
+            Effect.catchTag("OrchestrationGuardedSessionStopRejectedError", () =>
+              failEnvironmentInvalidRequest("guarded_session_stop_rejected"),
+            ),
+            Effect.catchIf(
+              (cause) => cause._tag !== "EnvironmentRequestInvalidError",
+              (cause) => failEnvironmentInternal("orchestration_dispatch_failed", cause),
             ),
           );
           yield* ProjectCloneTracker.discardCloneForDeletedProject(

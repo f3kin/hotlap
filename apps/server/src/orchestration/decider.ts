@@ -40,6 +40,7 @@ import type * as PlatformError from "effect/PlatformError";
 
 import {
   OrchestrationCommandInvariantError,
+  OrchestrationGuardedSessionStopRejectedError,
   OrchestrationThreadSettleBlockedError,
   type OrchestrationCommandRejection,
 } from "./Errors.ts";
@@ -54,6 +55,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { canStopThreadSessionIfIdle } from "./SessionStopPolicy.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
 import type { ProjectionThreadForkSource } from "./Services/ProjectionSnapshotQuery.ts";
 
@@ -1966,6 +1968,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           );
         }
       }
+      if (command.onlyIfIdle === true) {
+        const expectedProviderName = command.expectedProviderName;
+        const expectedProviderSessionId = command.expectedProviderSessionId;
+        if (
+          expectedProviderName === undefined ||
+          expectedProviderSessionId === undefined ||
+          !canStopThreadSessionIfIdle({
+            expectedProviderName,
+            expectedProviderSessionId,
+            session: thread.session,
+            latestTurnState: thread.latestTurn?.state ?? null,
+            hasQueuedTurnStart: hasQueuedTurnStartForThread(thread, command.createdAt),
+            hasPendingRequests: openRequests(thread).size > 0,
+            backgroundLiveness: null,
+          })
+        ) {
+          return yield* Effect.fail(
+            new OrchestrationGuardedSessionStopRejectedError({
+              threadId: command.threadId,
+              detail: `thread ${command.threadId} is not idle for a guarded session stop`,
+            }),
+          );
+        }
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1977,6 +2003,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           createdAt: command.createdAt,
+          ...(command.onlyIfIdle === true
+            ? {
+                onlyIfIdle: true,
+                expectedProviderName: command.expectedProviderName,
+                expectedProviderSessionId: command.expectedProviderSessionId,
+                snapshotSequence: command.snapshotSequence,
+              }
+            : {}),
         },
       };
     }
@@ -1987,6 +2021,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.expectedProviderSessionId !== undefined &&
+        thread.session?.providerSessionId !== command.expectedProviderSessionId
+      ) {
+        return yield* Effect.fail(
+          new OrchestrationGuardedSessionStopRejectedError({
+            threadId: command.threadId,
+            detail: `thread ${command.threadId} provider session was replaced before the guarded projection update`,
+          }),
+        );
+      }
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",

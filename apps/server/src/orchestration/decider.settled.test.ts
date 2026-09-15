@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationEvent,
@@ -74,6 +75,7 @@ function makeSession(status: OrchestrationSession["status"]): OrchestrationSessi
     threadId: ThreadId.make("thread-1"),
     status,
     providerName: "Codex",
+    providerSessionId: "session-1",
     runtimeMode: "full-access",
     activeTurnId: null,
     lastError: null,
@@ -751,6 +753,33 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
     }),
   );
 
+  it.effect("rejects a guarded session projection after the provider session is replaced", () =>
+    Effect.gen(function* () {
+      const error = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-stale-guarded-session-projection"),
+          threadId: ThreadId.make("thread-1"),
+          expectedProviderSessionId: "old-session",
+          session: {
+            ...makeSession("stopped"),
+            providerSessionId: "old-session",
+          },
+          createdAt: NOW,
+        },
+        readModel: makeReadModel("settled", null, {
+          ...makeSession("ready"),
+          providerSessionId: "replacement-session",
+        }),
+      }).pipe(Effect.flip);
+
+      expect(error).toMatchObject({
+        _tag: "OrchestrationGuardedSessionStopRejectedError",
+        threadId: ThreadId.make("thread-1"),
+      });
+    }),
+  );
+
   it.effect("unsettles for approval and user-input activities but not others", () =>
     Effect.gen(function* () {
       const approvalResult = yield* decideOrchestrationCommand({
@@ -848,6 +877,38 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       expect(unconditionalEvents.map((event) => event.type)).toEqual([
         "thread.session-stop-requested",
       ]);
+    }),
+  );
+
+  it.effect("accepts a guarded stop for an idle matching provider session", () =>
+    Effect.gen(function* () {
+      const stopped = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-stop-idle-provider"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+          onlyIfIdle: true,
+          snapshotSequence: 0,
+          expectedProviderName: ProviderDriverKind.make("codex"),
+          expectedProviderSessionId: "session-1",
+        },
+        readModel: makeReadModel("settled", null, {
+          ...makeSession("ready"),
+          providerName: "codex",
+        }),
+      });
+
+      const events = Array.isArray(stopped) ? stopped : [stopped];
+      expect(events.map((event) => event.type)).toEqual(["thread.session-stop-requested"]);
+      expect(events[0]).toMatchObject({
+        payload: {
+          onlyIfIdle: true,
+          expectedProviderName: "codex",
+          expectedProviderSessionId: "session-1",
+          snapshotSequence: 0,
+        },
+      });
     }),
   );
 });

@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+  ProviderDriverKind,
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -235,6 +236,8 @@ export const make = Effect.gen(function* () {
       threadPinReorder: true,
       threadActiveReorder: true,
       threadTitleRegeneration: true,
+      guardedSessionStop: true,
+      guardedSessionStopProviders: [ProviderDriverKind.make("codex")],
       threadPullRequests: true,
       pullRequestStackActions: true,
       threadPullRequestLinking: true,

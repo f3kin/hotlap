@@ -30,6 +30,7 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 
 const providerInstanceId = ProviderInstanceId.make("codex");
 const updatedAt = "2026-08-20T12:00:00.000Z";
+const providerSessionCreatedAt = "2026-08-20T11:00:00.000Z";
 
 const makeThread = (
   id: string,
@@ -37,6 +38,7 @@ const makeThread = (
   activeTurnId: TurnId | null = null,
   archivedAt: string | null = null,
   deletedAt: string | null = null,
+  providerSessionId: string | null = providerSessionCreatedAt,
 ) => ({
   id: ThreadId.make(id),
   archivedAt,
@@ -47,6 +49,7 @@ const makeThread = (
     status,
     providerName: "codex" as const,
     providerInstanceId,
+    providerSessionId,
     runtimeMode: "full-access" as const,
     activeTurnId,
     lastError: null,
@@ -63,7 +66,18 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     respondToRequest: () => Effect.die("unused"),
     respondToUserInput: () => Effect.die("unused"),
     stopSession: () => Effect.die("unused"),
-    listSessions: () => Effect.succeed(liveThreadIds.map((threadId) => ({ threadId }) as never)),
+    listSessions: () =>
+      Effect.succeed(
+        liveThreadIds.map(
+          (threadId) =>
+            ({
+              threadId,
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId,
+              createdAt: providerSessionCreatedAt,
+            }) as never,
+        ),
+      ),
     getCapabilities: () => Effect.die("unused"),
     assertConversationRollbackSupported: () => Effect.die("unused"),
     getInstanceInfo: () => Effect.die("unused"),
@@ -114,6 +128,155 @@ const runReconciliation = (input: {
       ),
     ),
   );
+
+it.effect("backfills the live provider session incarnation before reconciliation", () => {
+  const thread = makeThread("thread-session-identity", "ready", null, null, null, null);
+  const dispatched: OrchestrationCommand[] = [];
+
+  return runReconciliation({
+    threads: [thread],
+    liveThreadIds: [thread.id],
+    directory: {
+      getBinding: () => Effect.die("unused"),
+      upsert: () => Effect.die("unused"),
+      recordImportedTranscript: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: 1 })),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.equal(dispatched.length, 1);
+        const command = dispatched[0];
+        assert.equal(command?.type, "thread.session.set");
+        if (command?.type === "thread.session.set") {
+          assert.equal(command.threadId, thread.id);
+          assert.equal(command.session.providerSessionId, providerSessionCreatedAt);
+          assert.equal(command.session.updatedAt, command.createdAt);
+        }
+      }),
+    ),
+  );
+});
+
+it.effect("prefers an explicit live provider session id during reconciliation", () => {
+  const thread = makeThread("thread-explicit-session-identity", "ready", null, null, null, null);
+  const dispatched: OrchestrationCommand[] = [];
+  const explicitProviderSessionId = "provider-session-123";
+  const providerService = {
+    ...makeProviderService(),
+    listSessions: () =>
+      Effect.succeed([
+        {
+          threadId: thread.id,
+          provider: "codex",
+          providerInstanceId,
+          providerSessionId: explicitProviderSessionId,
+          createdAt: providerSessionCreatedAt,
+        } as never,
+      ]),
+  } satisfies ProviderService.ProviderService["Service"];
+
+  return runReconciliation({
+    threads: [thread],
+    providerService,
+    directory: {
+      getBinding: () => Effect.die("unused"),
+      upsert: () => Effect.die("unused"),
+      recordImportedTranscript: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: 1 })),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.equal(dispatched[0]?.type, "thread.session.set");
+        if (dispatched[0]?.type === "thread.session.set") {
+          assert.equal(dispatched[0].session.providerSessionId, explicitProviderSessionId);
+        }
+      }),
+    ),
+  );
+});
+
+it.effect("does not reconcile an ambiguous duplicate live session", () => {
+  const thread = makeThread("thread-ambiguous-session-identity", "ready", null, null, null, null);
+  const dispatched: OrchestrationCommand[] = [];
+  const providerService = {
+    ...makeProviderService(),
+    listSessions: () =>
+      Effect.succeed([
+        {
+          threadId: thread.id,
+          provider: "codex",
+          providerInstanceId,
+          providerSessionId: "provider-session-1",
+          createdAt: providerSessionCreatedAt,
+        } as never,
+        {
+          threadId: thread.id,
+          provider: "codex",
+          providerInstanceId,
+          providerSessionId: "provider-session-2",
+          createdAt: providerSessionCreatedAt,
+        } as never,
+      ]),
+  } satisfies ProviderService.ProviderService["Service"];
+
+  return runReconciliation({
+    threads: [thread],
+    providerService,
+    directory: {
+      getBinding: () => Effect.die("unused"),
+      upsert: () => Effect.die("unused"),
+      recordImportedTranscript: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: 1 })),
+  }).pipe(Effect.tap(() => Effect.sync(() => assert.deepStrictEqual(dispatched, []))));
+});
+
+it.effect("does not reconcile a sole live session from a different provider instance", () => {
+  const thread = makeThread("thread-mismatched-session-identity", "ready", null, null, null, null);
+  const dispatched: OrchestrationCommand[] = [];
+  const providerService = {
+    ...makeProviderService(),
+    listSessions: () =>
+      Effect.succeed([
+        {
+          threadId: thread.id,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex_other"),
+          providerSessionId: "provider-session-other-instance",
+          createdAt: providerSessionCreatedAt,
+        } as never,
+      ]),
+  } satisfies ProviderService.ProviderService["Service"];
+
+  return runReconciliation({
+    threads: [thread],
+    providerService,
+    directory: {
+      getBinding: () => Effect.die("unused"),
+      upsert: () => Effect.die("unused"),
+      recordImportedTranscript: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: 1 })),
+  }).pipe(Effect.tap(() => Effect.sync(() => assert.deepStrictEqual(dispatched, []))));
+});
 
 it.effect("marks active running sessions that have persisted resume state", () => {
   const active = makeThread("thread-mark-active", "running", TurnId.make("turn-mark-active"));

@@ -13,6 +13,7 @@
  */
 import type {
   ProviderInterruptTurnInput,
+  ProviderDriverKind,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -87,6 +88,18 @@ export interface ProviderServiceShape {
   readonly stopSession: (
     input: ProviderStopSessionInput,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Stop a session only when the live provider identity still matches.
+   *
+   * Optional for compatibility with third-party/test service layers. Callers
+   * that require compare-and-stop semantics must fail closed when unavailable.
+   */
+  readonly stopSessionIfCurrent?: (input: {
+    readonly threadId: ThreadId;
+    readonly expectedProviderName: ProviderDriverKind;
+    readonly expectedProviderSessionId: string;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
 
   /**
    * List active provider sessions.

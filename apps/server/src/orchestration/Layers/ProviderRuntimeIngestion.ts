@@ -1603,6 +1603,22 @@ const make = Effect.gen(function* () {
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
       if (!thread) return;
 
+      const currentProviderSessionId = thread.session?.providerSessionId;
+      const providerSessionMismatch =
+        event.providerSessionId !== undefined &&
+        currentProviderSessionId !== undefined &&
+        currentProviderSessionId !== null &&
+        event.providerSessionId !== currentProviderSessionId;
+      if (providerSessionMismatch) {
+        yield* Effect.logInfo("provider.runtime.event-stale-session", {
+          threadId: thread.id,
+          eventId: event.eventId,
+          eventType: event.type,
+          provider: event.provider,
+        });
+        return;
+      }
+
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
@@ -1755,6 +1771,11 @@ const make = Effect.gen(function* () {
               threadId: thread.id,
               status,
               providerName: event.provider,
+              ...(event.type === "session.started" && event.providerSessionId !== undefined
+                ? { providerSessionId: event.providerSessionId }
+                : thread.session?.providerSessionId !== undefined
+                  ? { providerSessionId: thread.session.providerSessionId }
+                  : {}),
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),
@@ -2051,6 +2072,9 @@ const make = Effect.gen(function* () {
               threadId: thread.id,
               status: "error",
               providerName: event.provider,
+              ...(thread.session?.providerSessionId !== undefined
+                ? { providerSessionId: thread.session.providerSessionId }
+                : {}),
               ...(event.providerInstanceId !== undefined
                 ? { providerInstanceId: event.providerInstanceId }
                 : {}),

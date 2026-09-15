@@ -500,10 +500,62 @@ export const reconcileProviderSessions = Effect.gen(function* () {
           .continueThreadsAfterServerUpdate
       : false;
 
-  const liveThreadIds = new Set(
-    (yield* providerService.listSessions()).map((session) => session.threadId),
-  );
+  const liveSessions = yield* providerService.listSessions();
+  const liveThreadIds = new Set(liveSessions.map((session) => session.threadId));
+  const liveSessionsByThreadId = new Map<ThreadId, Array<(typeof liveSessions)[number]>>();
+  for (const liveSession of liveSessions) {
+    const sessions = liveSessionsByThreadId.get(liveSession.threadId) ?? [];
+    sessions.push(liveSession);
+    liveSessionsByThreadId.set(liveSession.threadId, sessions);
+  }
   const { threads } = yield* query.getCommandReadModel();
+  // Prefer the runtime's explicit session identity. The creation timestamp is
+  // retained as a compatibility fallback for sessions from older adapters.
+  yield* Effect.forEach(
+    threads,
+    (thread) =>
+      Effect.gen(function* () {
+        const session = thread.session;
+        const candidates = liveSessionsByThreadId.get(thread.id) ?? [];
+        const matchingCandidates = candidates.filter(
+          (candidate) =>
+            (session?.providerName === null || candidate.provider === session?.providerName) &&
+            (session?.providerInstanceId === undefined ||
+              candidate.providerInstanceId === session.providerInstanceId),
+        );
+        const liveSession = matchingCandidates.length === 1 ? matchingCandidates[0] : undefined;
+        if (candidates.length > 0 && liveSession === undefined) {
+          yield* Effect.logWarning("provider session reconciliation is ambiguous", {
+            threadId: thread.id,
+            candidateCount: candidates.length,
+            matchingCandidateCount: matchingCandidates.length,
+          });
+        }
+        const providerSessionId = liveSession?.providerSessionId ?? liveSession?.createdAt;
+        if (
+          session === null ||
+          session.status === "stopped" ||
+          liveSession === undefined ||
+          providerSessionId === undefined ||
+          session.providerSessionId === providerSessionId
+        ) {
+          return;
+        }
+        const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(yield* crypto.randomUUIDv4),
+          threadId: thread.id,
+          session: {
+            ...session,
+            providerSessionId,
+            updatedAt: reconciledAt,
+          },
+          createdAt: reconciledAt,
+        });
+      }),
+    { discard: true },
+  );
   // Provider startup can report ready before the continuation is submitted.
   // Find those markers in one read rather than querying every idle thread.
   const preparedThreadIds = new Set(

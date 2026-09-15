@@ -183,6 +183,7 @@ describe("ProviderCommandReactor", () => {
     readonly compactThreadEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
+    readonly stopSessionIfCurrentEffect?: () => Effect.Effect<boolean, ProviderAdapterRequestError>;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
@@ -194,6 +195,11 @@ describe("ProviderCommandReactor", () => {
     createdBaseDirs.add(baseDir);
     const { stateDir } = deriveServerPathsSync(baseDir, undefined);
     createdStateDirs.add(stateDir);
+    const backgroundLiveness = ThreadBackgroundLiveness.make();
+    const backgroundLivenessLayer = Layer.succeed(
+      ThreadBackgroundLiveness.ThreadBackgroundLivenessService,
+      backgroundLiveness,
+    );
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     const tryHandlePromptCommand = vi.fn<ProviderAuthService["Service"]["tryHandlePromptCommand"]>(
       input?.tryHandlePromptCommandEffect ?? (() => Effect.succeed(false)),
@@ -295,6 +301,23 @@ describe("ProviderCommandReactor", () => {
         ),
       ),
     );
+    const stopSessionIfCurrent = vi.fn(
+      (stopInput: Parameters<NonNullable<ProviderServiceShape["stopSessionIfCurrent"]>>[0]) =>
+        (input?.stopSessionIfCurrentEffect?.() ?? Effect.succeed(true)).pipe(
+          Effect.tap((stopped) =>
+            stopped
+              ? Effect.sync(() => {
+                  const index = runtimeSessions.findIndex(
+                    (session) => session.threadId === stopInput.threadId,
+                  );
+                  if (index >= 0) {
+                    runtimeSessions.splice(index, 1);
+                  }
+                })
+              : Effect.void,
+          ),
+        ),
+    );
     const renameBranch = vi.fn((input: unknown) =>
       Effect.succeed({
         branch:
@@ -363,6 +386,7 @@ describe("ProviderCommandReactor", () => {
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
+      stopSessionIfCurrent,
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>
         Effect.succeed({
@@ -403,7 +427,7 @@ describe("ProviderCommandReactor", () => {
 
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(backgroundLivenessLayer),
       Layer.provide(ThreadPlanProgress.layer),
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
@@ -412,7 +436,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
-      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(backgroundLivenessLayer),
       Layer.provide(ThreadPlanProgress.layer),
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
@@ -491,6 +515,7 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(backgroundLivenessLayer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
@@ -618,6 +643,7 @@ describe("ProviderCommandReactor", () => {
       respondToRequest,
       respondToUserInput,
       stopSession,
+      stopSessionIfCurrent,
       renameBranch,
       pruneWorktrees,
       createWorktree,
@@ -626,6 +652,7 @@ describe("ProviderCommandReactor", () => {
       generateThreadTitle,
       runtimeSessions,
       stateDir,
+      backgroundLiveness,
       drain,
       startReactor,
       runEffect,
@@ -961,6 +988,7 @@ describe("ProviderCommandReactor", () => {
           threadId: sourceThreadId,
           status: "ready",
           providerName: "codex",
+          providerSessionId: "session-1",
           runtimeMode: "approval-required",
           activeTurnId: null,
           lastError: null,
@@ -4382,6 +4410,7 @@ describe("ProviderCommandReactor", () => {
           threadId: ThreadId.make("thread-1"),
           status: "ready",
           providerName: "codex",
+          providerSessionId: "session-1",
           providerInstanceId: ProviderInstanceId.make("codex_work"),
           runtimeMode: "approval-required",
           activeTurnId: null,
@@ -4454,6 +4483,241 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.settledOverride).toBe("settled");
       expect(thread?.session?.status).toBe("stopped");
       expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
+    }),
+  );
+
+  effectIt.effect("keeps a guarded session when background work starts before provider stop", () =>
+    Effect.gen(function* () {
+      const activation = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          deferReactorStart: true,
+          serverActivation: Deferred.await(activation),
+        }),
+      );
+      yield* Effect.promise(() => harness.startReactor());
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-guarded-stop"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          providerSessionId: "session-1",
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      const snapshotSequence = yield* harness.engine.latestSequence;
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-guarded-session-stop"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+        onlyIfIdle: true,
+        snapshotSequence,
+        expectedProviderName: ProviderDriverKind.make("codex"),
+        expectedProviderSessionId: "session-1",
+      });
+
+      harness.backgroundLiveness.recordTaskLiveness({
+        threadId: "thread-1",
+        taskId: "background-agent-1",
+        taskType: "agent",
+        status: "running",
+        kind: "started",
+      });
+      yield* Deferred.succeed(activation, undefined);
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.session?.status).toBe("ready");
+    }),
+  );
+
+  effectIt.effect("keeps the projection active when an exact guarded stop is rejected", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({ stopSessionIfCurrentEffect: () => Effect.succeed(false) }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = ThreadId.make("thread-1");
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-rejected-guarded-stop"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerSessionId: "session-1",
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      const snapshotSequence = yield* harness.engine.latestSequence;
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-rejected-guarded-session-stop"),
+        threadId,
+        createdAt: now,
+        onlyIfIdle: true,
+        snapshotSequence,
+        expectedProviderName: ProviderDriverKind.make("codex"),
+        expectedProviderSessionId: "session-1",
+      });
+
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.stopSessionIfCurrent).toHaveBeenCalledWith({
+        threadId,
+        expectedProviderName: ProviderDriverKind.make("codex"),
+        expectedProviderSessionId: "session-1",
+      });
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      expect(thread?.session?.status).toBe("ready");
+    }),
+  );
+
+  effectIt.effect("does not project stopped over a replacement session", () =>
+    Effect.gen(function* () {
+      let installReplacement: Effect.Effect<void> = Effect.void;
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          stopSessionIfCurrentEffect: () => installReplacement.pipe(Effect.as(true)),
+        }),
+      );
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = ThreadId.make("thread-1");
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-before-replacement-race"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerSessionId: "session-1",
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      installReplacement = harness.engine
+        .dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-install-replacement-during-stop"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerSessionId: "session-2",
+            providerInstanceId: ProviderInstanceId.make("codex_work"),
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:01.000Z",
+          },
+          createdAt: "2026-01-01T00:00:01.000Z",
+        })
+        .pipe(Effect.orDie);
+      const snapshotSequence = yield* harness.engine.latestSequence;
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-guarded-stop-with-replacement-race"),
+        threadId,
+        createdAt: now,
+        onlyIfIdle: true,
+        snapshotSequence,
+        expectedProviderName: ProviderDriverKind.make("codex"),
+        expectedProviderSessionId: "session-1",
+      });
+      yield* Effect.promise(() => harness.drain());
+
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session?.status).toBe("ready");
+      expect(thread?.session?.providerSessionId).toBe("session-2");
+    }),
+  );
+
+  effectIt.effect("keeps a guarded session when the thread changes before provider stop", () =>
+    Effect.gen(function* () {
+      const activation = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          deferReactorStart: true,
+          serverActivation: Deferred.await(activation),
+        }),
+      );
+      yield* Effect.promise(() => harness.startReactor());
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-before-thread-change"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "codex",
+          providerSessionId: "session-1",
+          providerInstanceId: ProviderInstanceId.make("codex_work"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      const snapshotSequence = yield* harness.engine.latestSequence;
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-guarded-stop-before-thread-change"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+        onlyIfIdle: true,
+        snapshotSequence,
+        expectedProviderName: ProviderDriverKind.make("codex"),
+        expectedProviderSessionId: "session-1",
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-change-after-guarded-stop"),
+        threadId: ThreadId.make("thread-1"),
+        title: "Re-engaged thread",
+      });
+
+      yield* Deferred.succeed(activation, undefined);
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const readModel = yield* Effect.promise(() => harness.readModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.session?.status).toBe("ready");
     }),
   );
 });
