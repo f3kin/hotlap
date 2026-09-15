@@ -66,6 +66,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   public readonly startImpl = vi.fn(() =>
     Promise.resolve({
       provider: ProviderDriverKind.make("codex"),
+      providerSessionId: this.providerSessionId,
       status: "ready" as const,
       runtimeMode: this.options.runtimeMode,
       threadId: this.options.threadId,
@@ -121,9 +122,11 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
 
   readonly options: CodexSessionRuntimeOptions;
+  readonly providerSessionId: string;
 
-  constructor(options: CodexSessionRuntimeOptions) {
+  constructor(options: CodexSessionRuntimeOptions, providerSessionId = "provider-session-test") {
     this.options = options;
+    this.providerSessionId = providerSessionId;
   }
 
   start() {
@@ -172,7 +175,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 function makeRuntimeFactory() {
   const runtimes: Array<FakeCodexRuntime> = [];
   const factory = vi.fn((options: CodexSessionRuntimeOptions) => {
-    const runtime = new FakeCodexRuntime(options);
+    const runtime = new FakeCodexRuntime(options, `provider-session-${runtimes.length + 1}`);
     runtimes.push(runtime);
     return Effect.succeed(runtime);
   });
@@ -670,6 +673,53 @@ function codexTurnEvent(method: "turn/started" | "turn/completed", turnId: strin
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("stops only the expected Codex session incarnation and retains its replacement", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-guarded-stop");
+      const original = yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const originalRuntime = lifecycleRuntimeFactory.lastRuntime;
+      NodeAssert.ok(originalRuntime);
+      const stopSessionIfCurrent = adapter.stopSessionIfCurrent;
+      NodeAssert.ok(stopSessionIfCurrent);
+
+      NodeAssert.equal(yield* stopSessionIfCurrent(threadId, "wrong-session"), false);
+      NodeAssert.equal(originalRuntime.closeImpl.mock.calls.length, 0);
+
+      const closeStarted = Promise.withResolvers<void>();
+      const releaseClose = Promise.withResolvers<void>();
+      originalRuntime.closeImpl.mockImplementation(async () => {
+        closeStarted.resolve();
+        await releaseClose.promise;
+      });
+      const stopFiber = yield* stopSessionIfCurrent(threadId, original.providerSessionId!).pipe(
+        Effect.forkChild,
+      );
+      yield* Effect.promise(() => closeStarted.promise);
+
+      const replacement = yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const replacementRuntime = lifecycleRuntimeFactory.lastRuntime;
+      NodeAssert.ok(replacementRuntime);
+      releaseClose.resolve();
+
+      NodeAssert.equal(yield* Fiber.join(stopFiber), true);
+      NodeAssert.deepStrictEqual(
+        (yield* adapter.listSessions()).map((session) => session.providerSessionId),
+        [replacement.providerSessionId],
+      );
+      NodeAssert.equal(originalRuntime.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(replacementRuntime.closeImpl.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("calculates one Codex turn total from cumulative counters", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -116,6 +116,12 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, TError>;
 
+  /** Atomically stops only the named session incarnation when supported. */
+  readonly stopSessionIfCurrent?: (
+    threadId: ThreadId,
+    expectedProviderSessionId: string,
+  ) => Effect.Effect<boolean, TError>;
+
   /**
    * List currently active provider sessions for this adapter.
    */

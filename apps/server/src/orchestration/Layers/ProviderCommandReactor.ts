@@ -45,6 +45,8 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { canStopThreadSessionIfIdle } from "../SessionStopPolicy.ts";
+import { threadHasQueuedTurnStart } from "../ThreadSettlementPolicy.ts";
 import {
   ProviderCommandReactor,
   type ProviderCommandReactorShape,
@@ -383,6 +385,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
     readonly createdAt: string;
+    readonly expectedProviderSessionId?: string;
   }) =>
     serverCommandId("provider-session-set").pipe(
       Effect.flatMap((commandId) =>
@@ -391,6 +394,9 @@ const make = Effect.gen(function* () {
           commandId,
           threadId: input.threadId,
           session: input.session,
+          ...(input.expectedProviderSessionId !== undefined
+            ? { expectedProviderSessionId: input.expectedProviderSessionId }
+            : {}),
           createdAt: input.createdAt,
         }),
       ),
@@ -412,6 +418,7 @@ const make = Effect.gen(function* () {
         ...(session ?? {
           threadId: input.threadId,
           providerName: null,
+          providerSessionId: undefined,
           providerInstanceId: thread.modelSelection.instanceId,
           runtimeMode: thread.runtimeMode,
         }),
@@ -638,6 +645,7 @@ const make = Effect.gen(function* () {
           threadId,
           status: "starting",
           providerName: activeSession?.provider ?? preferredProvider,
+          providerSessionId: activeSession?.providerSessionId ?? activeSession?.createdAt,
           providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
           runtimeMode: desiredRuntimeMode,
           activeTurnId: null,
@@ -730,6 +738,7 @@ const make = Effect.gen(function* () {
                 ? "starting"
                 : mapProviderSessionStatusToOrchestrationStatus(session.status),
             providerName: session.provider,
+            providerSessionId: session.providerSessionId ?? session.createdAt,
             providerInstanceId: session.providerInstanceId,
             runtimeMode: desiredRuntimeMode,
             // Provider turn ids are not orchestration turn ids.
@@ -1290,6 +1299,9 @@ const make = Effect.gen(function* () {
           threadId: thread.id,
           status: "stopped",
           providerName: instanceInfo.driverKind,
+          ...(thread.session?.providerSessionId !== undefined
+            ? { providerSessionId: thread.session.providerSessionId }
+            : {}),
           providerInstanceId: instanceId,
           runtimeMode: thread.runtimeMode,
           activeTurnId: null,
@@ -1691,27 +1703,85 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const resolveGuardedStopThread = Effect.fn("resolveGuardedStopThread")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
+  ) {
+    const currentSequence = yield* orchestrationEngine.latestSequence;
+    const replayStats = yield* orchestrationEngine.getThreadReplayStats({
+      threadId: event.payload.threadId,
+      fromSequenceExclusive: event.sequence,
+      toSequenceInclusive: currentSequence,
+      maxEvents: 0,
+    });
+    const thread = yield* resolveThreadShell(event.payload.threadId);
+    const now = DateTime.formatIso(yield* DateTime.now);
+    if (
+      replayStats.eventCount > 0 ||
+      !thread ||
+      event.payload.expectedProviderName === undefined ||
+      event.payload.expectedProviderSessionId === undefined ||
+      !canStopThreadSessionIfIdle({
+        expectedProviderName: event.payload.expectedProviderName,
+        expectedProviderSessionId: event.payload.expectedProviderSessionId,
+        session: thread.session,
+        latestTurnState: thread.latestTurn?.state ?? null,
+        hasQueuedTurnStart: threadHasQueuedTurnStart(thread, now),
+        hasPendingRequests: thread.hasPendingApprovals || thread.hasPendingUserInput,
+        backgroundLiveness: thread.backgroundLiveness ?? null,
+      })
+    ) {
+      return undefined;
+    }
+    return thread;
+  });
+
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
-    const thread = yield* resolveThreadShell(event.payload.threadId);
-    if (!thread) {
-      return;
-    }
+    let thread =
+      event.payload.onlyIfIdle === true
+        ? yield* resolveGuardedStopThread(event)
+        : yield* resolveThreadShell(event.payload.threadId);
+    if (!thread) return;
 
     const now = event.payload.createdAt;
     const wasCompacting = compactingThreadIds.has(thread.id);
     stoppingThreadIds.add(thread.id);
     const clearStopping = Effect.sync(() => void stoppingThreadIds.delete(thread.id));
-    yield* cancelTurnsAfterCompaction(
+    const stopProviderSession =
+      thread.session && thread.session.status !== "stopped"
+        ? event.payload.onlyIfIdle === true
+          ? providerService.stopSessionIfCurrent
+            ? resolveGuardedStopThread(event).pipe(
+                Effect.flatMap((currentThread) =>
+                  currentThread
+                    ? providerService.stopSessionIfCurrent!({
+                        threadId: currentThread.id,
+                        expectedProviderName: event.payload.expectedProviderName!,
+                        expectedProviderSessionId: event.payload.expectedProviderSessionId!,
+                      })
+                    : Effect.succeed(false),
+                ),
+              )
+            : Effect.logWarning("provider.session.stop-guard-unsupported", {
+                threadId: thread.id,
+                provider: event.payload.expectedProviderName,
+              }).pipe(Effect.as(false))
+          : providerService.stopSession({ threadId: thread.id }).pipe(Effect.as(true))
+        : Effect.succeed(true);
+    const cancelCompactedTurns = cancelTurnsAfterCompaction(
       thread.id,
       "The session was stopped during context compaction. Send this message again to continue.",
-    ).pipe(
-      Effect.andThen(
-        thread.session && thread.session.status !== "stopped"
-          ? providerService.stopSession({ threadId: thread.id })
-          : Effect.void,
-      ),
+    );
+    const stopSession =
+      event.payload.onlyIfIdle === true
+        ? stopProviderSession.pipe(
+            Effect.flatMap((stopped) =>
+              stopped ? cancelCompactedTurns.pipe(Effect.as(true)) : Effect.succeed(false),
+            ),
+          )
+        : cancelCompactedTurns.pipe(Effect.andThen(stopProviderSession));
+    yield* stopSession.pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
           if (Cause.hasInterruptsOnly(cause)) {
@@ -1737,23 +1807,41 @@ const make = Effect.gen(function* () {
             ),
           );
         },
-        onSuccess: () =>
-          setThreadSession({
-            threadId: thread.id,
-            session: {
-              threadId: thread.id,
-              status: "stopped",
-              providerName: thread.session?.providerName ?? null,
-              ...(thread.session?.providerInstanceId !== undefined
-                ? { providerInstanceId: thread.session.providerInstanceId }
-                : {}),
-              runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-              activeTurnId: null,
-              lastError: thread.session?.lastError ?? null,
-              updatedAt: now,
-            },
-            createdAt: now,
-          }),
+        onSuccess: (stopped) =>
+          stopped
+            ? setThreadSession({
+                threadId: thread.id,
+                ...(event.payload.onlyIfIdle === true
+                  ? { expectedProviderSessionId: event.payload.expectedProviderSessionId! }
+                  : {}),
+                session: {
+                  threadId: thread.id,
+                  status: "stopped",
+                  providerName: thread.session?.providerName ?? null,
+                  ...(thread.session?.providerSessionId !== undefined
+                    ? { providerSessionId: thread.session.providerSessionId }
+                    : {}),
+                  ...(thread.session?.providerInstanceId !== undefined
+                    ? { providerInstanceId: thread.session.providerInstanceId }
+                    : {}),
+                  runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+                  activeTurnId: null,
+                  lastError: thread.session?.lastError ?? null,
+                  updatedAt: now,
+                },
+                createdAt: now,
+              }).pipe(
+                Effect.catchTag("OrchestrationGuardedSessionStopRejectedError", () =>
+                  Effect.logInfo("provider.session.stop-projection-guard-rejected", {
+                    threadId: thread.id,
+                    reason: "provider-session-replaced",
+                  }),
+                ),
+              )
+            : Effect.logInfo("provider.session.stop-guard-rejected", {
+                threadId: thread.id,
+                reason: "provider-session-replaced",
+              }),
       }),
       Effect.ensuring(clearStopping),
     );

@@ -15,6 +15,7 @@ import {
   TurnId,
   type OrchestrationCommand,
   type OrchestrationEvent,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -743,6 +744,76 @@ describe("OrchestrationEngine", () => {
           expect(thread?.updatedAt).toBe(now());
         }
       }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
+  effectIt.effect("rejects a guarded session stop from a stale thread snapshot", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const projectId = ProjectId.make("project-guarded-stop");
+      const threadId = ThreadId.make("thread-guarded-stop");
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-guarded-stop-project"),
+        projectId,
+        title: "Project",
+        workspaceRoot: "/tmp/project-guarded-stop",
+        createdAt: now(),
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-guarded-stop-thread"),
+        threadId,
+        projectId,
+        title: "Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      });
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-guarded-stop-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now(),
+        },
+        createdAt: now(),
+      });
+      const snapshotSequence = yield* engine.latestSequence;
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-guarded-stop-update"),
+        threadId,
+        title: "Changed",
+      });
+
+      const error = yield* engine
+        .dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-guarded-stop-stale"),
+          threadId,
+          createdAt: now(),
+          onlyIfIdle: true,
+          snapshotSequence,
+          expectedProviderName: ProviderDriverKind.make("codex"),
+          expectedProviderSessionId: "session-1",
+        })
+        .pipe(Effect.flip);
+
+      expect(error._tag).toBe("OrchestrationGuardedSessionStopRejectedError");
+    }).pipe(Effect.provide(makeOrchestrationLayer())),
   );
 
   it("persists deterministic read models for repeated snapshot reads", async () => {

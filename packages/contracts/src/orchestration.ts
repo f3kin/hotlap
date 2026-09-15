@@ -23,7 +23,7 @@ import {
   TrimmedString,
   TurnId,
 } from "./baseSchemas.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   PullRequestActor,
   PullRequestChecksState,
@@ -552,6 +552,9 @@ export const OrchestrationSession = Schema.Struct({
   threadId: ThreadId,
   status: OrchestrationSessionStatus,
   providerName: Schema.NullOr(TrimmedNonEmptyString),
+  // Stable for one provider-session lifetime. Optional while older projected
+  // sessions age out, so maintenance clients can fail closed during rollout.
+  providerSessionId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   providerInstanceId: Schema.optional(ProviderInstanceId),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
@@ -1365,7 +1368,30 @@ const ThreadSessionStopCommand = Schema.Struct({
   // closes the race a post-settle snapshot read cannot: commands are decided
   // serially against the authoritative read model.
   onlyIfSettled: Schema.optional(Schema.Boolean),
-});
+  // Maintenance clients may request an atomic compare-and-stop. All three
+  // fields are validated as one guarded bundle below.
+  onlyIfIdle: Schema.optional(Schema.Boolean),
+  snapshotSequence: Schema.optional(NonNegativeInt),
+  expectedProviderName: Schema.optional(ProviderDriverKind),
+  expectedProviderSessionId: Schema.optional(TrimmedNonEmptyString),
+}).check(
+  Schema.makeFilter((command) => {
+    const hasGuardField =
+      command.onlyIfIdle !== undefined ||
+      command.snapshotSequence !== undefined ||
+      command.expectedProviderName !== undefined ||
+      command.expectedProviderSessionId !== undefined;
+    if (!hasGuardField) return true;
+    return (
+      (command.onlyIfIdle === true &&
+        command.snapshotSequence !== undefined &&
+        command.expectedProviderName !== undefined &&
+        command.expectedProviderSessionId !== undefined &&
+        command.onlyIfSettled === undefined) ||
+      "Guarded session stops require onlyIfIdle, snapshotSequence, expectedProviderName, and expectedProviderSessionId without onlyIfSettled."
+    );
+  }),
+);
 
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
@@ -1439,6 +1465,9 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  // Internal compare-and-set guard used when a provider side effect stopped
+  // one exact runtime incarnation while a replacement may be starting.
+  expectedProviderSessionId: Schema.optional(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 
@@ -1923,6 +1952,10 @@ export const ThreadRevertedPayload = Schema.Struct({
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   createdAt: IsoDateTime,
+  onlyIfIdle: Schema.optional(Schema.Literal(true)),
+  snapshotSequence: Schema.optional(NonNegativeInt),
+  expectedProviderName: Schema.optional(ProviderDriverKind),
+  expectedProviderSessionId: Schema.optional(TrimmedNonEmptyString),
 });
 
 export const ThreadSessionSetPayload = Schema.Struct({

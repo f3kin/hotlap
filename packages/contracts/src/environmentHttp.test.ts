@@ -21,6 +21,11 @@ describe("environment HTTP errors", () => {
         reason: "invalid_command",
         traceId,
       }),
+      new EnvironmentRequestInvalidError({
+        code: "invalid_request",
+        reason: "guarded_session_stop_rejected",
+        traceId,
+      }),
       new EnvironmentAuthInvalidError({
         code: "auth_invalid",
         reason: "missing_credential",
@@ -49,6 +54,7 @@ describe("environment HTTP errors", () => {
     ] as const;
     const details = [
       "invalid_command",
+      "guarded_session_stop_rejected",
       "missing_credential",
       "orchestration:read",
       "current_session_revoke_not_allowed",

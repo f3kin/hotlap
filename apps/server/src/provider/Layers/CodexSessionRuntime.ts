@@ -1362,8 +1362,10 @@ export const makeCodexSessionRuntime = (
       );
 
     const sessionCreatedAt = yield* nowIso;
+    const providerSessionId = yield* randomUUIDv4("provider-session");
     const initialSession = {
       provider: PROVIDER,
+      providerSessionId,
       ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
       status: "connecting",
       runtimeMode: options.runtimeMode,
@@ -1383,6 +1385,7 @@ export const makeCodexSessionRuntime = (
         return yield* offerEvent({
           id: EventId.make(id),
           provider: PROVIDER,
+          providerSessionId,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
           createdAt: yield* nowIso,
           ...event,

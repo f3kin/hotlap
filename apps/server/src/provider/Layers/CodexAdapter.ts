@@ -976,6 +976,7 @@ function runtimeEventBase(
   return {
     eventId: event.id,
     provider: event.provider,
+    ...(event.providerSessionId ? { providerSessionId: event.providerSessionId } : {}),
     threadId: canonicalThreadId,
     createdAt: event.createdAt,
     ...(event.turnId ? { turnId: event.turnId } : {}),
@@ -2671,7 +2672,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       return;
     }
     session.stopped = true;
-    sessions.delete(session.threadId);
+    if (sessions.get(session.threadId) === session) {
+      sessions.delete(session.threadId);
+    }
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
@@ -2684,6 +2687,27 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         return;
       }
       yield* stopSessionInternal(session);
+    });
+
+  const stopSessionIfCurrent: NonNullable<CodexAdapterShape["stopSessionIfCurrent"]> = (
+    threadId,
+    expectedProviderSessionId,
+  ) =>
+    Effect.gen(function* () {
+      const session = sessions.get(threadId);
+      if (!session || session.stopped) {
+        return false;
+      }
+      const current = yield* session.runtime.getSession;
+      if (
+        current.providerSessionId !== expectedProviderSessionId ||
+        session.stopped ||
+        sessions.get(threadId) !== session
+      ) {
+        return false;
+      }
+      yield* stopSessionInternal(session);
+      return true;
     });
 
   const listSessions: CodexAdapterShape["listSessions"] = () =>
@@ -2726,6 +2750,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     respondToRequest,
     respondToUserInput,
     stopSession,
+    stopSessionIfCurrent,
     listSessions,
     hasSession,
     stopAll,

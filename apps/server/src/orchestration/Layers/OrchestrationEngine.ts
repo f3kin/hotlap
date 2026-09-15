@@ -41,6 +41,7 @@ import {
   isOrchestrationCommandRejection,
   OrchestrationCommandIdConflictError,
   OrchestrationCommandInvariantError,
+  OrchestrationGuardedSessionStopRejectedError,
   OrchestrationCommandPreviouslyRejectedError,
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
@@ -204,6 +205,27 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           });
         }
 
+        if (
+          envelope.command.type === "thread.session.stop" &&
+          envelope.command.onlyIfIdle === true
+        ) {
+          const snapshotSequence = envelope.command.snapshotSequence;
+          if (
+            snapshotSequence === undefined ||
+            snapshotSequence > dispatchStartSequence ||
+            (yield* eventStore.hasEventAfter({
+              aggregateKind: "thread",
+              aggregateId: envelope.command.threadId,
+              sequenceExclusive: snapshotSequence,
+            }))
+          ) {
+            return yield* new OrchestrationGuardedSessionStopRejectedError({
+              threadId: envelope.command.threadId,
+              detail: `thread ${envelope.command.threadId} changed before guarded session stop`,
+            });
+          }
+        }
+
         // The decider compares the lookup inputs. Only recreation needs an
         // event check, since it can reset a thread to the same field values.
         if (
@@ -237,6 +259,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         ) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: envelope.command.type,
+            detail: `thread ${envelope.command.threadId} has live background work`,
+          });
+        }
+
+        if (
+          envelope.command.type === "thread.session.stop" &&
+          envelope.command.onlyIfIdle === true &&
+          threadBackgroundLiveness.getThreadBackgroundLiveness(envelope.command.threadId) !== null
+        ) {
+          return yield* new OrchestrationGuardedSessionStopRejectedError({
+            threadId: envelope.command.threadId,
             detail: `thread ${envelope.command.threadId} has live background work`,
           });
         }

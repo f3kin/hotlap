@@ -215,6 +215,7 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
   it("propagates providerInstanceId through ProviderSession decode", () => {
     const session = decodeProviderSession({
       provider: "codex",
+      providerSessionId: "provider-session-1",
       providerInstanceId: "codex_work",
       status: "ready",
       runtimeMode: "full-access",
@@ -222,6 +223,7 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
       createdAt: "2024-01-01T00:00:00Z",
       updatedAt: "2024-01-01T00:00:00Z",
     });
+    expect(session.providerSessionId).toBe("provider-session-1");
     expect(session.providerInstanceId).toBe("codex_work");
   });
 
@@ -245,12 +247,14 @@ describe("providerInstanceId routing key (slice-2 invariant)", () => {
       id: "event-1",
       kind: "notification",
       provider: "codex",
+      providerSessionId: "provider-session-1",
       providerInstanceId: "codex_personal",
       threadId: "thread-1",
       createdAt: "2024-01-01T00:00:00Z",
       method: "session.created",
     });
     expect(event.provider).toBe("codex");
+    expect(event.providerSessionId).toBe("provider-session-1");
     expect(event.providerInstanceId).toBe("codex_personal");
   });
 

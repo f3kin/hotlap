@@ -52,9 +52,22 @@ export class OrchestrationThreadSettleBlockedError extends Schema.TaggedError<Or
   }
 }
 
+export class OrchestrationGuardedSessionStopRejectedError extends Schema.TaggedError<OrchestrationGuardedSessionStopRejectedError>()(
+  "OrchestrationGuardedSessionStopRejectedError",
+  {
+    threadId: ThreadId,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Guarded session stop rejected (${this.threadId}): ${this.detail}`;
+  }
+}
+
 export const OrchestrationCommandRejection = Schema.Union([
   OrchestrationCommandInvariantError,
   OrchestrationThreadSettleBlockedError,
+  OrchestrationGuardedSessionStopRejectedError,
 ]);
 export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;
 export const isOrchestrationCommandRejection = Schema.is(OrchestrationCommandRejection);

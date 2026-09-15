@@ -431,6 +431,7 @@ function mapSessionRow(
     threadId: row.threadId,
     status: row.status,
     providerName: row.providerName,
+    ...(row.providerSessionId != null ? { providerSessionId: row.providerSessionId } : {}),
     ...(row.providerInstanceId !== null ? { providerInstanceId: row.providerInstanceId } : {}),
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
@@ -896,8 +897,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           thread_id AS "threadId",
           status,
           provider_name AS "providerName",
-          provider_instance_id AS "providerInstanceId",
           provider_session_id AS "providerSessionId",
+          provider_instance_id AS "providerInstanceId",
           provider_thread_id AS "providerThreadId",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
@@ -1617,6 +1618,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           sessions.thread_id AS "threadId",
           sessions.status,
           sessions.provider_name AS "providerName",
+          sessions.provider_session_id AS "providerSessionId",
           sessions.provider_instance_id AS "providerInstanceId",
           sessions.runtime_mode AS "runtimeMode",
           sessions.active_turn_id AS "activeTurnId",
@@ -1935,6 +1937,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           thread_id AS "threadId",
           status,
           provider_name AS "providerName",
+          provider_session_id AS "providerSessionId",
           provider_instance_id AS "providerInstanceId",
           runtime_mode AS "runtimeMode",
           active_turn_id AS "activeTurnId",
@@ -2606,6 +2609,9 @@ pending_approval_requests AS (
                   threadId: row.threadId,
                   status: row.status,
                   providerName: row.providerName,
+                  ...(row.providerSessionId !== null
+                    ? { providerSessionId: row.providerSessionId }
+                    : {}),
                   ...(row.providerInstanceId !== null
                     ? { providerInstanceId: row.providerInstanceId }
                     : {}),

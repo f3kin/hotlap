@@ -35,7 +35,7 @@ import {
   isProviderSendTurnSupportedImageMimeType,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
 } from "./orchestration.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
@@ -69,6 +69,72 @@ const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
 const decodeSnapShotAccessibility = Schema.decodeUnknownEffect(SnapShotAccessibility);
+
+it.effect("decodes a complete guarded session stop", () =>
+  Effect.gen(function* () {
+    const command = {
+      type: "thread.session.stop" as const,
+      commandId: CommandId.make("cmd-guarded-stop"),
+      threadId: ThreadId.make("thread-1"),
+      createdAt: "2026-09-15T00:00:00.000Z",
+      onlyIfIdle: true as const,
+      snapshotSequence: 42,
+      expectedProviderName: ProviderDriverKind.make("codex"),
+      expectedProviderSessionId: "session-1",
+    };
+
+    assert.deepStrictEqual(yield* decodeClientOrchestrationCommand(command), command);
+  }),
+);
+
+it.effect("rejects incomplete or conflicting guarded session stops", () =>
+  Effect.gen(function* () {
+    const base = {
+      type: "thread.session.stop" as const,
+      commandId: "cmd-guarded-stop",
+      threadId: "thread-1",
+      createdAt: "2026-09-15T00:00:00.000Z",
+    };
+    const invalid = [
+      { ...base, onlyIfIdle: true },
+      {
+        ...base,
+        onlyIfIdle: false,
+        snapshotSequence: 42,
+        expectedProviderName: "codex",
+        expectedProviderSessionId: "session-1",
+      },
+      { ...base, snapshotSequence: 42 },
+      {
+        ...base,
+        onlyIfSettled: true,
+        onlyIfIdle: true,
+        snapshotSequence: 42,
+        expectedProviderName: "codex",
+        expectedProviderSessionId: "session-1",
+      },
+      {
+        ...base,
+        onlyIfSettled: false,
+        onlyIfIdle: true,
+        snapshotSequence: 42,
+        expectedProviderName: "codex",
+        expectedProviderSessionId: "session-1",
+      },
+      { ...base, onlyIfIdle: true, snapshotSequence: 42, expectedProviderName: "codex" },
+      {
+        ...base,
+        onlyIfIdle: true,
+        snapshotSequence: 42,
+        expectedProviderSessionId: "session-1",
+      },
+    ];
+
+    for (const command of invalid) {
+      assert.ok(yield* decodeClientOrchestrationCommand(command).pipe(Effect.flip));
+    }
+  }),
+);
 
 it.effect("decodes a dispatch error after its bootstrap thread was deleted", () =>
   Effect.gen(function* () {

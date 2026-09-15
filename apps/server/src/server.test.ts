@@ -123,6 +123,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import {
+  OrchestrationGuardedSessionStopRejectedError,
   OrchestrationListenerCallbackError,
   OrchestrationThreadSettleBlockedError,
 } from "./orchestration/Errors.ts";
@@ -2166,6 +2167,49 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.status, 200);
       assert.equal(snapshot.thread.id, threadId);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("returns a typed bad request when a guarded session stop is rejected", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-guarded-stop-rejected");
+      yield* buildAppUnderTest({
+        layers: {
+          orchestrationEngine: {
+            dispatch: () =>
+              Effect.fail(
+                new OrchestrationGuardedSessionStopRejectedError({
+                  threadId,
+                  detail: "thread is no longer idle",
+                }),
+              ),
+          },
+        },
+      });
+
+      const response = yield* HttpClient.post("/api/orchestration/dispatch", {
+        headers: {
+          authorization: `Bearer ${yield* getAuthenticatedBearerSessionToken()}`,
+        },
+        body: yield* HttpBody.json({
+          type: "thread.session.stop",
+          commandId: "cmd-guarded-stop-rejected",
+          threadId,
+          createdAt: "2026-09-15T00:00:00.000Z",
+          onlyIfIdle: true,
+          snapshotSequence: 1,
+          expectedProviderName: "codex",
+          expectedProviderSessionId: "session-1",
+        }),
+      });
+      const body = (yield* response.json) as {
+        readonly code: string;
+        readonly reason: string;
+      };
+
+      assert.equal(response.status, 400);
+      assert.equal(body.code, "invalid_request");
+      assert.equal(body.reason, "guarded_session_stop_rejected");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
