@@ -237,6 +237,7 @@ describe("ProviderSessionReaper", () => {
           getThreadForkSource: () => Effect.die("unused"),
           getPendingForkHandoffSource: () => Effect.die("unused"),
           getUserInputActivity: () => Effect.die("unused"),
+          listActivitiesByKind: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
           getShellSnapshot: () => Effect.die("unused"),

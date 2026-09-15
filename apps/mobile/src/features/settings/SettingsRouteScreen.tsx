@@ -605,6 +605,9 @@ function GeneralSettingsSection() {
       {supportsCustomPrompts ? (
         <SettingsRow icon="text.bubble" label="Custom Prompts" target="SettingsCustomPrompts" />
       ) : null}
+      {Platform.OS === "ios" ? (
+        <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
+      ) : null}
       <AutoSettleSettingsRows />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
     </SettingsSection>
