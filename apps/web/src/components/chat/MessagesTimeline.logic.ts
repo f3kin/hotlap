@@ -308,7 +308,8 @@ export interface TimelineDurationMessage {
 export type TimelineLatestTurn = Pick<
   OrchestrationLatestTurn,
   "turnId" | "state" | "startedAt" | "completedAt"
->;
+> &
+  Partial<Pick<OrchestrationLatestTurn, "assistantMessageId">>;
 
 const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 

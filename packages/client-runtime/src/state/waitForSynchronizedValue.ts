@@ -4,11 +4,14 @@ export async function waitForSynchronizedValue<A>(input: {
   readonly read: () => A;
   readonly subscribe: (listener: (value: A) => void) => () => void;
   readonly isReady: (value: A) => boolean;
-  readonly timeoutMs: number;
+  readonly isUnavailable?: (value: A) => boolean;
+  readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
 }): Promise<boolean> {
   if (input.signal?.aborted === true) return false;
-  if (input.isReady(input.read())) return true;
+  const initialValue = input.read();
+  if (input.isReady(initialValue)) return true;
+  if (input.isUnavailable?.(initialValue) === true) return false;
 
   return await new Promise<boolean>((resolve) => {
     let settled = false;
@@ -25,15 +28,24 @@ export async function waitForSynchronizedValue<A>(input: {
     const abort = () => finish(false);
 
     const subscribedUnsubscribe = input.subscribe((value) => {
-      if (input.isReady(value)) finish(true);
+      if (input.isReady(value)) {
+        finish(true);
+      } else if (input.isUnavailable?.(value) === true) {
+        finish(false);
+      }
     });
     unsubscribe = subscribedUnsubscribe;
     if (settled) {
       subscribedUnsubscribe();
       return;
     }
-    if (input.isReady(input.read())) {
+    const subscribedValue = input.read();
+    if (input.isReady(subscribedValue)) {
       finish(true);
+      return;
+    }
+    if (input.isUnavailable?.(subscribedValue) === true) {
+      finish(false);
       return;
     }
     input.signal?.addEventListener("abort", abort, { once: true });
@@ -41,6 +53,8 @@ export async function waitForSynchronizedValue<A>(input: {
       finish(false);
       return;
     }
-    timeout = globalThis.setTimeout(() => finish(false), input.timeoutMs);
+    if (input.timeoutMs !== undefined) {
+      timeout = globalThis.setTimeout(() => finish(false), input.timeoutMs);
+    }
   });
 }

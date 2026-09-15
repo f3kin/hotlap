@@ -85,6 +85,7 @@ import {
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadSettings,
+  resolveThreadModelSelection,
   shouldRetryThreadOutboxDelivery,
   threadOutboxRetryDelayMs,
   type QueuedThreadMessage,
@@ -426,6 +427,33 @@ describe("thread outbox", () => {
         options: [{ id: "reasoningEffort", value: "xhigh" }],
       }),
     ).toBe(false);
+  });
+
+  it("discards a stale cross-provider draft after provider selection locks", () => {
+    const codex = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    const claude = { instanceId: ProviderInstanceId.make("claude"), model: "claude-sonnet" };
+
+    expect(resolveThreadModelSelection(codex, claude, false)).toEqual(codex);
+    expect(resolveThreadModelSelection(codex, claude, true)).toEqual(claude);
+    expect(resolveThreadModelSelection(codex, { ...codex, model: "gpt-5.5" }, false)).toEqual({
+      ...codex,
+      model: "gpt-5.5",
+    });
+    expect(
+      resolveQueuedThreadSettings(
+        {
+          ...queuedMessage({ messageId: "stale-provider", createdAt: "2026-09-15T00:00:00.000Z" }),
+          modelSelection: claude,
+        },
+        {
+          modelSelection: codex,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+        },
+        [],
+        { providerSelectionUnlocked: false },
+      ).modelSelection,
+    ).toEqual(codex);
   });
 
   it("normalizes queued plan mode against the queued provider, not the current thread", () => {

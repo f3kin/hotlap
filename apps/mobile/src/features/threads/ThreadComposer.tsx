@@ -114,6 +114,7 @@ import {
   prefillComposerWithCustomPrompt,
   shouldShowCustomPromptControl,
 } from "./customPromptPresentation";
+import { resolveThreadProviderGroups } from "./thread-provider-groups";
 
 /**
  * Height of the collapsed composer (pill + vertical padding, excluding safe-area inset).
@@ -139,6 +140,7 @@ export interface ThreadComposerProps {
   readonly hasCompactableConversation: boolean;
   readonly serverConfig: T3ServerConfig | null;
   readonly queueCount: number;
+  readonly providerSelectionPendingCount: number;
   readonly environmentId: EnvironmentId;
   readonly projectCwd: string | null;
   /** Why sending is blocked right now (shown as the send button's label), or null. */
@@ -562,11 +564,17 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [props.serverConfig, currentModelSelection],
   );
   const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
-  // An existing thread is bound to its harness: sessions can't move between
-  // provider instances, so the picker only offers the thread's own group.
+  // A fresh fork has copied history but no provider session of its own yet, so
+  // it can choose any runnable harness. Once real work starts it is bound just
+  // like every other existing thread.
   const threadProviderGroups = useMemo(
-    () => providerGroups.filter((group) => group.providerKey === currentModelSelection.instanceId),
-    [providerGroups, currentModelSelection.instanceId],
+    () =>
+      resolveThreadProviderGroups(
+        props.selectedThread,
+        providerGroups,
+        props.providerSelectionPendingCount,
+      ),
+    [providerGroups, props.providerSelectionPendingCount, props.selectedThread],
   );
   const currentModelOption =
     modelOptions.find(

@@ -52,6 +52,7 @@ import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  isForkProviderSelectionUnlocked,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
   type CodexFeedbackSubmission,
@@ -1460,11 +1461,20 @@ export default function ChatView(props: ChatViewProps) {
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  const forkNavigationAbortControllerRef = useRef<AbortController | null>(null);
+  const [forkPending, setForkPending] = useState(false);
   const currentRouteThreadKeyRef = useRef<string | null>(routeThreadKey);
   useLayoutEffect(() => {
+    const pendingFork = forkNavigationAbortControllerRef.current;
+    if (pendingFork !== null) {
+      pendingFork.abort();
+      forkNavigationAbortControllerRef.current = null;
+      setForkPending(false);
+    }
     currentRouteThreadKeyRef.current = routeThreadKey;
     return () => {
       currentRouteThreadKeyRef.current = null;
+      forkNavigationAbortControllerRef.current?.abort();
     };
   }, [routeThreadKey]);
   const updateProjectScriptSettings = useAtomCommand(serverEnvironment.updateSettings, {
@@ -2547,6 +2557,9 @@ export default function ChatView(props: ChatViewProps) {
     selectedProvider: selectedProviderByThreadId,
     threadProvider,
     providers: providerStatuses,
+    providerSelectionUnlocked:
+      isForkProviderSelectionUnlocked(activeThreadShell) &&
+      (activeServerThread === null || isForkProviderSelectionUnlocked(activeServerThread)),
   });
   const pullRequestsCapabilityKnown = serverConfig !== null;
   const supportsPullRequests = serverConfig?.environment.capabilities.pullRequests === true;
@@ -3510,6 +3523,7 @@ export default function ChatView(props: ChatViewProps) {
   const canForkConversation =
     supportsThreadForking &&
     isServerThread &&
+    !forkPending &&
     !paintOnlyDisplayedTimeline &&
     !isWorking &&
     activeThread?.session?.status !== "running" &&
@@ -3519,51 +3533,90 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell?.backgroundLiveness == null;
   const handleForkAssistantMessage = useCallback(
     async (sourceMessageId: MessageId) => {
-      if (!canForkConversation || activeThreadRef === null) return;
+      if (
+        !canForkConversation ||
+        activeThreadRef === null ||
+        forkNavigationAbortControllerRef.current !== null
+      ) {
+        return;
+      }
+      const sourceThreadKey = scopedThreadKey(activeThreadRef);
+      const abortController = new AbortController();
+      forkNavigationAbortControllerRef.current = abortController;
+      setForkPending(true);
       const destinationThreadId = newThreadId();
-      const result = await forkThread({
-        environmentId: activeThreadRef.environmentId,
-        input: {
-          threadId: destinationThreadId,
-          sourceThreadId: activeThreadRef.threadId,
-          sourceMessageId,
-          createdAt: new Date().toISOString(),
-        },
-      });
-      if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
+      try {
+        const result = await forkThread({
+          environmentId: activeThreadRef.environmentId,
+          input: {
+            threadId: destinationThreadId,
+            sourceThreadId: activeThreadRef.threadId,
+            sourceMessageId,
+            createdAt: new Date().toISOString(),
+          },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result) && !abortController.signal.aborted) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: "Could not fork conversation",
+                description: chatActionErrorMessage(error),
+              }),
+            );
+          }
+          return;
+        }
+        const destinationThreadRef = scopeThreadRef(
+          activeThreadRef.environmentId,
+          destinationThreadId,
+        );
+        const forkSynced = await waitForStartedServerThread(destinationThreadRef, {
+          signal: abortController.signal,
+        });
+        if (
+          abortController.signal.aborted ||
+          currentRouteThreadKeyRef.current !== sourceThreadKey
+        ) {
+          return;
+        }
+        if (!forkSynced) {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: "Could not fork conversation",
-              description: chatActionErrorMessage(error),
+              title: "Fork is no longer available",
+              description: "The destination was deleted before it could be opened.",
             }),
           );
+          return;
         }
-        return;
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(destinationThreadRef),
+        });
+      } finally {
+        if (forkNavigationAbortControllerRef.current === abortController) {
+          forkNavigationAbortControllerRef.current = null;
+          if (currentRouteThreadKeyRef.current === sourceThreadKey) {
+            setForkPending(false);
+          }
+        }
       }
-      const destinationThreadRef = scopeThreadRef(
-        activeThreadRef.environmentId,
-        destinationThreadId,
-      );
-      const forkSynced = await waitForStartedServerThread(destinationThreadRef, 10_000);
-      if (!forkSynced) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Fork created but not ready",
-            description: "The new conversation has not finished syncing yet.",
-          }),
-        );
-        return;
-      }
-      await navigate({
-        to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(destinationThreadRef),
-      });
     },
     [activeThreadRef, canForkConversation, forkThread, navigate],
+  );
+  const handleOpenForkSourceThread = useCallback(
+    (sourceThreadId: ThreadId) => {
+      if (activeThreadRef === null) return;
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(
+          scopeThreadRef(activeThreadRef.environmentId, sourceThreadId),
+        ),
+      });
+    },
+    [activeThreadRef, navigate],
   );
   const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   // Live stages of a bootstrap worktree setup. A worktree send creates the
@@ -9546,6 +9599,10 @@ export default function ChatView(props: ChatViewProps) {
                 queuedMessages={paintOnlyDisplayedTimeline ? EMPTY_QUEUED_MESSAGES : queuedMessages}
                 onSteerQueuedMessage={onSteerQueuedMessage}
                 onRemoveQueuedMessage={onRemoveQueuedMessage}
+                forkSourceThreadId={
+                  paintOnlyDisplayedTimeline ? undefined : activeThread.forkedFrom?.threadId
+                }
+                onOpenForkSource={handleOpenForkSourceThread}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}

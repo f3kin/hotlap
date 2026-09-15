@@ -24,7 +24,7 @@ const message = (
 
 describe("buildForkProviderInput", () => {
   it("keeps the newest whole history sections and marks omitted older history", () => {
-    const input = buildForkProviderInput({
+    const result = buildForkProviderInput({
       messages: [
         {
           sourceMessageId: MessageId.make("one"),
@@ -40,6 +40,12 @@ describe("buildForkProviderInput", () => {
         },
         {
           sourceMessageId: MessageId.make("three"),
+          role: "user",
+          text: "Selected question",
+          createdAt: "x",
+        },
+        {
+          sourceMessageId: MessageId.make("four"),
           role: "assistant",
           text: "Selected answer",
           createdAt: "x",
@@ -49,12 +55,39 @@ describe("buildForkProviderInput", () => {
       maxChars: 270,
     });
 
-    expect(input).not.toBeNull();
-    if (input === null) return;
-    expect(input).toContain("[Older inherited messages omitted to fit the provider context.]\n\n");
-    expect(input).toContain("## Assistant\n\nSelected answer");
-    expect(input).not.toContain("Old question");
-    expect(input.endsWith("## New user message\n\nContinue here")).toBe(true);
+    expect(result).not.toBeNull();
+    if (result === null) return;
+    expect(result.omittedMessageCount).toBe(2);
+    expect(result.text).toContain(
+      "[Older inherited messages omitted to fit the provider context.]\n\n",
+    );
+    expect(result.text).toContain("## User\n\nSelected question");
+    expect(result.text).toContain("## Assistant\n\nSelected answer");
+    expect(result.text).not.toContain("Old question");
+    expect(result.text.endsWith("## New user message\n\nContinue here")).toBe(true);
+  });
+
+  it("does not split the selected user and assistant turn", () => {
+    expect(
+      buildForkProviderInput({
+        messages: [
+          {
+            sourceMessageId: MessageId.make("question"),
+            role: "user",
+            text: "x".repeat(100),
+            createdAt: "x",
+          },
+          {
+            sourceMessageId: MessageId.make("answer"),
+            role: "assistant",
+            text: "short answer",
+            createdAt: "x",
+          },
+        ],
+        continuation: "continue",
+        maxChars: 180,
+      }),
+    ).toBeNull();
   });
 
   it("returns null when the selected response and continuation cannot both fit", () => {

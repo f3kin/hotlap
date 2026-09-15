@@ -12,6 +12,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import * as Option from "effect/Option";
 import { Atom, AsyncResult } from "effect/unstable/reactivity";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadDetails } from "../state/threads";
@@ -20,6 +21,10 @@ import type { Thread, ThreadShell, TurnDiffSummary } from "../types";
 import { deriveProviderInstanceEntries, NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  isForkProviderSelectionUnlocked,
+  type EnvironmentThreadState,
+} from "@t3tools/client-runtime/state/threads";
 import {
   type RightPanelSurface,
   pullRequestSurface,
@@ -88,6 +93,7 @@ import {
   shouldShowPlanFollowUpPrompt,
   shouldWriteThreadErrorToCurrentServerThread,
   toolGroupConsumesUpwardNavigation,
+  waitForStartedServerThread,
   waitForRevertedMessage,
   prepareRevertedMessageAttachments,
 } from "./ChatView.logic";
@@ -1332,6 +1338,31 @@ describe("resolveComposerProviderSelection", () => {
     ).toBeNull();
   });
 
+  it("leaves inherited fork history free to select a different driver before its first turn", () => {
+    const original = entry("claudeAgent", "claude_work");
+    const selected = entry("codex", "codex_work");
+    const fork = importedThread(original.instanceId);
+    const providerSelectionUnlocked = isForkProviderSelectionUnlocked({
+      forkedFrom: {
+        threadId: ThreadId.make("thread-source"),
+        messageId: MessageId.make("message-source"),
+      },
+      latestTurn: null,
+      latestUserMessageAt: null,
+      session: null,
+    });
+
+    expect(
+      deriveLockedProvider({
+        thread: fork,
+        selectedProvider: selected.instanceId,
+        threadProvider: original.instanceId,
+        providers: [original.snapshot, selected.snapshot],
+        providerSelectionUnlocked,
+      }),
+    ).toBeNull();
+  });
+
   it("uses the custom instance's capability instead of the default instance", () => {
     const defaultEntry = entry("antigravity", "antigravity", {
       showInteractionModeToggle: true,
@@ -2293,6 +2324,63 @@ describe("threadShellHasStarted", () => {
       threadShellHasStarted({ latestTurn: null, latestUserMessageAt: null, session: null }),
     ).toBe(false);
     expect(threadShellHasStarted(null)).toBe(false);
+  });
+});
+
+describe("waitForStartedServerThread", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("stops waiting when the destination is deleted", async () => {
+    const stateAtom = Atom.make<EnvironmentThreadState>({
+      data: Option.none<Thread>(),
+      status: "empty" as const,
+      error: Option.some("Retrying destination sync"),
+      page: Option.none(),
+    });
+    vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(stateAtom);
+    const controller = new AbortController();
+    const waiting = waitForStartedServerThread(
+      { environmentId, threadId: ThreadId.make("fork-destination") },
+      { signal: controller.signal },
+    );
+
+    appAtomRegistry.set(stateAtom, {
+      data: Option.none(),
+      status: "deleted",
+      error: Option.none(),
+      page: Option.none(),
+    });
+
+    try {
+      await expect(waiting).resolves.toBe(false);
+    } finally {
+      controller.abort();
+    }
+  });
+
+  it("keeps waiting through retryable synchronization errors", async () => {
+    const stateAtom = Atom.make<EnvironmentThreadState>({
+      data: Option.none<Thread>(),
+      status: "empty" as const,
+      error: Option.some("Retrying destination sync"),
+      page: Option.none(),
+    });
+    vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(stateAtom);
+    const waiting = waitForStartedServerThread(
+      { environmentId, threadId: ThreadId.make("fork-destination") },
+      { signal: new AbortController().signal },
+    );
+
+    appAtomRegistry.set(stateAtom, {
+      data: Option.some(makeThread({ latestTurn: completedTurn })),
+      status: "live",
+      error: Option.none(),
+      page: Option.none(),
+    });
+
+    await expect(waiting).resolves.toBe(true);
   });
 });
 

@@ -96,12 +96,31 @@ export interface ThreadSettingsSnapshot {
   readonly interactionMode: ProviderInteractionModeType;
 }
 
+export function resolveThreadModelSelection(
+  current: ModelSelectionType,
+  requested: ModelSelectionType | undefined,
+  providerSelectionUnlocked: boolean,
+): ModelSelectionType {
+  if (
+    requested === undefined ||
+    (!providerSelectionUnlocked && requested.instanceId !== current.instanceId)
+  ) {
+    return current;
+  }
+  return requested;
+}
+
 export function resolveQueuedThreadSettings(
   message: QueuedThreadMessage,
   thread: ThreadSettingsSnapshot,
   providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "showInteractionModeToggle">> = [],
+  options: { readonly providerSelectionUnlocked?: boolean } = {},
 ): ThreadSettingsSnapshot {
-  const modelSelection = message.modelSelection ?? thread.modelSelection;
+  const modelSelection = resolveThreadModelSelection(
+    thread.modelSelection,
+    message.modelSelection,
+    options.providerSelectionUnlocked ?? true,
+  );
   const provider = providers.find(
     (candidate) => candidate.instanceId === modelSelection.instanceId,
   );

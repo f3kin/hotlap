@@ -11,6 +11,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MessageId,
   ProjectId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ThreadId,
   TurnId,
   type OrchestrationCommand,
@@ -921,6 +922,27 @@ describe("OrchestrationEngine", () => {
       );
       await system.run(
         engine.dispatch({
+          type: "thread.history.import",
+          commandId: CommandId.make("cmd-fork-handoff-old-history"),
+          threadId: sourceThreadId,
+          messages: [
+            {
+              messageId: asMessageId("message-fork-old-question"),
+              role: "user",
+              text: "Old question",
+              createdAt,
+            },
+            {
+              messageId: asMessageId("message-fork-old-answer"),
+              role: "assistant",
+              text: "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+              createdAt,
+            },
+          ],
+        }),
+      );
+      await system.run(
+        engine.dispatch({
           type: "thread.turn.start",
           commandId: CommandId.make("cmd-fork-handoff-source-turn"),
           threadId: sourceThreadId,
@@ -1008,6 +1030,18 @@ describe("OrchestrationEngine", () => {
         }),
       );
 
+      await system.run(
+        engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-fork-handoff-provider-select"),
+          threadId: destinationThreadId,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-opus-4-6",
+          },
+        }),
+      );
+
       const firstTurnCommandId = CommandId.make("cmd-fork-handoff-first-turn");
       await system.run(
         engine.dispatch({
@@ -1019,6 +1053,10 @@ describe("OrchestrationEngine", () => {
             role: "user",
             text: "Continue with that choice.",
             attachments: [],
+          },
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-opus-4-6",
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
@@ -1035,7 +1073,8 @@ describe("OrchestrationEngine", () => {
           session: {
             threadId: destinationThreadId,
             status: "running",
-            providerName: "codex",
+            providerName: "claudeAgent",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
             runtimeMode: "approval-required",
             activeTurnId: firstDestinationTurnId,
             lastError: null,
@@ -1062,7 +1101,8 @@ describe("OrchestrationEngine", () => {
           session: {
             threadId: destinationThreadId,
             status: "ready",
-            providerName: "codex",
+            providerName: "claudeAgent",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
             runtimeMode: "approval-required",
             activeTurnId: null,
             lastError: null,
@@ -1102,7 +1142,26 @@ describe("OrchestrationEngine", () => {
       expect(firstTurnEvent).toMatchObject({
         type: "thread.turn-start-requested",
         payload: {
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-opus-4-6",
+          },
           providerInput: expect.stringContaining("## Assistant\n\nUse the inherited value."),
+        },
+      });
+      const truncationActivities = events.filter(
+        (event) =>
+          event.commandId === firstTurnCommandId &&
+          event.type === "thread.activity-appended" &&
+          event.payload.activity.kind === "fork.context-truncated",
+      );
+      expect(truncationActivities).toHaveLength(1);
+      expect(truncationActivities[0]).toMatchObject({
+        payload: {
+          activity: {
+            tone: "info",
+            summary: "Older fork context was omitted to fit the provider limit",
+          },
         },
       });
       if (firstTurnEvent?.type === "thread.turn-start-requested") {

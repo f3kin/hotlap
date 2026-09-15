@@ -4,6 +4,7 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { isForkProviderSelectionUnlocked } from "@t3tools/client-runtime/state/threads";
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -227,7 +228,6 @@ export async function completeQueuedMessageDelivery(
     }
     return "removed";
   } catch (error) {
-    forgetAcknowledgedThreadMessage(queuedMessage);
     console.warn("[thread-outbox] failed to remove delivered queued message", {
       environmentId: queuedMessage.environmentId,
       threadId: queuedMessage.threadId,
@@ -694,7 +694,10 @@ export function useThreadOutboxDrain(): void {
         serverEnvironment.configValueAtom(queuedMessage.environmentId),
       );
       if (!serverConfig) return false;
-      const settings = resolveQueuedThreadSettings(queuedMessage, thread, serverConfig.providers);
+      const providerSelectionUnlocked = isForkProviderSelectionUnlocked(thread);
+      const settings = resolveQueuedThreadSettings(queuedMessage, thread, serverConfig.providers, {
+        providerSelectionUnlocked,
+      });
       if (isModelSelectionUnavailable(serverConfig, settings.modelSelection)) {
         return restoreQueuedMessage(
           queuedMessage,
@@ -798,6 +801,7 @@ export function useThreadOutboxDrain(): void {
         queuedMessage,
         settings,
         currentConfig.providers,
+        { providerSelectionUnlocked },
       );
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,

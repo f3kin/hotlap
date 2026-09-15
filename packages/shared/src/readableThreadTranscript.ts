@@ -148,37 +148,46 @@ export function buildForkProviderInput(input: {
   readonly messages: ReadonlyArray<ReadableThreadMessage>;
   readonly continuation: string;
   readonly maxChars: number;
-}): string | null {
+}): { readonly text: string; readonly omittedMessageCount: number } | null {
   const intro =
     "This conversation was forked. Continue from the inherited transcript below using the newest workspace state.\n\n";
   const continuation = `\n\n## New user message\n\n${input.continuation}`;
-  const sections = input.messages.map(
-    (message) => `## ${message.role === "user" ? "User" : "Assistant"}\n\n${message.text}`,
-  );
-  const selected = sections[sections.length - 1];
-  if (selected === undefined) return null;
-
-  const kept: string[] = [];
-  let length = intro.length + continuation.length;
-  for (let index = sections.length - 1; index >= 0; index -= 1) {
-    const section = sections[index]!;
-    const separatorLength = kept.length === 0 ? 0 : 2;
-    if (length + separatorLength + section.length > input.maxChars) break;
-    kept.unshift(section);
-    length += separatorLength + section.length;
+  const omission = "[Older inherited messages omitted to fit the provider context.]\n\n";
+  const groups: Array<{ readonly sections: string[]; readonly messageCount: number }> = [];
+  for (const message of input.messages) {
+    const section = `## ${message.role === "user" ? "User" : "Assistant"}\n\n${message.text}`;
+    const previous = groups.at(-1);
+    if (message.role === "user" || previous === undefined) {
+      groups.push({ sections: [section], messageCount: 1 });
+    } else {
+      groups[groups.length - 1] = {
+        sections: [...previous.sections, section],
+        messageCount: previous.messageCount + 1,
+      };
+    }
   }
-  if (kept[kept.length - 1] !== selected) return null;
+  if (groups.length === 0) return null;
 
-  const omitted = kept.length < sections.length;
-  const omission = omitted
-    ? "[Older inherited messages omitted to fit the provider context.]\n\n"
-    : "";
-  while (
-    kept.length > 1 &&
-    intro.length + omission.length + kept.join("\n\n").length + continuation.length > input.maxChars
-  ) {
-    kept.shift();
+  const groupTexts = groups.map((group) => group.sections.join("\n\n"));
+  const suffixLengths = Array.from({ length: groups.length }, () => 0);
+  let suffixLength = 0;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    suffixLength += groupTexts[index]!.length + (index === groups.length - 1 ? 0 : 2);
+    suffixLengths[index] = suffixLength;
   }
-  const result = `${intro}${omission}${kept.join("\n\n")}${continuation}`;
-  return result.length <= input.maxChars ? result : null;
+
+  let omittedMessageCount = 0;
+  for (let start = 0; start < groups.length; start += 1) {
+    const omittedPrefix = start === 0 ? "" : omission;
+    const resultLength =
+      intro.length + omittedPrefix.length + suffixLengths[start]! + continuation.length;
+    if (resultLength <= input.maxChars) {
+      return {
+        text: `${intro}${omittedPrefix}${groupTexts.slice(start).join("\n\n")}${continuation}`,
+        omittedMessageCount,
+      };
+    }
+    omittedMessageCount += groups[start]!.messageCount;
+  }
+  return null;
 }

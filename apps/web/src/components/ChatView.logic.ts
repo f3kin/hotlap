@@ -1060,7 +1060,9 @@ export function recallCheckoutIsRepo(
     : sessionCheckoutIsRepo.get(checkoutIsRepoKey(environmentId, cwd));
 }
 
-export function threadHasStarted(thread: Thread | null | undefined): boolean {
+export function threadHasStarted(
+  thread: Pick<Thread, "latestTurn" | "messages" | "session"> | null | undefined,
+): boolean {
   return Boolean(
     thread && (thread.latestTurn !== null || thread.messages.length > 0 || thread.session !== null),
   );
@@ -1089,8 +1091,9 @@ export function deriveLockedProvider(input: {
   selectedProvider: string | null;
   threadProvider: string | null;
   providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>;
+  providerSelectionUnlocked?: boolean;
 }): ProviderDriverKind | null {
-  if (!threadHasStarted(input.thread)) {
+  if (input.providerSelectionUnlocked === true || !threadHasStarted(input.thread)) {
     return null;
   }
   const sessionProvider = input.thread?.session?.providerName ?? null;
@@ -1152,15 +1155,19 @@ export function getStartedThreadModelChangeBlockReason(input: {
 
 export async function waitForStartedServerThread(
   threadRef: ScopedThreadRef,
-  timeoutMs = 1_000,
+  options: number | { timeoutMs?: number; signal?: AbortSignal } = 1_000,
 ): Promise<boolean> {
-  const threadAtom = environmentThreadDetails.detailAtom(threadRef);
-  const getThread = () => appAtomRegistry.get(threadAtom);
+  const threadStateAtom = environmentThreadDetails.stateAtom(threadRef);
+  const getThreadState = () => appAtomRegistry.get(threadStateAtom);
+  const timeoutMs = typeof options === "number" ? options : options.timeoutMs;
+  const signal = typeof options === "number" ? undefined : options.signal;
   return await waitForSynchronizedValue({
-    read: getThread,
-    subscribe: (listener) => appAtomRegistry.subscribe(threadAtom, listener),
-    isReady: threadHasStarted,
-    timeoutMs,
+    read: getThreadState,
+    subscribe: (listener) => appAtomRegistry.subscribe(threadStateAtom, listener),
+    isReady: (state) => threadHasStarted(Option.getOrNull(state.data)),
+    isUnavailable: (state) => state.status === "deleted",
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(signal !== undefined ? { signal } : {}),
   });
 }
 
