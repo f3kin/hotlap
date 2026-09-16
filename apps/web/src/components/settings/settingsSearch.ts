@@ -244,6 +244,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["notification sound alert completion input approval desktop"],
   },
   {
+    id: "master-status-board",
+    title: "Master status board",
+    to: "/settings/general",
+    searchTerms: ["master card status board threads workflow"],
+  },
+  {
     id: "in-app-notifications",
     title: "In-app notifications",
     to: "/settings/general",

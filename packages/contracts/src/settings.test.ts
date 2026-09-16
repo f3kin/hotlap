@@ -601,6 +601,22 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings sidebar", () => {
+  it("defaults the Master board off and keeps it independent from the legacy sidebar", () => {
+    expect(decodeClientSettings({}).masterStatusBoardEnabled).toBe(false);
+    expect(
+      decodeClientSettings({ masterStatusBoardEnabled: true, legacySidebarEnabled: false })
+        .masterStatusBoardEnabled,
+    ).toBe(true);
+    expect(
+      decodeClientSettings({ masterStatusBoardEnabled: true, legacySidebarEnabled: false })
+        .legacySidebarEnabled,
+    ).toBe(false);
+    expect(decodeClientSettingsPatch({ masterStatusBoardEnabled: true })).toEqual({
+      masterStatusBoardEnabled: true,
+    });
+    expect(() => decodeClientSettingsPatch({ masterStatusBoardEnabled: "yes" })).toThrow();
+  });
+
   it("defaults to the current sidebar", () => {
     expect(decodeClientSettings({}).legacySidebarEnabled).toBe(false);
   });

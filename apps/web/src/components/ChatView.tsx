@@ -2341,6 +2341,9 @@ export default function ChatView(props: ChatViewProps) {
     ? `${activeProject.environmentId}:${activeProject.workspaceRoot}`
     : null;
   const clientSettingsHydrated = useClientSettingsHydrated();
+  const masterStatusBoardEnabled = useClientSettings(
+    (settings) => settings.masterStatusBoardEnabled,
+  );
   const [pendingFileSurfaceIdsByProject, setPendingFileSurfaceIdsByProject] = useState<
     ReadonlyMap<string, ReadonlySet<string>>
   >(() => new Map());
@@ -9958,7 +9961,9 @@ export default function ChatView(props: ChatViewProps) {
           />
         </WorkspacePageHeader>
 
-        <MasterStatusBoard activeThread={activeThread} />
+        {clientSettingsHydrated && masterStatusBoardEnabled ? (
+          <MasterStatusBoard activeThread={activeThread} />
+        ) : null}
 
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">
