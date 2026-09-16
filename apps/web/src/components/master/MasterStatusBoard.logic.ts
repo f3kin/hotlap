@@ -28,7 +28,7 @@ function newestFirst<T extends MasterBoardThread>(left: T, right: T): number {
   return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
 }
 
-function descendsFrom<T extends MasterBoardThread>(
+function belongsToMaster<T extends MasterBoardThread>(
   thread: T,
   ancestorId: string,
   threadById: ReadonlyMap<string, T>,
@@ -37,9 +37,10 @@ function descendsFrom<T extends MasterBoardThread>(
   let parentId = thread.forkedFrom?.threadId;
 
   while (parentId !== undefined && !visited.has(parentId)) {
-    if (parentId === ancestorId) return true;
     visited.add(parentId);
-    parentId = threadById.get(parentId)?.forkedFrom?.threadId;
+    const parent = threadById.get(parentId);
+    if (parent !== undefined && isMasterThreadTitle(parent.title)) return parent.id === ancestorId;
+    parentId = parent?.forkedFrom?.threadId;
   }
 
   return false;
@@ -63,7 +64,7 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   const cards = projectThreads
     .filter((thread) => {
       if (!isCardThreadTitle(thread.title)) return false;
-      if (descendsFrom(thread, activeThread.id, threadById)) return true;
+      if (belongsToMaster(thread, activeThread.id, threadById)) return true;
       return hasSingleMaster && thread.forkedFrom === undefined;
     })
     .sort(newestFirst);
