@@ -5,6 +5,8 @@ export interface MasterBoardThread {
   readonly title: string;
   readonly updatedAt: string;
   readonly forkedFrom?: { readonly threadId: string } | undefined;
+  readonly archivedAt?: string | null | undefined;
+  readonly settledOverride?: "settled" | "active" | null | undefined;
 }
 
 export interface MasterBoardModel<T extends MasterBoardThread> {
@@ -66,7 +68,9 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   const cards = projectThreads
     .filter(
       (thread) =>
-        isCardThreadTitle(thread.title) && belongsToMaster(thread, activeThread.id, threadById),
+        thread.archivedAt !== null &&
+        isCardThreadTitle(thread.title) &&
+        belongsToMaster(thread, activeThread.id, threadById),
     )
     .sort(newestFirst);
 

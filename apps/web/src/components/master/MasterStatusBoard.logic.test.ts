@@ -81,6 +81,7 @@ describe("MasterStatusBoard logic", () => {
     const completed = thread("completed", "Card: Completed", {
       forkedFrom: { threadId: master.id },
       updatedAt: "2026-09-01T00:00:00.000Z",
+      settledOverride: "settled",
     });
     const stale = thread("stale", "Card: Stale", {
       forkedFrom: { threadId: master.id },
@@ -91,6 +92,28 @@ describe("MasterStatusBoard logic", () => {
       completed,
       stale,
     ]);
+  });
+
+  it("excludes archived cards but retains their lineage for a live descendant", () => {
+    const master = thread("master", "Master: Fleet");
+    const archivedParent = thread("archived-parent", "Card: Archived parent", {
+      forkedFrom: { threadId: master.id },
+      archivedAt: "2026-09-10T00:00:00.000Z",
+    });
+    const liveChild = thread("live-child", "Card: Live child", {
+      forkedFrom: { threadId: archivedParent.id },
+    });
+
+    expect(deriveMasterBoard(master, [master, archivedParent, liveChild])?.cards).toEqual([
+      liveChild,
+    ]);
+  });
+
+  it("omits cards whose missing live-shell ancestor prevents ownership resolution", () => {
+    const master = thread("master", "Master: Fleet");
+    const child = thread("child", "Card: Child", { forkedFrom: { threadId: "missing-parent" } });
+
+    expect(deriveMasterBoard(master, [master, child])?.cards).toEqual([]);
   });
 
   it("ignores broken lineage and cycles, and sorts equal or malformed timestamps consistently", () => {
