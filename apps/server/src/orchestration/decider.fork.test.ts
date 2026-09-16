@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  THREAD_FORK_MAX_MESSAGES,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -269,6 +270,52 @@ it.layer(NodeServices.layer)("thread fork", (it) => {
         }).pipe(Effect.flip);
         expect(failure._tag).toBe("OrchestrationCommandInvariantError");
       }
+    }),
+  );
+
+  it.effect("forks long conversations with a bounded suffix of complete turns", () =>
+    Effect.gen(function* () {
+      const readModel = yield* withProject();
+      const messages = Array.from({ length: 250 }, (_, index) => [
+        {
+          id: MessageId.make(`long-user-${index}`),
+          role: "user" as const,
+          text: `Question ${index}`,
+          streaming: false,
+          createdAt: at,
+        },
+        {
+          id: MessageId.make(`long-assistant-${index}`),
+          role: "assistant" as const,
+          text: `Answer ${index}`,
+          streaming: false,
+          createdAt: at,
+        },
+      ]).flat();
+      const selectedMessage = messages.at(-1)!;
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.fork",
+          commandId: CommandId.make("command-long-fork"),
+          threadId: ThreadId.make("thread-long-fork"),
+          sourceThreadId,
+          sourceMessageId: selectedMessage.id,
+          createdAt: at,
+        },
+        readModel,
+        forkSource: {
+          ...forkSource,
+          messages,
+          selectedTurn: { state: "completed", assistantMessageId: selectedMessage.id },
+        },
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events).toHaveLength(THREAD_FORK_MAX_MESSAGES + 1);
+      expect(events[1]).toMatchObject({ payload: { role: "user", text: "Question 50" } });
+      expect(events.at(-1)).toMatchObject({
+        payload: { role: "assistant", text: "Answer 249" },
+      });
     }),
   );
 

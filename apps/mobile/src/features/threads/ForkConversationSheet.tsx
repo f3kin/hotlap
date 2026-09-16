@@ -293,8 +293,8 @@ export function ForkConversationSheet(props: {
                 tintColorClassName="accent-icon-subtle"
               />
               <Text className="min-w-0 flex-1 text-xs leading-5 text-foreground-muted">
-                History will include messages through the selected response. Files stay in the
-                current workspace.
+                Recent history through the selected response is included. Older history stays in the
+                source thread. Files stay in the current workspace.
               </Text>
             </View>
 

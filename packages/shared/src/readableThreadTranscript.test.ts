@@ -10,6 +10,7 @@ import {
   ReadableTranscriptMessageNotFoundError,
   buildForkProviderInput,
   serializeReadableThreadTranscript,
+  selectBoundedForkHistory,
 } from "./readableThreadTranscript.ts";
 
 const message = (
@@ -52,7 +53,7 @@ describe("buildForkProviderInput", () => {
         },
       ],
       continuation: "Continue here",
-      maxChars: 270,
+      maxChars: 330,
     });
 
     expect(result).not.toBeNull();
@@ -103,6 +104,132 @@ describe("buildForkProviderInput", () => {
         ],
         continuation: "continue",
         maxChars: 80,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("selectBoundedForkHistory", () => {
+  it.each([399, 400, 401, 1_000, 5_000])(
+    "bounds a %i-message history without splitting its oldest retained turn",
+    (messageCount) => {
+      const pairOffset = messageCount % 2;
+      const messages = Array.from({ length: messageCount }, (_, index) => ({
+        sourceMessageId: MessageId.make(`message-${index}`),
+        role:
+          index < pairOffset || (index - pairOffset) % 2 === 0
+            ? ("user" as const)
+            : ("assistant" as const),
+        text: `Message ${index}`,
+        createdAt: "x",
+      }));
+
+      const result = selectBoundedForkHistory({
+        messages,
+        maxMessages: 400,
+        maxBytes: 4 * 1024 * 1024,
+      });
+
+      expect(result).not.toBeNull();
+      if (result === null) return;
+      expect(result.messages.length).toBeLessThanOrEqual(400);
+      expect(result.messages[0]?.role).toBe("user");
+      expect(result.messages.at(-1)?.sourceMessageId).toBe(`message-${messageCount - 1}`);
+      expect(result.omittedMessageCount + result.messages.length).toBe(messageCount);
+    },
+  );
+
+  it("keeps the newest complete turns when a long conversation exceeds the message cap", () => {
+    const messages = Array.from({ length: 500 }, (_, index) => [
+      {
+        sourceMessageId: MessageId.make(`user-${index}`),
+        role: "user" as const,
+        text: `Question ${index}`,
+        createdAt: "x",
+      },
+      {
+        sourceMessageId: MessageId.make(`assistant-${index}`),
+        role: "assistant" as const,
+        text: `Answer ${index}`,
+        createdAt: "x",
+      },
+    ]).flat();
+
+    const result = selectBoundedForkHistory({
+      messages,
+      maxMessages: 400,
+      maxBytes: 4 * 1024 * 1024,
+    });
+
+    expect(result).not.toBeNull();
+    if (result === null) return;
+    expect(result.omittedMessageCount).toBe(600);
+    expect(result.messages).toHaveLength(400);
+    expect(result.messages[0]?.sourceMessageId).toBe("user-300");
+    expect(result.messages.at(-1)?.sourceMessageId).toBe("assistant-499");
+  });
+
+  it("drops whole old turns to satisfy the UTF-8 byte cap", () => {
+    const result = selectBoundedForkHistory({
+      messages: [
+        {
+          sourceMessageId: MessageId.make("old-user"),
+          role: "user",
+          text: "😀".repeat(20),
+          createdAt: "x",
+        },
+        {
+          sourceMessageId: MessageId.make("old-assistant"),
+          role: "assistant",
+          text: "old",
+          createdAt: "x",
+        },
+        {
+          sourceMessageId: MessageId.make("selected-user"),
+          role: "user",
+          text: "new",
+          createdAt: "x",
+        },
+        {
+          sourceMessageId: MessageId.make("selected-assistant"),
+          role: "assistant",
+          text: "answer",
+          createdAt: "x",
+        },
+      ],
+      maxMessages: 10,
+      maxBytes: 280,
+    });
+
+    expect(result).toEqual({
+      messages: expect.arrayContaining([
+        expect.objectContaining({ sourceMessageId: "selected-user" }),
+        expect.objectContaining({ sourceMessageId: "selected-assistant" }),
+      ]),
+      omittedMessageCount: 2,
+    });
+    expect(result?.messages).toHaveLength(2);
+  });
+
+  it("rejects when the selected turn alone exceeds the safety budget", () => {
+    expect(
+      selectBoundedForkHistory({
+        messages: [
+          {
+            sourceMessageId: MessageId.make("selected-user"),
+            role: "user",
+            text: "x".repeat(100),
+            createdAt: "x",
+          },
+          {
+            sourceMessageId: MessageId.make("selected-assistant"),
+            role: "assistant",
+            text: "answer",
+            createdAt: "x",
+          },
+        ],
+        maxMessages: 10,
+        maxBytes: 200,
       }),
     ).toBeNull();
   });

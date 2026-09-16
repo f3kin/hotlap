@@ -1430,11 +1430,151 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionReadableThreadMessageDbRowSchema,
     execute: ({ threadId, messageId }) =>
       sql`
-        WITH endpoint AS (
-          SELECT created_at AS "createdAt", message_id AS "messageId"
-          FROM projection_thread_messages
-          WHERE thread_id = ${threadId} AND message_id = ${messageId}
+        WITH ordered_messages AS (
+          SELECT
+            message.*,
+            COALESCE(turns.requested_at, message.created_at) AS sort_anchor,
+            COALESCE(turns.turn_id, message.message_id) AS sort_turn_key,
+            CASE message.role WHEN 'user' THEN 0 ELSE 1 END AS sort_role,
+            length(CAST(message.text AS BLOB))
+              + COALESCE((
+                SELECT SUM(
+                  length(CAST(json_extract(attachment.value, '$.name') AS BLOB)) * 6 + 16
+                )
+                FROM json_each(
+                  CASE
+                    WHEN json_valid(message.attachments_json) THEN message.attachments_json
+                    ELSE '[]'
+                  END
+                ) AS attachment
+                WHERE json_type(attachment.value, '$.name') = 'text'
+              ), 0)
+              + COALESCE((
+                SELECT SUM(
+                  (
+                    length(CAST(json_extract(record.value, '$.contextId') AS BLOB))
+                    + length(CAST(json_extract(record.value, '$.kind') AS BLOB))
+                    + length(CAST(json_extract(record.value, '$.label') AS BLOB))
+                  ) * 6 + 64
+                )
+                FROM json_each(
+                  CASE
+                    WHEN json_valid(message.context_json)
+                      THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
+                    ELSE json('[]')
+                  END
+                ) AS record
+                WHERE json_type(record.value, '$.contextId') = 'text'
+                  AND json_type(record.value, '$.kind') = 'text'
+                  AND json_type(record.value, '$.label') = 'text'
+              ), 0)
+              + 128 AS payload_bytes
+          FROM projection_thread_messages AS message
+          LEFT JOIN projection_turns AS turns
+            ON turns.thread_id = message.thread_id
+            AND (
+              turns.turn_id = message.turn_id
+              OR (message.turn_id IS NULL AND turns.pending_message_id = message.message_id)
+            )
+          WHERE message.thread_id = ${threadId}
+            AND message.role != 'system'
+            AND (
+              length(trim(message.text, ${MESSAGE_TRIM_WHITESPACE})) > 0
+              OR message.is_streaming = 1
+              OR EXISTS (
+                SELECT 1
+                FROM json_each(
+                  CASE
+                    WHEN json_valid(message.attachments_json) THEN message.attachments_json
+                    ELSE '[]'
+                  END
+                ) AS attachment
+                WHERE json_type(attachment.value, '$.name') = 'text'
+                  AND length(trim(json_extract(attachment.value, '$.name'), ${MESSAGE_TRIM_WHITESPACE})) > 0
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM json_each(
+                  CASE
+                    WHEN json_valid(message.context_json)
+                      THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
+                    ELSE json('[]')
+                  END
+                ) AS record
+                WHERE json_type(record.value, '$.contextId') = 'text'
+                  AND json_type(record.value, '$.kind') = 'text'
+                  AND json_type(record.value, '$.label') = 'text'
+                  AND json_extract(record.value, '$.kind') NOT IN ('file', 'image')
+              )
+            )
+        ), endpoint AS (
+          SELECT sort_anchor, sort_turn_key, sort_role, message_id
+          FROM ordered_messages
+          WHERE message_id = ${messageId}
           LIMIT 1
+        ), ranked AS (
+          SELECT
+            message.*,
+            ROW_NUMBER() OVER (
+              ORDER BY message.sort_anchor DESC, message.sort_turn_key DESC,
+                message.sort_role DESC, message.message_id DESC
+            ) AS newest_rank,
+            SUM(message.payload_bytes) OVER (
+              ORDER BY message.sort_anchor DESC, message.sort_turn_key DESC,
+                message.sort_role DESC, message.message_id DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS cumulative_bytes
+          FROM ordered_messages AS message
+          CROSS JOIN endpoint
+          WHERE
+            message.sort_anchor < endpoint.sort_anchor
+            OR (
+              message.sort_anchor = endpoint.sort_anchor
+              AND message.sort_turn_key < endpoint.sort_turn_key
+            )
+            OR (
+              message.sort_anchor = endpoint.sort_anchor
+              AND message.sort_turn_key = endpoint.sort_turn_key
+              AND message.sort_role < endpoint.sort_role
+            )
+            OR (
+              message.sort_anchor = endpoint.sort_anchor
+              AND message.sort_turn_key = endpoint.sort_turn_key
+              AND message.sort_role = endpoint.sort_role
+              AND message.message_id <= endpoint.message_id
+            )
+        ), eligible AS (
+          SELECT *
+          FROM ranked
+          WHERE newest_rank <= ${THREAD_FORK_MAX_MESSAGES + 1}
+            AND cumulative_bytes <= ${THREAD_FORK_MAX_BYTES}
+        ), boundary AS (
+          SELECT sort_anchor, sort_turn_key, sort_role, message_id
+          FROM eligible
+          WHERE role = 'user'
+          ORDER BY sort_anchor ASC, sort_turn_key ASC, sort_role ASC, message_id ASC
+          LIMIT 1
+        ), bounded AS (
+          SELECT message.*
+          FROM eligible AS message
+          CROSS JOIN boundary
+          WHERE
+            message.sort_anchor > boundary.sort_anchor
+            OR (
+              message.sort_anchor = boundary.sort_anchor
+              AND message.sort_turn_key > boundary.sort_turn_key
+            )
+            OR (
+              message.sort_anchor = boundary.sort_anchor
+              AND message.sort_turn_key = boundary.sort_turn_key
+              AND message.sort_role > boundary.sort_role
+            )
+            OR (
+              message.sort_anchor = boundary.sort_anchor
+              AND message.sort_turn_key = boundary.sort_turn_key
+              AND message.sort_role = boundary.sort_role
+              AND message.message_id >= boundary.message_id
+            )
         )
         SELECT
           message.message_id AS id,
@@ -1469,18 +1609,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               AND json_type(record.value, '$.kind') = 'text'
               AND json_type(record.value, '$.label') = 'text'
           ), '[]') AS "contextRecords"
-        FROM projection_thread_messages AS message
-        CROSS JOIN endpoint
-        WHERE message.thread_id = ${threadId}
-          AND message.role != 'system'
-          AND (
-            message.created_at < endpoint."createdAt"
-            OR (
-              message.created_at = endpoint."createdAt"
-              AND message.message_id <= endpoint."messageId"
-            )
-          )
-        ORDER BY message.created_at ASC, message.message_id ASC
+        FROM bounded AS message
+        ORDER BY message.sort_anchor ASC, message.sort_turn_key ASC,
+          message.sort_role ASC, message.message_id ASC
       `,
   });
 
@@ -1530,65 +1661,6 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE message.thread_id = ${threadId}
           AND message.role != 'system'
           ${forkHistoryOnly === true ? sql`AND message.message_id GLOB 'fork-history:*'` : sql``}
-      `,
-  });
-
-  const getReadableThreadMessageStatsThrough = SqlSchema.findOne({
-    Request: ThreadMessageEndpointLookupInput,
-    Result: ProjectionReadableThreadStatsDbRowSchema,
-    execute: ({ threadId, messageId }) =>
-      sql`
-        WITH endpoint AS (
-          SELECT created_at AS "createdAt", message_id AS "messageId"
-          FROM projection_thread_messages
-          WHERE thread_id = ${threadId} AND message_id = ${messageId}
-          LIMIT 1
-        )
-        SELECT
-          COUNT(*) AS "messageCount",
-          COALESCE(SUM(
-            length(CAST(message.text AS BLOB))
-            + COALESCE((
-              SELECT SUM(length(CAST(json_extract(attachment.value, '$.name') AS BLOB)) + 2)
-              FROM json_each(
-                CASE
-                  WHEN json_valid(message.attachments_json) THEN message.attachments_json
-                  ELSE '[]'
-                END
-              ) AS attachment
-              WHERE json_type(attachment.value, '$.name') = 'text'
-            ), 0)
-            + COALESCE((
-              SELECT SUM(
-                length(CAST(json_extract(record.value, '$.contextId') AS BLOB))
-                + length(CAST(json_extract(record.value, '$.kind') AS BLOB))
-                + length(CAST(json_extract(record.value, '$.label') AS BLOB))
-                + 8
-              )
-              FROM json_each(
-                CASE
-                  WHEN json_valid(message.context_json)
-                    THEN COALESCE(json_extract(message.context_json, '$.records'), json('[]'))
-                  ELSE json('[]')
-                END
-              ) AS record
-              WHERE json_type(record.value, '$.contextId') = 'text'
-                AND json_type(record.value, '$.kind') = 'text'
-                AND json_type(record.value, '$.label') = 'text'
-            ), 0)
-            + 64
-          ), 0) AS "payloadBytes"
-        FROM projection_thread_messages AS message
-        CROSS JOIN endpoint
-        WHERE message.thread_id = ${threadId}
-          AND message.role != 'system'
-          AND (
-            message.created_at < endpoint."createdAt"
-            OR (
-              message.created_at = endpoint."createdAt"
-              AND message.message_id <= endpoint."messageId"
-            )
-          )
       `,
   });
 
@@ -3670,20 +3742,6 @@ pending_approval_requests AS (
               overLimit: false as const,
               source: Option.none<ProjectionThreadForkSource>(),
             };
-          }
-          const stats = yield* getReadableThreadMessageStatsThrough(input).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError(
-                "ProjectionSnapshotQuery.getThreadForkSource:getStats:query",
-                "ProjectionSnapshotQuery.getThreadForkSource:getStats:decode",
-              ),
-            ),
-          );
-          if (
-            stats.messageCount > THREAD_FORK_MAX_MESSAGES ||
-            stats.payloadBytes > THREAD_FORK_MAX_BYTES
-          ) {
-            return { overLimit: true as const };
           }
           const messageRows = yield* listReadableThreadMessageRowsThrough(input).pipe(
             Effect.mapError(

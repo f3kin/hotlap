@@ -22,6 +22,7 @@ import {
 import {
   buildForkProviderInput,
   projectReadableThreadMessages,
+  selectBoundedForkHistory,
 } from "@t3tools/shared/readableThreadTranscript";
 import {
   legacyLinkedPullRequestOf,
@@ -437,23 +438,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       yield* requireProject({ readModel, command, projectId: forkSource.projectId });
       yield* requireThreadAbsent({ readModel, command, threadId: command.threadId });
 
-      const history = projectReadableThreadMessages(forkSource.messages, {
+      const readableHistory = projectReadableThreadMessages(forkSource.messages, {
         throughMessageId: command.sourceMessageId,
       });
-      const historyBytes = history.reduce(
-        (total, message) => total + new TextEncoder().encode(message.text).byteLength + 128,
-        0,
-      );
-      if (
-        history.length === 0 ||
-        history.length > THREAD_FORK_MAX_MESSAGES ||
-        historyBytes > THREAD_FORK_MAX_BYTES
-      ) {
+      const boundedHistory = selectBoundedForkHistory({
+        messages: readableHistory,
+        maxMessages: THREAD_FORK_MAX_MESSAGES,
+        maxBytes: THREAD_FORK_MAX_BYTES,
+      });
+      if (boundedHistory === null) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `The conversation is too large to fork safely (maximum ${THREAD_FORK_MAX_MESSAGES} readable messages and ${THREAD_FORK_MAX_BYTES} bytes).`,
+          detail: "The selected response is too large to continue in a fork.",
         });
       }
+      const history = boundedHistory.messages;
       if (
         buildForkProviderInput({
           messages: history,
