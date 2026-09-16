@@ -27,15 +27,21 @@ import type {
   OrchestrationThreadShell,
   ModelSelection,
   ProviderInteractionMode,
+  ProviderRoutingMode,
   ProjectId,
   RuntimeMode,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Option from "effect/Option";
 import type * as Effect from "effect/Effect";
 
 import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
+import type {
+  ProjectionPendingTurnStart,
+  ProjectionTurnState,
+} from "../../persistence/Services/ProjectionTurns.ts";
 
 export interface ProjectionSnapshotCounts {
   readonly projectCount: number;
@@ -102,6 +108,7 @@ export type ProjectionBoundedThreadSource<T> =
 export interface ProjectionThreadForkSource extends ProjectionThreadTranscriptSource {
   readonly projectId: ProjectId;
   readonly modelSelection: ModelSelection;
+  readonly providerRoutingMode: ProviderRoutingMode;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly branch: string | null;
@@ -317,6 +324,23 @@ export interface ProjectionSnapshotQueryShape {
     }>,
     ProjectionRepositoryError
   >;
+
+  /** Read the one durable pending provider-turn admission for a thread. */
+  readonly getPendingTurnStartByThreadId?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProjectionPendingTurnStart>, ProjectionRepositoryError>;
+
+  /** List durable provider-turn admissions that still await a concrete turn. */
+  readonly listPendingTurnStarts?: () => Effect.Effect<
+    ReadonlyArray<ProjectionPendingTurnStart>,
+    ProjectionRepositoryError
+  >;
+
+  /** Read the durable lifecycle state for one concrete provider turn. */
+  readonly getTurnStateById?: (
+    threadId: ThreadId,
+    turnId: TurnId,
+  ) => Effect.Effect<Option.Option<ProjectionTurnState>, ProjectionRepositoryError>;
 
   /**
    * Read a single active thread detail snapshot by id.

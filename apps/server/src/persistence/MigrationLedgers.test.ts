@@ -55,7 +55,10 @@ it.effect("records upstream and Hotlap migrations in separate ledgers", () =>
         migrationId: 52,
         name: "ProjectionThreadTitleState",
       });
-      assert.deepEqual(hotlap, [{ migrationId: 1, name: "ProjectionThreadForks" }]);
+      assert.deepEqual(hotlap, [
+        { migrationId: 1, name: "ProjectionThreadForks" },
+        { migrationId: 2, name: "ProjectionThreadProviderRoutingMode" },
+      ]);
     }),
   ),
 );
@@ -83,7 +86,10 @@ it.effect("upgrades a valid older T3 schema before applying Hotlap migrations", 
         migrationId: 52,
         name: "ProjectionThreadTitleState",
       });
-      assert.deepEqual(hotlap, [{ migrationId: 1, name: "ProjectionThreadForks" }]);
+      assert.deepEqual(hotlap, [
+        { migrationId: 1, name: "ProjectionThreadForks" },
+        { migrationId: 2, name: "ProjectionThreadProviderRoutingMode" },
+      ]);
     }),
   ),
 );
@@ -156,7 +162,10 @@ it.effect("adopts an exact legacy fork migration after verifying its columns", (
         FROM hotlap_sql_migrations
       `;
       assert.deepEqual(shared52, [{ name: "ProjectionThreadTitleState" }]);
-      assert.deepEqual(hotlap, [{ migrationId: 1, name: "ProjectionThreadForks" }]);
+      assert.deepEqual(hotlap, [
+        { migrationId: 1, name: "ProjectionThreadForks" },
+        { migrationId: 2, name: "ProjectionThreadProviderRoutingMode" },
+      ]);
 
       const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
       const names = new Set(columns.map(({ name }) => name));

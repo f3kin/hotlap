@@ -1,0 +1,133 @@
+import { EventId, type OrchestrationThreadActivity } from "@t3tools/contracts";
+import { act } from "react";
+import { create, type ReactTestRenderer } from "react-test-renderer";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const state = vi.hoisted(() => ({
+  activities: [] as OrchestrationThreadActivity[],
+  add: vi.fn(),
+  visible: true,
+  focused: true,
+  documentListeners: new Map<string, Set<() => void>>(),
+  windowListeners: new Map<string, Set<() => void>>(),
+}));
+
+function addListener(listeners: Map<string, Set<() => void>>, type: string, listener: () => void) {
+  const current = listeners.get(type) ?? new Set<() => void>();
+  current.add(listener);
+  listeners.set(type, current);
+}
+
+function removeListener(
+  listeners: Map<string, Set<() => void>>,
+  type: string,
+  listener: () => void,
+) {
+  listeners.get(type)?.delete(listener);
+}
+
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ environmentId: "env-1", threadId: "thread-1" }),
+}));
+vi.mock("../state/entities", () => ({
+  useThreadDetail: () => ({ activities: state.activities }),
+}));
+vi.mock("./ui/toast", () => ({
+  stackedThreadToast: (value: unknown) => value,
+  toastManager: { add: state.add },
+}));
+
+import { ProviderAccountRouteNotificationCoordinator } from "./ProviderAccountRouteNotificationCoordinator";
+
+function routed(id: string): OrchestrationThreadActivity {
+  return {
+    id: EventId.make(id),
+    tone: "info",
+    kind: "provider.account.routed",
+    summary: "Switched provider account",
+    payload: {
+      providerName: "Codex",
+      previousProviderInstanceLabel: "Personal",
+      providerInstanceLabel: "Work",
+    },
+    turnId: null,
+    createdAt: "2026-09-16T00:00:00.000Z",
+  };
+}
+
+let renderer: ReactTestRenderer | undefined;
+
+async function render() {
+  await act(() => {
+    if (renderer) renderer.update(<ProviderAccountRouteNotificationCoordinator />);
+    else renderer = create(<ProviderAccountRouteNotificationCoordinator />);
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  state.activities = [];
+  state.visible = true;
+  state.focused = true;
+  state.documentListeners.clear();
+  state.windowListeners.clear();
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("document", {
+    get visibilityState() {
+      return state.visible ? "visible" : "hidden";
+    },
+    hasFocus: () => state.focused,
+    addEventListener: (type: string, listener: () => void) =>
+      addListener(state.documentListeners, type, listener),
+    removeEventListener: (type: string, listener: () => void) =>
+      removeListener(state.documentListeners, type, listener),
+  });
+  vi.stubGlobal("window", {
+    addEventListener: (type: string, listener: () => void) =>
+      addListener(state.windowListeners, type, listener),
+    removeEventListener: (type: string, listener: () => void) =>
+      removeListener(state.windowListeners, type, listener),
+  });
+});
+
+afterEach(async () => {
+  await act(() => renderer?.unmount());
+  renderer = undefined;
+  vi.unstubAllGlobals();
+});
+
+describe("provider account route notification coordinator", () => {
+  it("turns a new durable route activity into one five-second toast", async () => {
+    await render();
+    state.activities = [routed("route-1")];
+    await render();
+    await render();
+
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenCalledWith({
+      type: "success",
+      title: "Switched Codex: Personal → Work",
+      description: "Continuing this thread.",
+      data: { dismissAfterVisibleMs: 5_000, hideCopyButton: true },
+    });
+  });
+
+  it("does not replay a route received while the page was hidden", async () => {
+    await render();
+    await act(() => {
+      state.visible = false;
+      state.focused = false;
+      for (const listener of state.documentListeners.get("visibilitychange") ?? []) listener();
+    });
+    state.activities = [routed("route-hidden")];
+    await render();
+    await act(() => {
+      state.visible = true;
+      state.focused = true;
+      for (const listener of state.documentListeners.get("visibilitychange") ?? []) listener();
+    });
+    await render();
+
+    expect(state.add).not.toHaveBeenCalled();
+  });
+});

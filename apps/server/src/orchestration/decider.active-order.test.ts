@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EventId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -33,6 +34,7 @@ function makeReadModel(overrides: Partial<OrchestrationThread> = {}): Orchestrat
         modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
         runtimeMode: "full-access",
         interactionMode: "default",
+        providerRoutingMode: "fixed",
         pullRequests: [],
         branch: null,
         worktreePath: null,
@@ -69,6 +71,200 @@ const reorderCommand = {
 } as const;
 
 it.layer(NodeServices.layer)("active thread ordering", (it) => {
+  it.effect("persists provider routing mode metadata", () =>
+    Effect.gen(function* () {
+      const readModel = makeReadModel();
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-routing-auto"),
+          threadId: THREAD_ID,
+          providerRoutingMode: "auto",
+        },
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+      expect(events).toMatchObject([
+        {
+          type: "thread.meta-updated",
+          payload: { providerRoutingMode: "auto" },
+        },
+      ]);
+      const projected = yield* projectEvent(readModel, { ...events[0]!, sequence: 1 });
+      expect(projected.threads[0]?.providerRoutingMode).toBe("auto");
+    }),
+  );
+
+  it.effect("pins automatic routing when an implicit model update changes provider instance", () =>
+    Effect.gen(function* () {
+      const readModel = makeReadModel({ providerRoutingMode: "auto" });
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-legacy-account-pick"),
+          threadId: THREAD_ID,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-work"),
+            model: "gpt-5.4",
+          },
+        },
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+
+      expect(events).toMatchObject([
+        {
+          type: "thread.meta-updated",
+          payload: {
+            modelSelection: { instanceId: "codex-work" },
+            providerRoutingMode: "fixed",
+          },
+        },
+      ]);
+      const projected = yield* projectEvent(readModel, { ...events[0]!, sequence: 1 });
+      expect(projected.threads[0]?.providerRoutingMode).toBe("fixed");
+    }),
+  );
+
+  it.effect("preserves automatic routing for an implicit same-instance model update", () =>
+    Effect.gen(function* () {
+      const readModel = makeReadModel({ providerRoutingMode: "auto" });
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-same-account-model-change"),
+          threadId: THREAD_ID,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.4-mini",
+          },
+        },
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+
+      expect(events[0]).toMatchObject({
+        type: "thread.meta-updated",
+        payload: { modelSelection: { instanceId: "codex", model: "gpt-5.4-mini" } },
+      });
+      expect(events[0]?.payload).not.toHaveProperty("providerRoutingMode");
+      const projected = yield* projectEvent(readModel, { ...events[0]!, sequence: 1 });
+      expect(projected.threads[0]?.providerRoutingMode).toBe("auto");
+    }),
+  );
+
+  it.effect("honors an explicit routing mode when the provider instance changes", () =>
+    Effect.gen(function* () {
+      const readModel = makeReadModel({ providerRoutingMode: "fixed" });
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-automatic-account-route"),
+          threadId: THREAD_ID,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-work"),
+            model: "gpt-5.4",
+          },
+          providerRoutingMode: "auto",
+        },
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+
+      expect(events).toMatchObject([
+        {
+          type: "thread.meta-updated",
+          payload: {
+            modelSelection: { instanceId: "codex-work" },
+            providerRoutingMode: "auto",
+          },
+        },
+      ]);
+      const projected = yield* projectEvent(readModel, { ...events[0]!, sequence: 1 });
+      expect(projected.threads[0]?.providerRoutingMode).toBe("auto");
+    }),
+  );
+
+  it.effect("commits an automatic route and its audit activity together", () =>
+    Effect.gen(function* () {
+      const readModel = makeReadModel({ providerRoutingMode: "auto" });
+      const decided = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.provider-account.route",
+          commandId: CommandId.make("cmd-atomic-account-route"),
+          threadId: THREAD_ID,
+          previousProviderInstanceId: ProviderInstanceId.make("codex"),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-work"),
+            model: "gpt-5.4",
+          },
+          providerRoutingMode: "auto",
+          activity: {
+            id: EventId.make("activity-atomic-account-route"),
+            tone: "info",
+            kind: "provider.account.routed",
+            summary: "Switched provider account",
+            payload: {
+              previousProviderInstanceId: "codex",
+              providerInstanceId: "codex-work",
+              reason: "usage-threshold",
+            },
+            turnId: null,
+            createdAt: NOW,
+          },
+          createdAt: NOW,
+        },
+        readModel,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+
+      expect(events).toMatchObject([
+        {
+          type: "thread.meta-updated",
+          payload: {
+            modelSelection: { instanceId: "codex-work" },
+            providerRoutingMode: "auto",
+          },
+        },
+        {
+          type: "thread.activity-appended",
+          payload: { activity: { kind: "provider.account.routed" } },
+        },
+      ]);
+    }),
+  );
+
+  it.effect("rejects an automatic route after another account change wins", () =>
+    Effect.gen(function* () {
+      const error = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.provider-account.route",
+          commandId: CommandId.make("cmd-stale-account-route"),
+          threadId: THREAD_ID,
+          previousProviderInstanceId: ProviderInstanceId.make("codex-old"),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-work"),
+            model: "gpt-5.4",
+          },
+          providerRoutingMode: "auto",
+          activity: {
+            id: EventId.make("activity-stale-account-route"),
+            tone: "info",
+            kind: "provider.account.routed",
+            summary: "Switched provider account",
+            payload: {},
+            turnId: null,
+            createdAt: NOW,
+          },
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(),
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+    }),
+  );
+
   it.effect("persists changed and repeated slots without changing thread activity timestamps", () =>
     Effect.gen(function* () {
       let readModel = makeReadModel({ unsettledAt: BEFORE_NOW });

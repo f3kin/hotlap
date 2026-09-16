@@ -241,6 +241,7 @@ export const make = Effect.gen(function* () {
       guardedSessionStop: true,
       guardedSessionStopProviders: [ProviderDriverKind.make("codex")],
       threadPullRequests: true,
+      providerAccountRouting: true,
       pullRequestStackActions: true,
       threadPullRequestLinking: true,
       environmentIcon: true,

@@ -24,6 +24,34 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("replaces a provider routing policy atomically", () => {
+    const providerRoutingPolicy = {
+      defaultMode: "auto" as const,
+      instanceIdsByDriver: {
+        [ProviderDriverKind.make("codex")]: [
+          ProviderInstanceId.make("codex_work"),
+          ProviderInstanceId.make("codex_personal"),
+        ],
+      },
+      usageThresholdPercent: 80,
+    };
+    const saved = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { providerRoutingPolicy });
+    expect(saved.providerRoutingPolicy).toEqual(providerRoutingPolicy);
+
+    const fixed = applyServerSettingsPatch(saved, {
+      providerRoutingPolicy: {
+        defaultMode: "fixed",
+        instanceIdsByDriver: {},
+        usageThresholdPercent: null,
+      },
+    });
+    expect(fixed.providerRoutingPolicy).toEqual({
+      defaultMode: "fixed",
+      instanceIdsByDriver: {},
+      usageThresholdPercent: null,
+    });
+  });
+
   it("replaces and reorders the environment custom prompt library atomically", () => {
     const first = { id: "first", title: "First", prompt: "First prompt" };
     const second = { id: "second", title: "Second", prompt: "Second prompt" };

@@ -169,6 +169,18 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
       ),
     );
 
+  const clearActiveTurnIfMatches: ProviderSessionDirectoryShape["clearActiveTurnIfMatches"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      return yield* repository.clearActiveTurnIfMatches({
+        ...input,
+        clearedAt: DateTime.formatIso(yield* DateTime.now),
+      });
+    }).pipe(
+      Effect.mapError(toPersistenceError("ProviderSessionDirectory.clearActiveTurnIfMatches")),
+    );
+
   const recordImportedTranscript: ProviderSessionDirectoryShape["recordImportedTranscript"] = (
     input,
   ) =>
@@ -201,6 +213,7 @@ const makeProviderSessionDirectory = Effect.gen(function* () {
     recordImportedTranscript,
     getProvider,
     getBinding,
+    clearActiveTurnIfMatches,
     listThreadIds,
     listBindings,
   } satisfies ProviderSessionDirectoryShape;

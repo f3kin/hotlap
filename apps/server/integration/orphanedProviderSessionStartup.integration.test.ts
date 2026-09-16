@@ -75,6 +75,7 @@ const startupDependencies = Layer.mergeAll(
   ServerSettings.layerTest(),
   Layer.succeed(OrchestrationReactor.OrchestrationReactor, {
     start: () => Effect.void,
+    reconcilePendingTurns: () => Effect.void,
   }),
   Layer.succeed(ProviderSessionReaper.ProviderSessionReaper, {
     start: () => Effect.void,
@@ -119,6 +120,7 @@ const startupDependencies = Layer.mergeAll(
     respondToUserInput: () => Effect.die("unused"),
     stopSession: () => Effect.die("unused"),
     listSessions: () => Effect.succeed([]),
+    isSessionEventAuthoritative: () => Effect.succeed(true),
     getCapabilities: () => Effect.die("unused"),
     assertConversationRollbackSupported: () => Effect.die("unused"),
     getInstanceInfo: () => Effect.die("unused"),
@@ -164,20 +166,6 @@ it.effect(
           createdAt,
         });
         yield* engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make("command-start-pending-turn"),
-          threadId,
-          message: {
-            messageId: MessageId.make("message-pending-before-restart"),
-            role: "user",
-            text: "Persist this queued turn before restart",
-            attachments: [],
-          },
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "full-access",
-          createdAt,
-        });
-        yield* engine.dispatch({
           type: "thread.session.set",
           commandId: CommandId.make("command-mark-session-starting"),
           threadId,
@@ -213,20 +201,6 @@ it.effect(
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
-          createdAt,
-        });
-        yield* engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make("command-start-stopped-binding-pending-turn"),
-          threadId: stoppedBindingThreadId,
-          message: {
-            messageId: MessageId.make("message-stopped-binding-pending-before-restart"),
-            role: "user",
-            text: "Persist another queued turn before restart",
-            attachments: [],
-          },
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "full-access",
           createdAt,
         });
         yield* engine.dispatch({

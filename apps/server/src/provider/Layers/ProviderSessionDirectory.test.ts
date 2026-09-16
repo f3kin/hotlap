@@ -8,6 +8,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type AgentSessionImportSource,
 } from "@t3tools/contracts";
 import { assert, expect, it } from "@effect/vitest";
@@ -142,6 +143,51 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
           activeTurnId: "turn-1",
         });
       }
+    }),
+  );
+
+  it.effect("clears only the matching terminal turn admission", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-terminal-admission");
+      const instanceId = ProviderInstanceId.make("codex-work");
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        status: "running",
+        runtimePayload: { activeTurnId: "turn-new" },
+      });
+      const clearActiveTurnIfMatches = directory.clearActiveTurnIfMatches;
+      if (clearActiveTurnIfMatches === undefined) {
+        return yield* Effect.die("clearActiveTurnIfMatches is unavailable");
+      }
+
+      expect(
+        yield* clearActiveTurnIfMatches({
+          threadId,
+          providerInstanceId: instanceId,
+          turnId: TurnId.make("turn-old"),
+        }),
+      ).toBe(false);
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload).toMatchObject(
+        {
+          activeTurnId: "turn-new",
+        },
+      );
+
+      expect(
+        yield* clearActiveTurnIfMatches({
+          threadId,
+          providerInstanceId: instanceId,
+          turnId: TurnId.make("turn-new"),
+        }),
+      ).toBe(true);
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload).toMatchObject(
+        {
+          activeTurnId: null,
+        },
+      );
     }),
   );
 

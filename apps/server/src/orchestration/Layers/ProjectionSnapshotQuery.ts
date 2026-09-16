@@ -68,6 +68,10 @@ import { ProjectionThreadPullRequest } from "../../persistence/ProjectionThreadP
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import {
+  ProjectionPendingTurnStart,
+  ProjectionTurnState,
+} from "../../persistence/Services/ProjectionTurns.ts";
+import {
   decodeThreadDetailPageCursor,
   encodeThreadDetailPageCursor,
 } from "../threadDetailCursor.ts";
@@ -238,6 +242,11 @@ const ProjectionImportedAgentSessionSourcesRowSchema = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+const ThreadTurnIdLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  turnId: TurnId,
+});
+const ProjectionTurnStateRow = Schema.Struct({ state: ProjectionTurnState });
 const ReadableThreadLookupInput = Schema.Struct({
   threadId: ThreadId,
   forkHistoryOnly: Schema.optionalKey(Schema.Boolean),
@@ -634,6 +643,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           title_state_json AS "titleState",
           model_selection_json AS "modelSelection",
+          provider_routing_mode AS "providerRoutingMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -677,6 +687,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           title_state_json AS "titleState",
           model_selection_json AS "modelSelection",
+          provider_routing_mode AS "providerRoutingMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -722,6 +733,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           title_state_json AS "titleState",
           model_selection_json AS "modelSelection",
+          provider_routing_mode AS "providerRoutingMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -1285,6 +1297,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           title_state_json AS "titleState",
           model_selection_json AS "modelSelection",
+          provider_routing_mode AS "providerRoutingMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -1331,6 +1344,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           title,
           title_state_json AS "titleState",
           model_selection_json AS "modelSelection",
+          provider_routing_mode AS "providerRoutingMode",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,
@@ -1672,6 +1686,58 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ) AS "hasOtherUserMessages"
       FROM projection_thread_messages
       WHERE thread_id = ${threadId} AND message_id = ${messageId}
+      LIMIT 1
+    `,
+  });
+
+  const getPendingTurnStartRow = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionPendingTurnStart,
+    execute: ({ threadId }) => sql`
+      SELECT
+        thread_id AS "threadId",
+        pending_message_id AS "messageId",
+        source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+        source_proposed_plan_id AS "sourceProposedPlanId",
+        requested_at AS "requestedAt"
+      FROM projection_turns
+      WHERE thread_id = ${threadId}
+        AND turn_id IS NULL
+        AND state = 'pending'
+        AND pending_message_id IS NOT NULL
+        AND checkpoint_turn_count IS NULL
+      ORDER BY requested_at DESC
+      LIMIT 1
+    `,
+  });
+
+  const listPendingTurnStartRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionPendingTurnStart,
+    execute: () => sql`
+      SELECT
+        thread_id AS "threadId",
+        pending_message_id AS "messageId",
+        source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
+        source_proposed_plan_id AS "sourceProposedPlanId",
+        requested_at AS "requestedAt"
+      FROM projection_turns
+      WHERE turn_id IS NULL
+        AND state = 'pending'
+        AND pending_message_id IS NOT NULL
+        AND checkpoint_turn_count IS NULL
+      ORDER BY requested_at ASC, thread_id ASC
+    `,
+  });
+
+  const getTurnStateRow = SqlSchema.findOneOption({
+    Request: ThreadTurnIdLookupInput,
+    Result: ProjectionTurnStateRow,
+    execute: ({ threadId, turnId }) => sql`
+      SELECT state
+      FROM projection_turns
+      WHERE thread_id = ${threadId}
+        AND turn_id = ${turnId}
       LIMIT 1
     `,
   });
@@ -2648,6 +2714,7 @@ pending_approval_requests AS (
                 projectId: row.projectId,
                 title: row.title,
                 modelSelection: row.modelSelection,
+                providerRoutingMode: row.providerRoutingMode ?? "fixed",
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,
                 branch: row.branch,
@@ -2894,6 +2961,7 @@ pending_approval_requests AS (
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  providerRoutingMode: row.providerRoutingMode ?? "fixed",
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -3051,6 +3119,7 @@ pending_approval_requests AS (
                         projectId: row.projectId,
                         title: row.title,
                         modelSelection: row.modelSelection,
+                        providerRoutingMode: row.providerRoutingMode ?? "fixed",
                         runtimeMode: row.runtimeMode,
                         interactionMode: row.interactionMode,
                         branch: row.branch,
@@ -3215,6 +3284,7 @@ pending_approval_requests AS (
                   projectId: row.projectId,
                   title: row.title,
                   modelSelection: row.modelSelection,
+                  providerRoutingMode: row.providerRoutingMode ?? "fixed",
                   runtimeMode: row.runtimeMode,
                   interactionMode: row.interactionMode,
                   branch: row.branch,
@@ -3636,6 +3706,7 @@ pending_approval_requests AS (
               projectId: threadRow.value.projectId,
               title: threadRow.value.title,
               modelSelection: threadRow.value.modelSelection,
+              providerRoutingMode: threadRow.value.providerRoutingMode ?? "fixed",
               runtimeMode: threadRow.value.runtimeMode,
               interactionMode: threadRow.value.interactionMode,
               branch: threadRow.value.branch,
@@ -3788,6 +3859,7 @@ pending_approval_requests AS (
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        providerRoutingMode: threadRow.value.providerRoutingMode ?? "fixed",
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
@@ -3873,6 +3945,44 @@ pending_approval_requests AS (
       hasOtherUserMessages: row.hasOtherUserMessages === 1,
     }));
   });
+
+  const getPendingTurnStartByThreadId: NonNullable<
+    ProjectionSnapshotQueryShape["getPendingTurnStartByThreadId"]
+  > = (threadId) =>
+    getPendingTurnStartRow({ threadId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getPendingTurnStartByThreadId:query",
+          "ProjectionSnapshotQuery.getPendingTurnStartByThreadId:decodeRow",
+        ),
+      ),
+    );
+
+  const getTurnStateById: NonNullable<ProjectionSnapshotQueryShape["getTurnStateById"]> = (
+    threadId,
+    turnId,
+  ) =>
+    getTurnStateRow({ threadId, turnId }).pipe(
+      Effect.map(Option.map((row) => row.state)),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getTurnStateById:query",
+          "ProjectionSnapshotQuery.getTurnStateById:decodeRow",
+        ),
+      ),
+    );
+
+  const listPendingTurnStarts: NonNullable<
+    ProjectionSnapshotQueryShape["listPendingTurnStarts"]
+  > = () =>
+    listPendingTurnStartRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listPendingTurnStarts:query",
+          "ProjectionSnapshotQuery.listPendingTurnStarts:decodeRows",
+        ),
+      ),
+    );
 
   // Contiguous turn range bounding a windowed detail read; undefined loads the
   // full thread. Resolved from a window request inside the snapshot
@@ -4090,6 +4200,7 @@ pending_approval_requests AS (
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
         modelSelection: threadRow.value.modelSelection,
+        providerRoutingMode: threadRow.value.providerRoutingMode ?? "fixed",
         runtimeMode: threadRow.value.runtimeMode,
         interactionMode: threadRow.value.interactionMode,
         branch: threadRow.value.branch,
@@ -4340,6 +4451,9 @@ pending_approval_requests AS (
     getThreadShellById,
     getThreadRuntimeContext,
     getTurnStartMessage,
+    getPendingTurnStartByThreadId,
+    listPendingTurnStarts,
+    getTurnStateById,
     getThreadDetailById,
     getThreadDetailSnapshot,
   } satisfies ProjectionSnapshotQueryShape;

@@ -22,6 +22,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   ModelSelection,
   ProjectScript,
+  ProviderRoutingMode,
   RuntimeMode,
 } from "./orchestration.ts";
 import { BrowserProfile, BrowserProfileId, DEFAULT_BROWSER_PROFILE_ID } from "./browserProfile.ts";
@@ -35,8 +36,8 @@ import {
 } from "./preview.ts";
 import {
   ProviderInstanceConfig,
+  ProviderDriverKind,
   ProviderInstanceId,
-  type ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
@@ -991,6 +992,27 @@ export type CustomPrompts = typeof CustomPrompts.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph", "token"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
+export const ProviderRoutingUsageThresholdPercent = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: 100 }),
+);
+export type ProviderRoutingUsageThresholdPercent = typeof ProviderRoutingUsageThresholdPercent.Type;
+
+/** Provider-instance pools and the default routing consent for a project. */
+export const ProviderRoutingPolicy = Schema.Struct({
+  defaultMode: ProviderRoutingMode,
+  instanceIdsByDriver: Schema.Record(ProviderDriverKind, Schema.Array(ProviderInstanceId)),
+  usageThresholdPercent: Schema.NullOr(ProviderRoutingUsageThresholdPercent).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type ProviderRoutingPolicy = typeof ProviderRoutingPolicy.Type;
+
+export const DEFAULT_PROVIDER_ROUTING_POLICY: ProviderRoutingPolicy = {
+  defaultMode: "fixed",
+  instanceIdsByDriver: {},
+  usageThresholdPercent: null,
+};
+
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "defaultModelSelection",
   "defaultRuntimeMode",
@@ -1008,6 +1030,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleAfterDays",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "providerRoutingPolicy",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1033,6 +1056,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  providerRoutingPolicy: Schema.optionalKey(ProviderRoutingPolicy),
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
@@ -1043,6 +1067,9 @@ export const ServerSettings = Schema.Struct({
   // including prior token-streaming opt-ins, resets to the paragraph default.
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
+  ),
+  providerRoutingPolicy: ProviderRoutingPolicy.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_ROUTING_POLICY)),
   ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Retain the update-era key; recovery now needs an environment-owned opt-in.
@@ -1379,6 +1406,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  providerRoutingPolicy: Schema.optionalKey(ProviderRoutingPolicy),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),

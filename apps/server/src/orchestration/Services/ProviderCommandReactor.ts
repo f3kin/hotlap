@@ -9,6 +9,7 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
+import type { ThreadId } from "@t3tools/contracts";
 
 /**
  * ProviderCommandReactorShape - Service API for provider command reactors.
@@ -25,6 +26,9 @@ export interface ProviderCommandReactorShape {
    * processing.
    */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+
+  /** Reconcile one thread, or every durable pending start when omitted. */
+  readonly reconcilePendingTurns: (threadId?: ThreadId) => Effect.Effect<void>;
 
   /**
    * Resolves when the internal processing queue is empty and idle.

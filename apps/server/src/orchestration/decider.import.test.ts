@@ -58,20 +58,36 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
         command: {
           ...makeCreateCommand(ThreadId.make("import:codex:session-1")),
           historyImport: true,
+          providerRoutingMode: "auto",
         },
         readModel,
       });
       const live = yield* decideOrchestrationCommand({
-        command: makeCreateCommand(ThreadId.make("live-thread")),
+        command: {
+          ...makeCreateCommand(ThreadId.make("live-thread")),
+          providerRoutingMode: "auto",
+        },
+        readModel,
+      });
+      const legacyLive = yield* decideOrchestrationCommand({
+        command: makeCreateCommand(ThreadId.make("legacy-live-thread")),
         readModel,
       });
 
       expect(imported).toMatchObject({
         type: "thread.created",
         metadata: { historyImport: true },
+        payload: { providerRoutingMode: "fixed" },
       });
-      expect(live).toMatchObject({ type: "thread.created" });
+      expect(live).toMatchObject({
+        type: "thread.created",
+        payload: { providerRoutingMode: "auto" },
+      });
       expect(live).not.toMatchObject({ metadata: { historyImport: true } });
+      expect(legacyLive).toMatchObject({
+        type: "thread.created",
+        payload: { providerRoutingMode: "fixed" },
+      });
     }),
   );
 
@@ -599,6 +615,10 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
         "thread.message-sent",
         "thread.settled",
       ]);
+      expect(events[0]).toMatchObject({
+        type: "thread.created",
+        payload: { providerRoutingMode: "fixed" },
+      });
       expect(events.every((event) => event.metadata.historyImport === true)).toBe(true);
 
       let projected = readModel;
@@ -609,6 +629,7 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       expect(projected.threads[0]).toMatchObject({
         id: threadId,
         title: "Real user request",
+        providerRoutingMode: "fixed",
         settledOverride: "settled",
         messages: [
           { role: "user", text: "Real user request" },

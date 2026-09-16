@@ -37,6 +37,23 @@ Use a completely separate **CODEX_HOME path**, with no shadow home, when you wan
 separate Codex sessions and configuration. That instance cannot continue threads
 from the other home.
 
+## Switch accounts automatically
+
+In project settings, choose a usage threshold and at least two Codex accounts,
+then enable automatic account routing. Set a thread to **Auto**. Use **Fixed**
+when the thread must stay on the selected account.
+
+Before an idle thread sends a normal message, T3 Code chooses the eligible
+account whose weekly limit resets first. An existing thread stays on its account
+until your threshold is reached, and can move only to an account that can
+continue the same Codex conversation. Usage reports must be recent and include
+their reset time.
+
+Authentication commands, `/compact`, approvals, answers, steering, and
+background work never trigger a move. New queued prompts remain eligible when
+they are sent. If an account cannot start, T3 Code tries the remaining eligible
+accounts before falling back to a usable current account.
+
 ## Switch accounts in an existing thread
 
 Choose the other account from the thread's model picker. T3 Code offers compatible

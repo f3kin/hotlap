@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -53,6 +54,29 @@ describe("resolveProjectSettings", () => {
     expect(resolved.sources.sidebarAutoSettleAfterDays).toBe("project");
     expect(resolved.sources.defaultThreadEnvMode).toBe("environment");
     expect(resolveProjectSettings(settings, otherProjectId).settings.defaultAutoPull).toBe(true);
+  });
+
+  it("uses automatic provider routing only when the project explicitly opts in", () => {
+    const providerRoutingPolicy = {
+      defaultMode: "auto" as const,
+      instanceIdsByDriver: {
+        [ProviderDriverKind.make("codex")]: [
+          ProviderInstanceId.make("codex_work"),
+          ProviderInstanceId.make("codex_personal"),
+        ],
+      },
+      usageThresholdPercent: 80,
+    };
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: { [projectId]: { providerRoutingPolicy } },
+    });
+
+    const resolved = resolveProjectSettings(settings, projectId);
+    expect(resolved.settings.providerRoutingPolicy).toEqual(providerRoutingPolicy);
+    expect(resolved.sources.providerRoutingPolicy).toBe("project");
+    expect(resolveProjectSettings(settings, otherProjectId).settings.providerRoutingPolicy).toEqual(
+      { defaultMode: "fixed", instanceIdsByDriver: {}, usageThresholdPercent: null },
+    );
   });
 
   it("keeps the environment text generation model when the override's provider is disabled", () => {

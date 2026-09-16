@@ -54,6 +54,8 @@ describe("project thread title", () => {
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
+      providerRoutingMode: "auto",
+      skipProviderAccountRouting: true,
       workspaceMode: "local",
       branch: null,
       worktreePath: null,
@@ -63,6 +65,8 @@ describe("project thread title", () => {
 
     expect(input.titleSeed).toBe(title);
     expect(input.bootstrap.createThread.title).toBe(input.titleSeed);
+    expect(input.bootstrap.createThread.providerRoutingMode).toBe("auto");
+    expect(input.skipProviderAccountRouting).toBe(true);
     expect(input.message.text).toBe(text);
   });
 });

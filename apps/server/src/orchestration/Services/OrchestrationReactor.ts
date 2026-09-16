@@ -21,6 +21,9 @@ export interface OrchestrationReactorShape {
    * finalized on shutdown.
    */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+
+  /** Launch durable provider turns before the command gate accepts new work. */
+  readonly reconcilePendingTurns: () => Effect.Effect<void>;
 }
 
 /**

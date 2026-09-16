@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -100,6 +101,69 @@ describe("ServerSettings default permissions", () => {
     expect(() =>
       decodeServerSettingsPatch({
         projectSettingsOverrides: { project: { defaultRuntimeMode: "unsupported" } },
+      }),
+    ).toThrow();
+  });
+});
+
+describe("ServerSettings provider routing policy", () => {
+  it("defaults to fixed with no provider instances", () => {
+    expect(decodeServerSettings({}).providerRoutingPolicy).toEqual({
+      defaultMode: "fixed",
+      instanceIdsByDriver: {},
+      usageThresholdPercent: null,
+    });
+  });
+
+  it("decodes a saved provider-instance pool without a threshold as opted out", () => {
+    const projectId = ProjectId.make("project");
+    const providerRoutingPolicy = {
+      defaultMode: "auto" as const,
+      instanceIdsByDriver: {
+        codex: ["codex_work", "codex_personal"],
+        claudeAgent: ["claude_work", "claude_personal"],
+      },
+      usageThresholdPercent: null,
+    };
+    const input = {
+      projectSettingsOverrides: {
+        [projectId]: {
+          providerRoutingPolicy: {
+            defaultMode: providerRoutingPolicy.defaultMode,
+            instanceIdsByDriver: providerRoutingPolicy.instanceIdsByDriver,
+          },
+        },
+      },
+    };
+
+    expect(
+      decodeServerSettings(input).projectSettingsOverrides[projectId]?.providerRoutingPolicy,
+    ).toEqual(providerRoutingPolicy);
+    expect(
+      decodeServerSettingsPatch(input).projectSettingsOverrides?.[projectId]?.providerRoutingPolicy,
+    ).toEqual(providerRoutingPolicy);
+  });
+
+  it("accepts the policy in a scoped settings patch", () => {
+    const providerRoutingPolicy = {
+      defaultMode: "auto" as const,
+      instanceIdsByDriver: { codex: ["codex_work", "codex_personal"] },
+      usageThresholdPercent: 80,
+    };
+
+    expect(decodeServerSettingsPatch({ providerRoutingPolicy })).toEqual({
+      providerRoutingPolicy,
+    });
+  });
+
+  it.each([0, 1.5, 101])("rejects the invalid usage threshold %s", (usageThresholdPercent) => {
+    expect(() =>
+      decodeServerSettingsPatch({
+        providerRoutingPolicy: {
+          defaultMode: "auto",
+          instanceIdsByDriver: { codex: ["codex_work", "codex_personal"] },
+          usageThresholdPercent,
+        },
       }),
     ).toThrow();
   });

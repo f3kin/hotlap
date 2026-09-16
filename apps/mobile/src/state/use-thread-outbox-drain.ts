@@ -46,11 +46,12 @@ import {
 import { removeThreadOutboxMessage } from "./thread-outbox-removal";
 import {
   isQueuedThreadCreationSendable,
-  modelSelectionsEqual,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
+  resolveQueuedThreadMetadataUpdate,
   resolveQueuedThreadSettings,
+  shouldSkipQueuedProviderAccountRouting,
   shouldRetryThreadOutboxDelivery,
   threadOutboxRetryDelayMs,
   type QueuedThreadCreation,
@@ -706,13 +707,17 @@ export function useThreadOutboxDrain(): void {
       }
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
 
-      if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
+      const metadataUpdate = resolveQueuedThreadMetadataUpdate(
+        { ...queuedMessage, modelSelection: settings.modelSelection },
+        thread,
+      );
+      if (metadataUpdate) {
         const updateResult = await updateThreadMetadata({
           environmentId: queuedMessage.environmentId,
           input: {
             commandId: settingsCommandId(queuedMessage, "model-selection"),
             threadId: queuedMessage.threadId,
-            modelSelection: settings.modelSelection,
+            ...metadataUpdate,
           },
         });
         if (AsyncResult.isFailure(updateResult)) {
@@ -825,6 +830,9 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          ...(shouldSkipQueuedProviderAccountRouting(queuedMessage)
+            ? { skipProviderAccountRouting: true as const }
+            : {}),
           createdAt: queuedMessage.createdAt,
         },
       });
@@ -953,6 +961,10 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          providerRoutingMode: queuedMessage.providerRoutingMode ?? "fixed",
+          ...(shouldSkipQueuedProviderAccountRouting(queuedMessage)
+            ? { skipProviderAccountRouting: true as const }
+            : {}),
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,

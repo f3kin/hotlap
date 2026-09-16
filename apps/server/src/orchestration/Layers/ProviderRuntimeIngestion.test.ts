@@ -117,6 +117,7 @@ function createProviderServiceHarness() {
     }>(),
   );
   const runtimeSessions: ProviderSession[] = [];
+  const authoritativeBindings = new Map<ThreadId, ProviderInstanceId>();
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
@@ -128,6 +129,11 @@ function createProviderServiceHarness() {
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions: () => Effect.succeed([...runtimeSessions]),
+    isSessionEventAuthoritative: (threadId, providerInstanceId) =>
+      Effect.succeed(
+        !authoritativeBindings.has(threadId) ||
+          authoritativeBindings.get(threadId) === providerInstanceId,
+      ),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     assertConversationRollbackSupported: () => unsupported(),
     getInstanceInfo: (instanceId) => {
@@ -168,6 +174,13 @@ function createProviderServiceHarness() {
     runtimeSessions.push(session);
   };
 
+  const setAuthoritativeBinding = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+  ): void => {
+    authoritativeBindings.set(threadId, providerInstanceId);
+  };
+
   const normalizeLegacyEvent = (event: LegacyProviderRuntimeEvent): ProviderRuntimeEvent => {
     if (isLegacyTurnCompletedEvent(event)) {
       const normalized: Extract<ProviderRuntimeEvent, { type: "turn.completed" }> = {
@@ -203,6 +216,7 @@ function createProviderServiceHarness() {
     emit,
     emitAndWaitForEnqueue,
     setSession,
+    setAuthoritativeBinding,
   };
 }
 
@@ -418,6 +432,7 @@ describe("ProviderRuntimeIngestion", () => {
       emitAndDrain,
       sqlCount: sqlCounter.count,
       setProviderSession: provider.setSession,
+      setProviderBinding: provider.setAuthoritativeBinding,
       drain,
     };
   }
@@ -3788,6 +3803,143 @@ describe("ProviderRuntimeIngestion", () => {
         input: { command: "vp test run" },
       },
     });
+  });
+
+  it("ignores all late events from the replaced provider instance", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const targetInstanceId = ProviderInstanceId.make("codex-secondary");
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-bind-replacement-provider-instance"),
+      threadId,
+      session: {
+        threadId,
+        status: "ready",
+        providerName: "codex",
+        providerInstanceId: targetInstanceId,
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        updatedAt: "2026-01-01T00:00:01.000Z",
+        lastError: null,
+      },
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+
+    await harness.emitAndDrain([
+      {
+        type: "session.state.changed",
+        eventId: asEventId("evt-old-provider-session-state"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex-primary"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        payload: { state: "error", reason: "stale session" },
+      },
+      {
+        type: "runtime.error",
+        eventId: asEventId("evt-old-provider-runtime-error"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex-primary"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        payload: { message: "stale runtime error" },
+      },
+      {
+        type: "content.delta",
+        eventId: asEventId("evt-old-provider-content"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex-primary"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        turnId: asTurnId("stale-turn"),
+        itemId: asItemId("stale-content"),
+        payload: { streamKind: "assistant_text", delta: "stale output" },
+      },
+      {
+        type: "session.exited",
+        eventId: asEventId("evt-old-provider-session-exited"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex-primary"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        threadId,
+        payload: {},
+      },
+    ]);
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session?.status).toBe("ready");
+    expect(thread?.session?.providerInstanceId).toBe(targetInstanceId);
+    expect(thread?.session?.lastError).toBeNull();
+    expect(thread?.messages.some((message) => message.text.includes("stale output"))).toBe(false);
+    expect(
+      thread?.activities.some((activity) =>
+        [
+          "evt-old-provider-session-state",
+          "evt-old-provider-runtime-error",
+          "evt-old-provider-content",
+          "evt-old-provider-session-exited",
+        ].includes(activity.id),
+      ),
+    ).toBe(false);
+  });
+
+  it("ignores the old session exit after the runtime binding moves but before projection catches up", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const previousInstanceId = ProviderInstanceId.make("codex-primary");
+    const targetInstanceId = ProviderInstanceId.make("codex-secondary");
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-bind-previous-provider-instance"),
+      threadId,
+      session: {
+        threadId,
+        status: "ready",
+        providerName: "codex",
+        providerInstanceId: previousInstanceId,
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        updatedAt: "2026-01-01T00:00:01.000Z",
+        lastError: null,
+      },
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    harness.setProviderSession({
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: previousInstanceId,
+      status: "ready",
+      runtimeMode: "approval-required",
+      threadId,
+      createdAt: "2026-01-01T00:00:02.000Z",
+      updatedAt: "2026-01-01T00:00:02.000Z",
+    });
+    harness.setProviderBinding(threadId, targetInstanceId);
+
+    await harness.emitAndDrain([
+      {
+        type: "session.exited",
+        eventId: asEventId("evt-old-session-exited-during-handoff"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: previousInstanceId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        threadId,
+        payload: {},
+      },
+    ]);
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session).toMatchObject({
+      status: "ready",
+      providerInstanceId: previousInstanceId,
+    });
+    expect(
+      thread?.activities.some(
+        (activity) => activity.id === "evt-old-session-exited-during-handoff",
+      ),
+    ).toBe(false);
   });
 
   effectIt.effect("tracks provider diff updates from a nested Git workspace", () =>

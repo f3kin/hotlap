@@ -13,11 +13,13 @@ import {
   OrchestrationMessageContext,
   ProjectId,
   ProviderInteractionMode,
+  ProviderRoutingMode,
   RuntimeMode,
   ThreadId,
   type ModelSelection as ModelSelectionType,
   type ProjectId as ProjectIdType,
   type ProviderInteractionMode as ProviderInteractionModeType,
+  type ProviderRoutingMode as ProviderRoutingModeType,
   type RuntimeMode as RuntimeModeType,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -26,6 +28,7 @@ import * as Schema from "effect/Schema";
 import { DraftComposerAttachmentSchema } from "../lib/composer-image-schema";
 import type { DraftComposerAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
+import { routingModeAfterManualModelSelection } from "../lib/providerRouting";
 import { resolveProviderInteractionMode } from "../features/threads/legacy-plan-mode";
 
 // Keep current writes until a compatible native baseline includes the v4 reader.
@@ -56,6 +59,9 @@ export const QueuedThreadMessageSchema = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   runtimeMode: Schema.optional(RuntimeMode),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
+  /** New-client consent; absent historical rows stay pinned for backward safety. */
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   // Present when the queued item creates a brand-new thread (pending task)
   // instead of appending a turn to an existing one.
   creation: Schema.optional(QueuedThreadCreationSchema),
@@ -86,6 +92,8 @@ export interface QueuedThreadMessage {
   readonly modelSelection?: ModelSelectionType;
   readonly runtimeMode?: RuntimeModeType;
   readonly interactionMode?: ProviderInteractionModeType;
+  readonly providerRoutingMode?: ProviderRoutingModeType;
+  readonly allowProviderAccountRouting?: true;
   readonly creation?: QueuedThreadCreation;
   readonly createdAt: string;
 }
@@ -140,6 +148,39 @@ export function modelSelectionsEqual(left: ModelSelectionType, right: ModelSelec
     left.model === right.model &&
     JSON.stringify(left.options ?? null) === JSON.stringify(right.options ?? null)
   );
+}
+
+export function shouldSkipQueuedProviderAccountRouting(message: QueuedThreadMessage): boolean {
+  return message.allowProviderAccountRouting !== true;
+}
+
+export function resolveQueuedThreadMetadataUpdate(
+  message: QueuedThreadMessage,
+  thread: {
+    readonly modelSelection: ModelSelectionType;
+    readonly providerRoutingMode?: ProviderRoutingModeType;
+  },
+): {
+  readonly modelSelection?: ModelSelectionType;
+  readonly providerRoutingMode?: ProviderRoutingModeType;
+} | null {
+  const nextModelSelection = message.modelSelection ?? thread.modelSelection;
+  const modelSelectionChanged = !modelSelectionsEqual(nextModelSelection, thread.modelSelection);
+  const currentProviderRoutingMode = thread.providerRoutingMode ?? "fixed";
+  const nextProviderRoutingMode =
+    message.providerRoutingMode ??
+    routingModeAfterManualModelSelection(
+      currentProviderRoutingMode,
+      thread.modelSelection.instanceId,
+      nextModelSelection.instanceId,
+    );
+  const providerRoutingModeChanged = nextProviderRoutingMode !== currentProviderRoutingMode;
+
+  if (!modelSelectionChanged && !providerRoutingModeChanged) return null;
+  return {
+    ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
+    ...(providerRoutingModeChanged ? { providerRoutingMode: nextProviderRoutingMode } : {}),
+  };
 }
 
 export function encodeQueuedThreadMessage(message: QueuedThreadMessage): unknown {

@@ -297,6 +297,66 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-branch-pr-proje
   },
 );
 
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-provider-routing-projection-")))(
+  "provider routing projection",
+  (it) => {
+    it.effect("persists provider routing mode creation and metadata updates", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const now = "2026-09-15T00:00:00.000Z";
+        const threadId = ThreadId.make("thread-routing-mode");
+        const created = yield* eventStore.append({
+          type: "thread.created",
+          eventId: EventId.make("evt-routing-mode-created"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-routing-mode-created"),
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-routing-mode"),
+            title: "Routing mode",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            providerRoutingMode: "auto",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* projectionPipeline.projectEvent(created);
+        const updated = yield* eventStore.append({
+          type: "thread.meta-updated",
+          eventId: EventId.make("evt-routing-mode-fixed"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make("cmd-routing-mode-fixed"),
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: { threadId, providerRoutingMode: "fixed", updatedAt: now },
+        });
+        yield* projectionPipeline.projectEvent(updated);
+
+        const rows = yield* sql<{ readonly mode: string }>`
+        SELECT provider_routing_mode AS mode
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+        assert.deepEqual(rows, [{ mode: "fixed" }]);
+      }),
+    );
+  },
+);
+
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>
     Effect.gen(function* () {
@@ -4032,6 +4092,73 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
             AND state = 'pending'
         `;
         assert.deepEqual(pendingRows, []);
+      }),
+    );
+
+    it.effect("clears only account-routing failures that terminally block the pending turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+
+        for (const [index, terminalTurnStart] of [true, false].entries()) {
+          const threadId = ThreadId.make(`thread-routing-failure-${index}`);
+          const messageId = MessageId.make(`message-routing-failure-${index}`);
+          const createdAt = `2026-02-26T14:10:0${index}.000Z`;
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-routing-pending-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.make(`cmd-routing-pending-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-routing-pending-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId,
+              runtimeMode: "approval-required",
+              createdAt,
+            },
+          });
+          yield* eventStore.append({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`evt-routing-failed-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.make(`cmd-routing-failed-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-routing-failed-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              activity: {
+                id: EventId.make(`activity-routing-failed-${index}`),
+                tone: "error",
+                kind: "provider.account.route.failed",
+                summary: "Provider account switch failed",
+                payload: {
+                  requestId: messageId,
+                  ...(terminalTurnStart ? { terminalTurnStart: true } : {}),
+                },
+                turnId: null,
+                createdAt,
+              },
+            },
+          });
+        }
+
+        yield* projectionPipeline.bootstrap;
+
+        const pendingRows = yield* sql<{ readonly threadId: string }>`
+          SELECT thread_id AS "threadId"
+          FROM projection_turns
+          WHERE turn_id IS NULL
+            AND state = 'pending'
+        `;
+        assert.deepEqual(pendingRows, [{ threadId: "thread-routing-failure-1" }]);
       }),
     );
 

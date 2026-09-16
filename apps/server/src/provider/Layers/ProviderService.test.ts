@@ -55,6 +55,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
+  ProviderSessionDirectoryPersistenceError,
   ProviderUnsupportedError,
   ProviderValidationError,
   ProviderWorkspaceMissingError,
@@ -64,7 +65,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-import { makeProviderServiceLive } from "./ProviderService.ts";
+import { makeProviderServiceLive, type ProviderServiceLiveOptions } from "./ProviderService.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -78,6 +79,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -143,28 +145,29 @@ function makeFakeCodexAdapter(
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
-  const startSession = vi.fn((input: ProviderSessionStartInput) =>
-    Effect.sync(() => {
-      const now = "2026-01-01T00:00:00.000Z";
-      const session: ProviderSession = {
-        provider,
-        providerSessionId: `session-${String(input.threadId)}`,
-        ...(input.providerInstanceId !== undefined
-          ? { providerInstanceId: input.providerInstanceId }
-          : {}),
-        status: "ready",
-        runtimeMode: input.runtimeMode,
-        threadId: input.threadId,
-        resumeCursor: input.resumeCursor ?? {
-          opaque: `resume-${String(input.threadId)}`,
-        },
-        cwd: input.cwd ?? process.cwd(),
-        createdAt: now,
-        updatedAt: now,
-      };
-      sessions.set(session.threadId, session);
-      return session;
-    }),
+  const startSession = vi.fn(
+    (input: ProviderSessionStartInput): Effect.Effect<ProviderSession, ProviderAdapterError> =>
+      Effect.sync(() => {
+        const now = "2026-01-01T00:00:00.000Z";
+        const session: ProviderSession = {
+          provider,
+          providerSessionId: `session-${String(input.threadId)}`,
+          ...(input.providerInstanceId !== undefined
+            ? { providerInstanceId: input.providerInstanceId }
+            : {}),
+          status: "ready",
+          runtimeMode: input.runtimeMode,
+          threadId: input.threadId,
+          resumeCursor: input.resumeCursor ?? {
+            opaque: `resume-${String(input.threadId)}`,
+          },
+          cwd: input.cwd ?? process.cwd(),
+          createdAt: now,
+          updatedAt: now,
+        };
+        sessions.set(session.threadId, session);
+        return session;
+      }),
   );
 
   const sendTurn = vi.fn(
@@ -437,6 +440,7 @@ function makeProviderServiceLayer(
     readonly supportsConversationRollback?: boolean;
     readonly analyticsLayer?: Layer.Layer<AnalyticsService.AnalyticsService>;
     readonly registry?: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
+    readonly providerServiceOptions?: ProviderServiceLiveOptions;
   } = {},
 ) {
   const codex = makeFakeCodexAdapter(CODEX_DRIVER, input.supportsConversationRollback);
@@ -464,7 +468,7 @@ function makeProviderServiceLayer(
 
   const layer = it.layer(
     Layer.mergeAll(
-      makeProviderServiceLive().pipe(
+      makeProviderServiceLive(input.providerServiceOptions).pipe(
         Layer.provide(NodeServices.layer),
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
@@ -561,7 +565,12 @@ for (const [enabled, completed] of [
           ...pending.value,
           runtimePayload: { activeTurnId: null, continueAfterServerUpdate: turnId },
         });
-        const accepted = yield* provider.sendTurn({ threadId, continuation: true });
+        const admissionMessageId = MessageId.make("message-admitted-before-shutdown");
+        const accepted = yield* provider.sendTurn({
+          threadId,
+          requestId: admissionMessageId,
+          continuation: true,
+        });
         const admitted = yield* directory.getBinding(threadId);
         assert(Option.isSome(admitted));
         assert.propertyVal(admitted.value.runtimePayload, "activeTurnId", accepted.turnId);
@@ -590,6 +599,14 @@ for (const [enabled, completed] of [
         assert.equal(codex.stopAll.mock.calls.length, 1);
         assert.deepStrictEqual(binding.value.resumeCursor, session.resumeCursor);
         assert.equal(binding.value.status, "stopped");
+        assert.propertyVal(markers[0], "lastAdmittedMessageId", admissionMessageId);
+        assert.propertyVal(markers[0], "lastAdmittedTurnId", accepted.turnId);
+        assert.propertyVal(
+          binding.value.runtimePayload,
+          "lastAdmittedMessageId",
+          admissionMessageId,
+        );
+        assert.propertyVal(binding.value.runtimePayload, "lastAdmittedTurnId", accepted.turnId);
         assert.propertyVal(markers[0], "activeTurnId", completed ? null : turnId);
         if (enabled && !completed) {
           assert.propertyVal(markers[0], "continueAfterServerUpdate", turnId);
@@ -1005,6 +1022,345 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
 );
 
 const routing = makeProviderServiceLayer();
+
+const incompatiblePrimaryInstanceId = ProviderInstanceId.make("claude-primary-placement");
+const incompatibleTargetInstanceId = ProviderInstanceId.make("claude-target-placement");
+const incompatiblePrimary = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+const incompatibleTarget = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+const incompatiblePlacement = makeProviderServiceLayer({
+  registry: makeStaticInstanceRegistry([
+    [incompatiblePrimaryInstanceId, incompatiblePrimary.adapter],
+    [incompatibleTargetInstanceId, incompatibleTarget.adapter],
+  ]),
+});
+
+incompatiblePlacement.layer("ProviderServiceLive unstarted account replacement", (it) => {
+  it.effect("only replaces an incompatible account through the explicit unstarted path", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-unstarted-account-replacement");
+      const startInput = (providerInstanceId: ProviderInstanceId) => ({
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId,
+        threadId,
+        runtimeMode: "full-access" as const,
+      });
+
+      assert.equal(
+        yield* provider.isSessionEventAuthoritative(threadId, incompatiblePrimaryInstanceId),
+        true,
+      );
+      yield* provider.startSession(threadId, startInput(incompatiblePrimaryInstanceId));
+      assert.equal(
+        yield* provider.isSessionEventAuthoritative(threadId, incompatiblePrimaryInstanceId),
+        true,
+      );
+      assert.equal(
+        yield* provider.isSessionEventAuthoritative(threadId, incompatibleTargetInstanceId),
+        false,
+      );
+      const normalFailure = yield* provider
+        .startSession(threadId, startInput(incompatibleTargetInstanceId))
+        .pipe(Effect.flip);
+      assert.instanceOf(normalFailure, ProviderValidationError);
+
+      const replacement = yield* provider.startSession(
+        threadId,
+        startInput(incompatibleTargetInstanceId),
+        { allowIncompatibleUnstartedReplacement: true },
+      );
+
+      assert.equal(replacement.providerInstanceId, incompatibleTargetInstanceId);
+      assert.equal(
+        yield* provider.isSessionEventAuthoritative(threadId, incompatiblePrimaryInstanceId),
+        false,
+      );
+      assert.equal(incompatibleTarget.startSession.mock.calls[0]?.[0].resumeCursor, undefined);
+      assert.equal(yield* incompatiblePrimary.hasSession(threadId), false);
+    }),
+  );
+});
+
+const primaryAccountInstanceId = ProviderInstanceId.make("codex-primary-account");
+const secondaryAccountInstanceId = ProviderInstanceId.make("codex-secondary-account");
+const primaryAccount = makeFakeCodexAdapter(CODEX_DRIVER);
+const secondaryAccount = makeFakeCodexAdapter(CODEX_DRIVER);
+const accountRegistryBase = makeStaticInstanceRegistry([
+  [primaryAccountInstanceId, primaryAccount.adapter],
+  [secondaryAccountInstanceId, secondaryAccount.adapter],
+]);
+const accountRegistry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
+  ...accountRegistryBase,
+  getInstanceInfo: (instanceId) =>
+    accountRegistryBase.getInstanceInfo(instanceId).pipe(
+      Effect.map((info) => ({
+        ...info,
+        continuationIdentity: {
+          ...info.continuationIdentity,
+          continuationKey: "codex:shared-account-handoff",
+        },
+      })),
+    ),
+};
+const liveMcpCredentials = new Set<string>();
+let nextMcpCredential = 0;
+const mcpHandoffBindings = new Map<ThreadId, ProviderSessionDirectory.ProviderRuntimeBinding>();
+let failNextMcpHandoffBindingUpsert = false;
+const mcpHandoffDirectory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+  upsert: (binding) => {
+    if (failNextMcpHandoffBindingUpsert) {
+      failNextMcpHandoffBindingUpsert = false;
+      return Effect.fail(
+        new ProviderSessionDirectoryPersistenceError({
+          operation: "ProviderSessionDirectory.upsert",
+          detail: "simulated replacement binding failure",
+        }),
+      );
+    }
+    return Effect.sync(() => {
+      mcpHandoffBindings.set(binding.threadId, {
+        ...mcpHandoffBindings.get(binding.threadId),
+        ...binding,
+      });
+    });
+  },
+  recordImportedTranscript: () => Effect.die("unused"),
+  getProvider: () => Effect.die("unused"),
+  getBinding: (threadId) =>
+    Effect.succeed(Option.fromUndefinedOr(mcpHandoffBindings.get(threadId))),
+  listThreadIds: () => Effect.succeed([...mcpHandoffBindings.keys()]),
+  listBindings: () =>
+    Effect.succeed(
+      [...mcpHandoffBindings.values()].map((binding) => ({
+        ...binding,
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+      })),
+    ),
+});
+const mcpHandoff = makeProviderServiceLayer({
+  registry: accountRegistry,
+  directory: mcpHandoffDirectory,
+  providerServiceOptions: {
+    issueMcpCredential: (request) =>
+      Effect.sync(() => {
+        const providerSessionId = `mcp-session-${++nextMcpCredential}`;
+        liveMcpCredentials.add(providerSessionId);
+        return {
+          config: {
+            environmentId: EnvironmentId.make("environment-mcp-handoff"),
+            threadId: request.threadId,
+            providerSessionId,
+            providerInstanceId: request.providerInstanceId,
+            endpoint: "http://127.0.0.1:43123/mcp",
+            authorizationHeader: `Bearer ${providerSessionId}`,
+            capabilities: request.capabilities,
+          },
+          activate: Effect.sync(() => {
+            for (const liveId of liveMcpCredentials) {
+              if (liveId !== providerSessionId) liveMcpCredentials.delete(liveId);
+            }
+          }),
+          revoke: Effect.sync(() => {
+            liveMcpCredentials.delete(providerSessionId);
+          }),
+        };
+      }),
+  },
+});
+
+mcpHandoff.layer("ProviderServiceLive MCP handoff", (it) => {
+  it.effect("restores the active MCP session when a replacement account fails to start", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-mcp-account-handoff");
+      nextMcpCredential = 0;
+      liveMcpCredentials.clear();
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: primaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-mcp-account-handoff"),
+        runtimeMode: "full-access",
+      });
+      const previousConfig = McpProviderSession.readMcpProviderSession(threadId);
+      assert.equal(previousConfig?.providerSessionId, "mcp-session-1");
+
+      let targetConfigAtStart: McpProviderSession.McpProviderSessionConfig | undefined;
+      secondaryAccount.startSession.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          targetConfigAtStart = McpProviderSession.readMcpProviderSession(threadId);
+          return yield* new ProviderAdapterRequestError({
+            provider: String(CODEX_DRIVER),
+            method: "session/start",
+            detail: "target account unavailable",
+          });
+        }),
+      );
+
+      const failure = yield* provider
+        .startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: secondaryAccountInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-mcp-account-handoff"),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(failure, ProviderAdapterRequestError);
+      assert.equal(targetConfigAtStart?.providerSessionId, "mcp-session-2");
+      assert.equal(
+        McpProviderSession.readMcpProviderSession(threadId)?.providerSessionId,
+        "mcp-session-1",
+      );
+      assert.deepEqual([...liveMcpCredentials], ["mcp-session-1"]);
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }),
+  );
+
+  it.effect("activates the target credential only after the replacement account starts", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-mcp-account-handoff-success");
+      nextMcpCredential = 0;
+      liveMcpCredentials.clear();
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: primaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-mcp-account-handoff-success"),
+        runtimeMode: "full-access",
+      });
+
+      let credentialsAtTargetStart: ReadonlyArray<string> = [];
+      secondaryAccount.startSession.mockImplementationOnce((input) =>
+        Effect.sync(() => {
+          credentialsAtTargetStart = [...liveMcpCredentials];
+          const now = "2026-01-01T00:00:00.000Z";
+          return {
+            provider: CODEX_DRIVER,
+            providerInstanceId: secondaryAccountInstanceId,
+            status: "ready",
+            runtimeMode: input.runtimeMode,
+            threadId: input.threadId,
+            cwd: input.cwd,
+            resumeCursor: { opaque: `resume-${String(input.threadId)}` },
+            createdAt: now,
+            updatedAt: now,
+          } satisfies ProviderSession;
+        }),
+      );
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: secondaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-mcp-account-handoff-success"),
+        runtimeMode: "full-access",
+      });
+
+      assert.deepEqual(credentialsAtTargetStart, ["mcp-session-1", "mcp-session-2"]);
+      assert.deepEqual([...liveMcpCredentials], ["mcp-session-2"]);
+      assert.equal(
+        McpProviderSession.readMcpProviderSession(threadId)?.providerSessionId,
+        "mcp-session-2",
+      );
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }),
+  );
+
+  it.effect("keeps the old account active when replacement binding persistence fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-mcp-account-handoff-persistence-failure");
+      nextMcpCredential = 0;
+      liveMcpCredentials.clear();
+      mcpHandoffBindings.delete(threadId);
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: primaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-mcp-account-handoff-persistence-failure"),
+        runtimeMode: "full-access",
+      });
+      failNextMcpHandoffBindingUpsert = true;
+
+      const failure = yield* provider
+        .startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: secondaryAccountInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-mcp-account-handoff-persistence-failure"),
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.flip);
+
+      assert.instanceOf(failure, ProviderSessionDirectoryPersistenceError);
+      assert.equal(
+        McpProviderSession.readMcpProviderSession(threadId)?.providerSessionId,
+        "mcp-session-1",
+      );
+      assert.deepEqual([...liveMcpCredentials], ["mcp-session-1"]);
+      assert.equal(
+        (yield* mcpHandoffDirectory.getBinding(threadId)).pipe(Option.getOrThrow)
+          .providerInstanceId,
+        primaryAccountInstanceId,
+      );
+      assert.equal(yield* primaryAccount.hasSession(threadId), true);
+      assert.equal(yield* secondaryAccount.hasSession(threadId), false);
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }),
+  );
+
+  it.effect("keeps a successful replacement when stale-session discovery fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-mcp-stale-discovery-failure");
+      nextMcpCredential = 0;
+      liveMcpCredentials.clear();
+      mcpHandoffBindings.delete(threadId);
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: primaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-mcp-stale-discovery-failure"),
+        runtimeMode: "full-access",
+      });
+      primaryAccount.hasSession.mockImplementationOnce(() =>
+        Effect.die(new Error("stale account unavailable")),
+      );
+
+      const replacement = yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: secondaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-mcp-stale-discovery-failure"),
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(replacement.providerInstanceId, secondaryAccountInstanceId);
+      assert.equal(
+        (yield* mcpHandoffDirectory.getBinding(threadId)).pipe(Option.getOrThrow)
+          .providerInstanceId,
+        secondaryAccountInstanceId,
+      );
+      assert.deepEqual([...liveMcpCredentials], ["mcp-session-2"]);
+      assert.equal(yield* primaryAccount.hasSession(threadId), true);
+      const listed = yield* provider.listSessions();
+      assert.deepEqual(
+        listed
+          .filter((session) => session.threadId === threadId)
+          .map((session) => session.providerInstanceId),
+        [secondaryAccountInstanceId],
+      );
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }),
+  );
+});
 
 const customCompactionDriver = ProviderDriverKind.make("custom-compaction-provider");
 const nativeCompactionInstanceId = ProviderInstanceId.make("native-compaction");
@@ -1724,6 +2080,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       yield* provider.sendTurn({
         threadId: session.threadId,
+        requestId: MessageId.make("message-runtime-status"),
         input: "hello",
         attachments: [],
         modelSelection,
@@ -2994,6 +3351,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       });
       yield* provider.sendTurn({
         threadId: session.threadId,
+        requestId: MessageId.make("message-runtime-status"),
         input: "hello",
         attachments: [],
       });
@@ -3018,9 +3376,44 @@ routing.layer("ProviderServiceLive routing", (it) => {
           assert.equal(runtimePayload.cwd, session.cwd);
           assert.equal(runtimePayload.model, null);
           assert.equal(runtimePayload.activeTurnId, `turn-${String(session.threadId)}`);
+          assert.equal(
+            (payload as Record<string, unknown>).lastAdmittedMessageId,
+            "message-runtime-status",
+          );
+          assert.equal(
+            (payload as Record<string, unknown>).lastAdmittedTurnId,
+            `turn-${String(session.threadId)}`,
+          );
           assert.equal(runtimePayload.lastError, null);
           assert.equal(runtimePayload.lastRuntimeEvent, "provider.sendTurn");
         }
+      }
+
+      const completed = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.eventId === "evt-runtime-status-turn-completed"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      routing.codex.emit({
+        type: "turn.completed",
+        eventId: asEventId("evt-runtime-status-turn-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: session.threadId,
+        turnId: asTurnId(`turn-${String(session.threadId)}`),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        payload: { state: "completed" },
+      });
+      yield* Fiber.join(completed);
+
+      const completedRuntime = yield* runtimeRepository.getByThreadId({
+        threadId: session.threadId,
+      });
+      assert.equal(Option.isSome(completedRuntime), true);
+      if (Option.isSome(completedRuntime)) {
+        assert.propertyVal(completedRuntime.value.runtimePayload, "activeTurnId", null);
       }
     }),
   );

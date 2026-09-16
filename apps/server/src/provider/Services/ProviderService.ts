@@ -26,6 +26,7 @@ import type {
   ProviderUploadFeedbackResult,
   MessageId,
   ThreadId,
+  TurnId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -35,6 +36,14 @@ import type * as Stream from "effect/Stream";
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
+
+export interface ProviderSessionStartOptions {
+  /**
+   * Allows replacing an incompatible provider binding only while orchestration
+   * has verified that the thread has never started a turn.
+   */
+  readonly allowIncompatibleUnstartedReplacement?: true;
+}
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
@@ -46,6 +55,7 @@ export interface ProviderServiceShape {
   readonly startSession: (
     threadId: ThreadId,
     input: ProviderSessionStartInput,
+    options?: ProviderSessionStartOptions,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**
@@ -107,6 +117,43 @@ export interface ProviderServiceShape {
    * Aggregates runtime session lists from all registered adapters.
    */
   readonly listSessions: () => Effect.Effect<ReadonlyArray<ProviderSession>>;
+
+  /**
+   * Checks a lifecycle event against the persisted provider binding. Missing
+   * or legacy bindings remain authoritative so recovery events are not lost.
+   */
+  readonly isSessionEventAuthoritative: (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+  ) => Effect.Effect<boolean, ProviderServiceError>;
+
+  /** Clear a terminal persisted turn only if this instance still owns it. */
+  readonly clearActiveTurnIfMatches?: (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly turnId: TurnId;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
+
+  /** Inspect the durable admission slot and clear it only with terminal proof. */
+  readonly reconcilePersistedActiveTurn?: (input: {
+    readonly threadId: ThreadId;
+    readonly terminalTurnIds: ReadonlySet<TurnId>;
+  }) => Effect.Effect<
+    | { readonly status: "idle" }
+    | { readonly status: "active"; readonly turnId: TurnId }
+    | { readonly status: "terminal-cleared"; readonly turnId: TurnId },
+    ProviderServiceError
+  >;
+
+  /** Read the last durable message-to-provider-turn admission for recovery. */
+  readonly getPersistedTurnAdmission?: (threadId: ThreadId) => Effect.Effect<
+    {
+      readonly messageId: MessageId;
+      readonly turnId: TurnId;
+      readonly active: boolean;
+    } | null,
+    ProviderServiceError
+  >;
 
   /**
    * Read capabilities for the adapter bound to a configured provider instance.

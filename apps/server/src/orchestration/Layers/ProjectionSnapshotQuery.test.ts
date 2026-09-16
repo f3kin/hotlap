@@ -150,6 +150,43 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
     }),
   );
 
+  it.effect("lists pending starts and reads an exact older turn state", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id, turn_id, pending_message_id, state, requested_at,
+          started_at, completed_at, checkpoint_files_json
+        ) VALUES
+          ('thread-recovery', 'turn-older', NULL, 'completed',
+            '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:01.000Z',
+            '2026-09-01T00:00:02.000Z', '[]'),
+          ('thread-recovery', 'turn-newer', NULL, 'completed',
+            '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:01.000Z',
+            '2026-09-01T00:01:02.000Z', '[]'),
+          ('thread-recovery', NULL, 'message-pending', 'pending',
+            '2026-09-01T00:02:00.000Z', NULL, NULL, '[]')
+      `;
+
+      const pending = yield* query.listPendingTurnStarts!();
+      assert.deepStrictEqual(
+        pending.map(({ threadId, messageId }) => ({ threadId, messageId })),
+        [{ threadId: "thread-recovery", messageId: "message-pending" }],
+      );
+      assert.strictEqual(
+        Option.getOrThrow(
+          yield* query.getTurnStateById!(
+            ThreadId.make("thread-recovery"),
+            TurnId.make("turn-older"),
+          ),
+        ),
+        "completed",
+      );
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -496,6 +533,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
           },
+          providerRoutingMode: "fixed",
           interactionMode: "default",
           runtimeMode: "full-access",
           branch: null,
@@ -623,6 +661,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
           },
+          providerRoutingMode: "fixed",
           interactionMode: "default",
           runtimeMode: "full-access",
           branch: null,
@@ -3457,6 +3496,28 @@ projectionSnapshotLayer("ProjectionSnapshotQuery imported sources", (it) => {
 });
 
 projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => {
+  it.effect("hydrates persisted provider routing mode into thread snapshots", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('routing-project', 'Project', '/tmp/routing', '[]',
+          '2026-09-15T00:00:00Z', '2026-09-15T00:00:00Z')`;
+      yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, provider_routing_mode,
+         runtime_mode, interaction_mode, created_at, updated_at)
+        VALUES ('routing-thread', 'routing-project', 'Thread',
+          '{"instanceId":"codex","model":"gpt-5"}', 'auto', 'full-access', 'default',
+          '2026-09-15T00:00:00Z', '2026-09-15T00:00:00Z')`;
+
+      const thread = Option.getOrThrow(
+        yield* query.getThreadShellById(ThreadId.make("routing-thread")),
+      );
+      assert.equal(thread.providerRoutingMode, "auto");
+    }),
+  );
+
   it.effect("reads archived transcript and terminal fork sources without hydrating payloads", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -3465,10 +3526,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
         (project_id, title, workspace_root, scripts_json, created_at, updated_at)
         VALUES ('fork-project', 'Project', '/tmp/fork', '[]', '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z')`;
       yield* sql`INSERT INTO projection_threads
-        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
-         branch, worktree_path, archived_at, created_at, updated_at)
+        (thread_id, project_id, title, model_selection_json, provider_routing_mode, runtime_mode,
+         interaction_mode, branch, worktree_path, archived_at, created_at, updated_at)
         VALUES ('fork-source', 'fork-project', 'Source', '{"instanceId":"codex","model":"gpt-5"}',
-          'full-access', 'default', 'feature', '/tmp/fork-worktree', '2026-09-12T00:05:00Z',
+          'auto', 'full-access', 'default', 'feature', '/tmp/fork-worktree', '2026-09-12T00:05:00Z',
           '2026-09-12T00:00:00Z', '2026-09-12T00:05:00Z')`;
       yield* sql`INSERT INTO projection_thread_messages
         (message_id, thread_id, turn_id, role, text, attachments_json, context_json,
@@ -3507,6 +3568,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
       assert.isFalse(forkResult.overLimit);
       if (forkResult.overLimit) return;
       const fork = Option.getOrThrow(forkResult.source);
+      assert.equal(fork.providerRoutingMode, "auto");
       assert.equal(fork.archivedAt, "2026-09-12T00:05:00Z");
       assert.deepEqual(fork.selectedTurn, {
         state: "completed",

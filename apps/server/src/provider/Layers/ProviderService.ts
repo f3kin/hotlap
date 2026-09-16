@@ -950,15 +950,53 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const deviceEnvironment = capabilities.has("device")
           ? yield* agentDeviceEnvironment
           : undefined;
-        yield* Effect.sync(() =>
-          McpProviderSession.setMcpProviderSession({
+        const handoff = yield* Effect.sync(() =>
+          McpProviderSession.beginMcpProviderSessionHandoff({
             ...credential.config,
             ...(deviceEnvironment ? { agentDeviceEnvironment: deviceEnvironment } : {}),
           }),
         );
+        return { credential, handoff } as const;
       }
-      return credential;
+      return undefined;
     });
+  const rollbackMcpSession = (prepared: Effect.Success<ReturnType<typeof prepareMcpSession>>) =>
+    prepared
+      ? prepared.credential.revoke.pipe(
+          Effect.ensuring(
+            Effect.sync(() =>
+              McpProviderSession.rollbackMcpProviderSessionHandoff(prepared.handoff),
+            ),
+          ),
+        )
+      : Effect.void;
+  const activateMcpSession = (prepared: Effect.Success<ReturnType<typeof prepareMcpSession>>) =>
+    prepared ? prepared.credential.activate : Effect.void;
+  const discardStartedMcpSession = (input: {
+    readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+    readonly threadId: ThreadId;
+    readonly prepared: Effect.Success<ReturnType<typeof prepareMcpSession>>;
+  }) =>
+    input.adapter.stopSession(input.threadId).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("provider.session.discard-started-failed", {
+          threadId: input.threadId,
+          provider: input.adapter.provider,
+          cause,
+        }),
+      ),
+      Effect.ensuring(
+        rollbackMcpSession(input.prepared).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider.session.mcp-rollback-failed", {
+              threadId: input.threadId,
+              provider: input.adapter.provider,
+              cause,
+            }),
+          ),
+        ),
+      ),
+    );
   const clearMcpSession = (threadId: ThreadId) =>
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
@@ -1102,6 +1140,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         canonicalEvent.type === "turn.aborted"
       ) {
         yield* recordTurnCompletedAnalytics(source, canonicalEvent);
+        if (canonicalEvent.turnId !== undefined) {
+          yield* clearActiveTurnIfMatches({
+            threadId: canonicalEvent.threadId,
+            providerInstanceId: source.instanceId,
+            turnId: canonicalEvent.turnId,
+          }).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("failed to clear completed provider runtime turn", {
+                threadId: canonicalEvent.threadId,
+                turnId: canonicalEvent.turnId,
+                cause,
+              }),
+            ),
+          );
+        }
         if (source.provider === "claudeAgent") {
           // Background Claude turns have no sendTurn response to persist their
           // new native boundary. Save it before clients can checkpoint the turn.
@@ -1170,6 +1223,70 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
       yield* processFallbackCompactionEvent(pendingCompaction, canonicalEvent);
     });
+
+  const clearActiveTurnIfMatches = (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly turnId: TurnId;
+  }) => directory.clearActiveTurnIfMatches?.(input) ?? Effect.succeed(false);
+
+  const reconcilePersistedActiveTurn = Effect.fn("reconcilePersistedActiveTurn")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly terminalTurnIds: ReadonlySet<TurnId>;
+  }) {
+    const binding = yield* directory.getBinding(input.threadId);
+    if (Option.isNone(binding) || binding.value.providerInstanceId === undefined) {
+      return { status: "idle" } as const;
+    }
+    const payload = binding.value.runtimePayload;
+    const rawActiveTurnId =
+      payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        ? "activeTurnId" in payload
+          ? payload.activeTurnId
+          : null
+        : null;
+    if (typeof rawActiveTurnId !== "string" || rawActiveTurnId.length === 0) {
+      return { status: "idle" } as const;
+    }
+    const turnId = TurnId.make(rawActiveTurnId);
+    if (!input.terminalTurnIds.has(turnId)) {
+      return { status: "active", turnId } as const;
+    }
+    const cleared = yield* clearActiveTurnIfMatches({
+      threadId: input.threadId,
+      providerInstanceId: binding.value.providerInstanceId,
+      turnId,
+    });
+    return cleared
+      ? ({ status: "terminal-cleared", turnId } as const)
+      : ({ status: "active", turnId } as const);
+  });
+
+  const getPersistedTurnAdmission: NonNullable<
+    ProviderService.ProviderServiceShape["getPersistedTurnAdmission"]
+  > = (threadId) =>
+    directory.getBinding(threadId).pipe(
+      Effect.map(
+        Option.match({
+          onNone: () => null,
+          onSome: (binding) => {
+            const payload = binding.runtimePayload;
+            if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+              return null;
+            }
+            const messageId =
+              "lastAdmittedMessageId" in payload ? payload.lastAdmittedMessageId : null;
+            const turnId = "lastAdmittedTurnId" in payload ? payload.lastAdmittedTurnId : null;
+            if (typeof messageId !== "string" || typeof turnId !== "string") return null;
+            return {
+              messageId: MessageId.make(messageId),
+              turnId: TurnId.make(turnId),
+              active: "activeTurnId" in payload && payload.activeTurnId === turnId,
+            };
+          },
+        }),
+      ),
+    );
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
   // are currently wired into the runtime event bus". It both tracks the set
@@ -1274,7 +1391,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
         const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
-        yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+        const preparedMcpSession = yield* prepareMcpSession(
+          input.binding.threadId,
+          bindingInstanceId,
+        );
         const resumed = yield* adapter
           .startSession({
             threadId: input.binding.threadId,
@@ -1285,9 +1405,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
             runtimeMode: input.binding.runtimeMode ?? "full-access",
           })
-          .pipe(Effect.onError(() => clearMcpSession(input.binding.threadId)));
+          .pipe(Effect.onError(() => rollbackMcpSession(preparedMcpSession)));
         if (resumed.provider !== adapter.provider) {
-          yield* clearMcpSession(input.binding.threadId);
+          yield* discardStartedMcpSession({
+            adapter,
+            threadId: input.binding.threadId,
+            prepared: preparedMcpSession,
+          });
           return yield* toValidationError(
             input.operation,
             `Adapter/provider mismatch while recovering thread '${input.binding.threadId}'. Expected '${adapter.provider}', received '${resumed.provider}'.`,
@@ -1297,7 +1421,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* upsertSessionBinding(
           { ...resumed, providerInstanceId: bindingInstanceId },
           input.binding.threadId,
+        ).pipe(
+          Effect.onError(() =>
+            discardStartedMcpSession({
+              adapter,
+              threadId: input.binding.threadId,
+              prepared: preparedMcpSession,
+            }),
+          ),
         );
+        yield* activateMcpSession(preparedMcpSession);
         yield* analytics.record("provider.session.recovered", {
           provider: resumed.provider,
           strategy: "resume-thread",
@@ -1381,27 +1514,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 return;
               }
 
-              yield* adapter.stopSession(input.threadId).pipe(
-                Effect.tap(() =>
-                  analytics.record("provider.session.stopped", {
-                    provider: adapter.provider,
-                  }),
-                ),
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("provider.session.stop-stale-failed", {
-                    threadId: input.threadId,
-                    provider: adapter.provider,
-                    cause,
-                  }),
-                ),
-              );
-            }),
+              yield* adapter.stopSession(input.threadId);
+              yield* analytics.record("provider.session.stopped", {
+                provider: adapter.provider,
+              });
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider.session.stop-stale-failed", {
+                  threadId: input.threadId,
+                  provider: adapter.provider,
+                  cause,
+                }),
+              ),
+            ),
       { discard: true },
     );
   });
 
   const startSession: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
-    function* (threadId, rawInput) {
+    function* (threadId, rawInput, options) {
       const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.startSession",
         schema: ProviderSessionStartInput,
@@ -1445,6 +1576,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }
           const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
           if (
+            options?.allowIncompatibleUnstartedReplacement !== true &&
             persistedBinding?.provider === resolvedProvider &&
             persistedBinding.providerInstanceId !== resolvedInstanceId &&
             (input.resumeCursor != null || persistedBinding.resumeCursor != null)
@@ -1509,7 +1641,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           }
           const adapter = yield* registry.getByInstance(resolvedInstanceId);
           yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
-          yield* prepareMcpSession(threadId, resolvedInstanceId);
+          const preparedMcpSession = yield* prepareMcpSession(threadId, resolvedInstanceId);
           const session = yield* adapter
             .startSession({
               ...input,
@@ -1519,10 +1651,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 ? { resumeCursor: effectiveResumeCursor }
                 : {}),
             })
-            .pipe(Effect.onError(() => clearMcpSession(threadId)));
+            .pipe(Effect.onError(() => rollbackMcpSession(preparedMcpSession)));
 
           if (session.provider !== adapter.provider) {
-            yield* clearMcpSession(threadId);
+            yield* discardStartedMcpSession({
+              adapter,
+              threadId,
+              prepared: preparedMcpSession,
+            });
             return yield* toValidationError(
               "ProviderService.startSession",
               `Adapter/provider mismatch: requested '${adapter.provider}', received '${session.provider}'.`,
@@ -1533,12 +1669,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             providerInstanceId: resolvedInstanceId,
           };
 
+          yield* upsertSessionBinding(sessionWithInstance, threadId, {
+            modelSelection: input.modelSelection,
+          }).pipe(
+            Effect.onError(() =>
+              discardStartedMcpSession({
+                adapter,
+                threadId,
+                prepared: preparedMcpSession,
+              }),
+            ),
+          );
+          yield* activateMcpSession(preparedMcpSession);
           yield* stopStaleSessionsForThread({
             threadId,
             currentInstanceId: resolvedInstanceId,
-          });
-          yield* upsertSessionBinding(sessionWithInstance, threadId, {
-            modelSelection: input.modelSelection,
           });
           yield* analytics.record("provider.session.started", {
             provider: sessionWithInstance.provider,
@@ -1769,6 +1914,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         runtimePayload: {
           ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
           activeTurnId: turn.turnId,
+          ...(input.requestId !== undefined
+            ? {
+                lastAdmittedMessageId: input.requestId,
+                lastAdmittedTurnId: turn.turnId,
+              }
+            : {}),
           // Admission and marker consumption must survive the same restart.
           continueAfterServerUpdate: null,
           continueAfterServerUpdatePrepared: null,
@@ -2254,7 +2405,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "ProviderService.listSessions",
           binding,
         );
+        const authoritativeSessionIsActive = activeSessions.some(
+          (candidate) =>
+            candidate.threadId === session.threadId &&
+            candidate.provider === binding.provider &&
+            candidate.providerInstanceId === overrides.providerInstanceId,
+        );
         if (binding.provider !== session.provider) {
+          if (authoritativeSessionIsActive) {
+            continue;
+          }
           return yield* Effect.die(
             new Error(
               `ProviderService.listSessions: thread '${session.threadId}' is active on provider '${session.provider}' but persisted binding names provider '${binding.provider}'.`,
@@ -2262,6 +2422,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         if (overrides.providerInstanceId !== session.providerInstanceId) {
+          if (authoritativeSessionIsActive) {
+            continue;
+          }
           return yield* Effect.die(
             new Error(
               `ProviderService.listSessions: thread '${session.threadId}' is active on provider instance '${session.providerInstanceId}' but persisted binding names '${overrides.providerInstanceId}'.`,
@@ -2279,6 +2442,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return sessions;
     },
   );
+
+  const isSessionEventAuthoritative: ProviderServiceMethod<"isSessionEventAuthoritative"> = (
+    threadId,
+    providerInstanceId,
+  ) =>
+    directory.getBinding(threadId).pipe(
+      Effect.map(
+        Option.match({
+          onNone: () => true,
+          onSome: (binding) =>
+            binding.providerInstanceId === undefined ||
+            binding.providerInstanceId === providerInstanceId,
+        }),
+      ),
+    );
 
   const getCapabilities: ProviderServiceMethod<"getCapabilities"> = (instanceId) =>
     registry.getByInstance(instanceId).pipe(Effect.map((adapter) => adapter.capabilities));
@@ -2507,6 +2685,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     stopSession,
     stopSessionIfCurrent,
     listSessions,
+    isSessionEventAuthoritative,
+    clearActiveTurnIfMatches,
+    reconcilePersistedActiveTurn,
+    getPersistedTurnAdmission,
     getCapabilities,
     getInstanceInfo,
     assertConversationRollbackSupported,

@@ -26,6 +26,11 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { toastManager } from "../ui/toast";
 import { Switch } from "../ui/switch";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
+import { ProviderRoutingSettings } from "./ProviderRoutingSettings";
+import {
+  deriveProviderRoutingOptions,
+  resolveProviderRoutingDefaultMode,
+} from "./ProviderRoutingSettings.logic";
 import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
@@ -78,6 +83,13 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const workspaceSource = useScopedSettingSource(["defaultThreadEnvMode"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   const unavailable = connectedEnvironments.length === 0;
+  const providerRoutingOptions = deriveProviderRoutingOptions(
+    targets.map(
+      (candidate) =>
+        environments.find((entry) => entry.environmentId === candidate.environmentId)?.serverConfig
+          ?.providers ?? [],
+    ),
+  );
 
   // A checkout's t3.json wins over the environment default when the project
   // has no override of its own; show which one "inherit" resolves to.
@@ -129,7 +141,25 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       toastManager.add({ type: "error", title: "Default model not saved", description: reason });
       return;
     }
-    updateSettings({ defaultModelSelection: value });
+    const nextSelection = resolveDefaultProviderModelSelection(providers, value);
+    const nextProviderRoutingMode = resolveProviderRoutingDefaultMode(
+      settings.providerRoutingPolicy.defaultMode,
+      providerRoutingOptions,
+      settings.providerRoutingPolicy.instanceIdsByDriver,
+      settings.providerRoutingPolicy.usageThresholdPercent,
+      nextSelection,
+    );
+    updateSettings({
+      defaultModelSelection: value,
+      ...(isProjectScope && nextProviderRoutingMode !== settings.providerRoutingPolicy.defaultMode
+        ? {
+            providerRoutingPolicy: {
+              ...settings.providerRoutingPolicy,
+              defaultMode: nextProviderRoutingMode,
+            },
+          }
+        : {}),
+    });
   };
 
   return (
@@ -223,6 +253,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               )
             }
           />
+          <ProviderRoutingSettings selectedModelSelection={selection} />
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}

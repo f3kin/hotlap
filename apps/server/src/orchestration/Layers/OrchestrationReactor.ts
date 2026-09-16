@@ -37,6 +37,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
 
   return {
     start,
+    reconcilePendingTurns: () => providerCommandReactor.reconcilePendingTurns(),
   } satisfies OrchestrationReactorShape;
 });
 

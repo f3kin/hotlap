@@ -11,6 +11,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   ProviderOptionSelection,
+  ProviderRoutingMode,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PreviewAnnotationPayloadSchema,
   PastedTextAttachmentSource,
@@ -76,6 +77,7 @@ import { replaceComposerContextReferences } from "@t3tools/shared/composerContex
 import { UnifiedSettings } from "@t3tools/contracts/settings";
 import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewCommentContext";
 const isRuntimeMode = Schema.is(RuntimeMode);
+const isProviderRoutingMode = Schema.is(ProviderRoutingMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
 const isSnapShotSource = Schema.is(SnapShotSource);
@@ -252,6 +254,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   modelSelectionExplicit: Schema.optionalKey(Schema.Boolean),
   runtimeMode: Schema.optionalKey(RuntimeMode),
   interactionMode: Schema.optionalKey(ProviderInteractionMode),
+  providerRoutingMode: Schema.optionalKey(ProviderRoutingMode),
 });
 type PersistedComposerThreadDraftState = typeof PersistedComposerThreadDraftState.Type;
 
@@ -403,6 +406,7 @@ export interface ComposerThreadDraftState {
   modelSelectionExplicit?: boolean;
   runtimeMode: RuntimeMode | null;
   interactionMode: ProviderInteractionMode | null;
+  providerRoutingMode: ProviderRoutingMode | null;
 }
 
 /**
@@ -586,6 +590,11 @@ interface ComposerDraftStoreState {
       replaceOptions?: boolean;
     },
   ) => void;
+  /** Clears submitted picker intent only when no newer picker choice replaced it. */
+  consumeExplicitModelSelection: (
+    threadRef: ComposerThreadTarget,
+    submittedSelection: ModelSelection,
+  ) => void;
   /** Replace the model options for one or more providers in the draft. */
   setModelOptions: (
     threadRef: ComposerThreadTarget,
@@ -612,6 +621,10 @@ interface ComposerDraftStoreState {
   setInteractionMode: (
     threadRef: ComposerThreadTarget,
     interactionMode: ProviderInteractionMode | null | undefined,
+  ) => void;
+  setProviderRoutingMode: (
+    threadRef: ComposerThreadTarget,
+    providerRoutingMode: ProviderRoutingMode | null | undefined,
   ) => void;
   addImage: (threadRef: ComposerThreadTarget, image: ComposerImageAttachment) => boolean;
   /** Returns the ids the draft accepted; duplicates and over-cap attachments are left out. */
@@ -789,6 +802,7 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   activeProvider: null,
   runtimeMode: null,
   interactionMode: null,
+  providerRoutingMode: null,
 });
 
 /**
@@ -811,6 +825,7 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     activeProvider: null,
     runtimeMode: null,
     interactionMode: null,
+    providerRoutingMode: null,
   };
 }
 
@@ -904,7 +919,8 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
-    draft.interactionMode === null
+    draft.interactionMode === null &&
+    draft.providerRoutingMode === null
   );
 }
 
@@ -1904,6 +1920,9 @@ function normalizePersistedDraftsByThreadId(
       draftCandidate.interactionMode === "plan" || draftCandidate.interactionMode === "default"
         ? draftCandidate.interactionMode
         : null;
+    const providerRoutingMode = isProviderRoutingMode(draftCandidate.providerRoutingMode)
+      ? draftCandidate.providerRoutingMode
+      : null;
     const contextIds = new Map<string, string>();
     for (const [kind, entries] of [
       ["image", attachments],
@@ -1999,7 +2018,8 @@ function normalizePersistedDraftsByThreadId(
       previewAnnotations.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
-      !interactionMode
+      !interactionMode &&
+      !providerRoutingMode
     ) {
       continue;
     }
@@ -2032,6 +2052,7 @@ function normalizePersistedDraftsByThreadId(
         : {}),
       ...(runtimeMode ? { runtimeMode } : {}),
       ...(interactionMode ? { interactionMode } : {}),
+      ...(providerRoutingMode ? { providerRoutingMode } : {}),
     };
   }
 
@@ -2132,7 +2153,8 @@ export function partializeComposerDraftStoreState(
       draft.reviewComments.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
-      draft.interactionMode === null
+      draft.interactionMode === null &&
+      draft.providerRoutingMode === null
     ) {
       continue;
     }
@@ -2196,6 +2218,7 @@ export function partializeComposerDraftStoreState(
         : {}),
       ...(draft.runtimeMode ? { runtimeMode: draft.runtimeMode } : {}),
       ...(draft.interactionMode ? { interactionMode: draft.interactionMode } : {}),
+      ...(draft.providerRoutingMode ? { providerRoutingMode: draft.providerRoutingMode } : {}),
     };
     persistedDraftsByThreadKey[threadKey] = persistedDraft;
   }
@@ -2462,6 +2485,7 @@ function toHydratedThreadDraft(
     ...(persistedDraft.modelSelectionExplicit ? { modelSelectionExplicit: true } : {}),
     runtimeMode: persistedDraft.runtimeMode ?? null,
     interactionMode: persistedDraft.interactionMode ?? null,
+    providerRoutingMode: persistedDraft.providerRoutingMode ?? null,
   };
 }
 
@@ -3091,6 +3115,29 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
+        consumeExplicitModelSelection: (threadRef, submittedSelection) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) return;
+          const normalized = normalizeModelSelection(submittedSelection);
+          if (!normalized) return;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey];
+            if (
+              existing?.modelSelectionExplicit !== true ||
+              existing.activeProvider !== normalized.instanceId ||
+              !Equal.equals(existing.modelSelectionByProvider[normalized.instanceId], normalized)
+            ) {
+              return state;
+            }
+            const { modelSelectionExplicit: _consumed, ...nextDraft } = existing;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: nextDraft,
+              },
+            };
+          });
+        },
         setModelOptions: (threadRef, modelOptions) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -3277,6 +3324,36 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...base,
               interactionMode: nextInteractionMode,
+            };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        setProviderRoutingMode: (threadRef, providerRoutingMode) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          const nextProviderRoutingMode = isProviderRoutingMode(providerRoutingMode)
+            ? providerRoutingMode
+            : null;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey];
+            if (!existing && nextProviderRoutingMode === null) {
+              return state;
+            }
+            const base = existing ?? createEmptyThreadDraft();
+            if (base.providerRoutingMode === nextProviderRoutingMode) {
+              return state;
+            }
+            const nextDraft: ComposerThreadDraftState = {
+              ...base,
+              providerRoutingMode: nextProviderRoutingMode,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

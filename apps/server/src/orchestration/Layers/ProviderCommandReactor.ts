@@ -2,21 +2,26 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
+  type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
+  type OrchestrationThreadShell,
   ProviderDriverKind,
+  ProviderInstanceId,
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
-  type TurnId,
+  TurnId,
 } from "@t3tools/contracts";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
+import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -64,6 +69,10 @@ import {
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import {
+  isProviderAccountConfirmedUnusable,
+  selectAutomaticProviderAccount,
+} from "../../provider/providerAccountRouting.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
@@ -118,6 +127,10 @@ const turnStartKeyForEvent = (event: ProviderIntentEvent): string =>
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+const PROVIDER_ACCOUNT_ROUTING_BLOCKED = Symbol("provider-account-routing-blocked");
+const MIN_PROVIDER_USAGE_FRESHNESS = Duration.minutes(10);
+const STARTING_SESSION_RECOVERY_TIMEOUT = Duration.seconds(5);
+const TERMINAL_TURN_STATES = new Set(["completed", "error", "interrupted"]);
 
 function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -261,6 +274,9 @@ const make = Effect.gen(function* () {
     }
   >();
   const stoppingThreadIds = new Set<ThreadId>();
+  const pendingTurnReconciliations = new Set<ThreadId>();
+  const pendingTurnSends = new Set<string>();
+  const admittedPendingTurns = new Set<string>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -269,12 +285,14 @@ const make = Effect.gen(function* () {
       | "provider.turn.interrupt.failed"
       | "provider.approval.respond.failed"
       | "provider.user-input.respond.failed"
+      | "provider.account.route.failed"
       | "provider.session.stop.failed";
     readonly summary: string;
     readonly detail: string;
     readonly turnId: TurnId | null;
     readonly createdAt: string;
     readonly requestId?: string;
+    readonly terminalTurnStart?: true;
   }) =>
     Effect.all({
       commandId: serverCommandId("provider-failure-activity"),
@@ -293,6 +311,7 @@ const make = Effect.gen(function* () {
             payload: {
               detail: input.detail,
               ...(input.requestId ? { requestId: input.requestId } : {}),
+              ...(input.terminalTurnStart === true ? { terminalTurnStart: true } : {}),
             },
             turnId: input.turnId,
             createdAt: input.createdAt,
@@ -564,6 +583,7 @@ const make = Effect.gen(function* () {
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
+      readonly allowIncompatibleUnstartedReplacement?: true;
     },
   ) {
     const thread = yield* resolveThreadShell(threadId);
@@ -603,6 +623,8 @@ const make = Effect.gen(function* () {
         : thread.modelSelection.instanceId;
     const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
     const desiredInstanceId = desiredModelSelection.instanceId;
+    const allowIncompatibleUnstartedReplacement =
+      options?.allowIncompatibleUnstartedReplacement === true && thread.latestTurn === null;
     const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
       Effect.mapError(
         () =>
@@ -682,8 +704,9 @@ const make = Effect.gen(function* () {
         });
       }
       if (
+        !allowIncompatibleUnstartedReplacement &&
         currentInfo.continuationIdentity.continuationKey !==
-        desiredInfo.continuationIdentity.continuationKey
+          desiredInfo.continuationIdentity.continuationKey
       ) {
         return yield* new ProviderAdapterRequestError({
           provider: preferredProvider,
@@ -703,22 +726,24 @@ const make = Effect.gen(function* () {
           .pipe(Effect.forkDetach)
       : Effect.void;
 
-    const startProviderSession = (input?: {
-      readonly resumeCursor?: unknown;
-      readonly provider?: ProviderDriverKind;
-    }) =>
-      providerService
-        .startSession(threadId, {
-          threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          providerInstanceId: desiredInstanceId,
-          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          ...(thread.title ? { title: thread.title } : {}),
-          modelSelection: desiredModelSelection,
-          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-          runtimeMode: desiredRuntimeMode,
-        })
-        .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
+    const startProviderSession = (input?: { readonly resumeCursor?: unknown }) => {
+      const startInput = {
+        threadId,
+        ...(preferredProvider ? { provider: preferredProvider } : {}),
+        providerInstanceId: desiredInstanceId,
+        ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+        ...(thread.title ? { title: thread.title } : {}),
+        modelSelection: desiredModelSelection,
+        ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+        runtimeMode: desiredRuntimeMode,
+      };
+      const start = allowIncompatibleUnstartedReplacement
+        ? providerService.startSession(threadId, startInput, {
+            allowIncompatibleUnstartedReplacement: true,
+          })
+        : providerService.startSession(threadId, startInput);
+      return start.pipe(Effect.tap(() => refreshWorkspaceSnapshot));
+    };
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -781,9 +806,11 @@ const make = Effect.gen(function* () {
         return existingSessionThreadId;
       }
 
-      const resumeCursor = shouldRestartForModelChange
+      const resumeCursor = allowIncompatibleUnstartedReplacement
         ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
+        : shouldRestartForModelChange
+          ? undefined
+          : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -823,13 +850,273 @@ const make = Effect.gen(function* () {
     return startedSession.threadId;
   });
 
+  const maybeRouteProviderAccount = Effect.fn("maybeRouteProviderAccount")(function* (input: {
+    readonly thread: OrchestrationThreadShell;
+    readonly requestedModelSelection?: ModelSelection;
+    readonly messageId: string;
+    readonly createdAt: string;
+    readonly resumed: boolean;
+    readonly skip: boolean;
+  }) {
+    const currentSelection = input.requestedModelSelection ?? input.thread.modelSelection;
+    if (
+      input.resumed ||
+      input.skip ||
+      input.messageId.startsWith("async-answer:") ||
+      input.thread.providerRoutingMode !== "auto" ||
+      input.thread.backgroundLiveness != null ||
+      input.thread.session?.status === "starting" ||
+      input.thread.session?.status === "running" ||
+      currentSelection.instanceId !== input.thread.modelSelection.instanceId
+    ) {
+      return null;
+    }
+    const activeRuntimeSession = (yield* providerService.listSessions()).find(
+      (session) => session.threadId === input.thread.id,
+    );
+    if (
+      activeRuntimeSession?.status === "connecting" ||
+      activeRuntimeSession?.status === "running"
+    ) {
+      return null;
+    }
+
+    const settings = yield* serverSettingsService.getSettings;
+    const resolved = resolveProjectSettings(settings, input.thread.projectId);
+    // Automatic routing is opt-in per project. Environment defaults never form a pool.
+    if (resolved.sources.providerRoutingPolicy !== "project") {
+      return null;
+    }
+
+    const providers = yield* providerRegistry.getProviders;
+    const currentProvider = providers.find(
+      (provider) => provider.instanceId === currentSelection.instanceId,
+    );
+    if (!currentProvider) {
+      return null;
+    }
+    const instanceIds =
+      resolved.settings.providerRoutingPolicy.instanceIdsByDriver[currentProvider.driver] ?? [];
+    const providerHealthRefreshInterval = Duration.toMillis(
+      resolveServerBackgroundActivitySettings(settings).providerHealthRefreshInterval,
+    );
+    const maxUsageAgeMs = Math.max(
+      Duration.toMillis(MIN_PROVIDER_USAGE_FRESHNESS),
+      providerHealthRefreshInterval * 2,
+    );
+    const nowMs = yield* Clock.currentTimeMillis;
+    const usageThresholdPercent = resolved.settings.providerRoutingPolicy.usageThresholdPercent;
+    const routingConfigured =
+      usageThresholdPercent !== null &&
+      Number.isInteger(usageThresholdPercent) &&
+      usageThresholdPercent >= 1 &&
+      usageThresholdPercent <= 100 &&
+      new Set(instanceIds).size >= 2;
+    if (!instanceIds.includes(currentSelection.instanceId) || !routingConfigured) {
+      yield* orchestrationEngine.dispatch({
+        type: "thread.meta.update",
+        commandId: yield* serverCommandId("provider-account-routing-invalid"),
+        threadId: input.thread.id,
+        providerRoutingMode: "fixed",
+      });
+      if (isProviderAccountConfirmedUnusable(currentProvider, { nowMs, maxUsageAgeMs })) {
+        yield* appendProviderFailureActivity({
+          threadId: input.thread.id,
+          kind: "provider.account.route.failed",
+          summary: "Provider account switch failed",
+          detail: "Automatic switching is not fully configured. The message was not sent.",
+          turnId: null,
+          createdAt: input.createdAt,
+          requestId: input.messageId,
+          terminalTurnStart: true,
+        });
+        return PROVIDER_ACCOUNT_ROUTING_BLOCKED;
+      }
+      return null;
+    }
+    const decision = selectAutomaticProviderAccount({
+      routingMode: "auto",
+      instanceIds,
+      usageThresholdPercent,
+      threadHasStarted: input.thread.latestTurn !== null,
+      modelSelection: currentSelection,
+      providers,
+      nowMs,
+      maxUsageAgeMs,
+    });
+    if (decision === null) {
+      if (isProviderAccountConfirmedUnusable(currentProvider, { nowMs, maxUsageAgeMs })) {
+        yield* appendProviderFailureActivity({
+          threadId: input.thread.id,
+          kind: "provider.account.route.failed",
+          summary: "Provider account switch failed",
+          detail: "No eligible provider account is available. The message was not sent.",
+          turnId: null,
+          createdAt: input.createdAt,
+          requestId: input.messageId,
+          terminalTurnStart: true,
+        });
+        return PROVIDER_ACCOUNT_ROUTING_BLOCKED;
+      }
+      return null;
+    }
+
+    const targetRoutingMode = currentProvider.driver === "claudeAgent" ? "fixed" : "auto";
+    let lastStartFailureDetail: string | null = null;
+    let targetSelection: ModelSelection | null = null;
+    for (const targetInstanceId of decision.targetInstanceIds) {
+      const attemptedSelection: ModelSelection = {
+        ...currentSelection,
+        instanceId: ProviderInstanceId.make(targetInstanceId),
+      };
+      const started = yield* ensureSessionForThread(input.thread.id, input.createdAt, {
+        modelSelection: attemptedSelection,
+        pendingTurnStart: true,
+      }).pipe(
+        Effect.as(true),
+        Effect.catchCause((cause) => {
+          if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+          lastStartFailureDetail = formatFailureDetail(cause);
+          return Effect.logWarning("provider account candidate failed to start", {
+            threadId: input.thread.id,
+            targetInstanceId,
+            cause: Cause.pretty(cause),
+          }).pipe(Effect.as(false));
+        }),
+      );
+      if (started) {
+        targetSelection = attemptedSelection;
+        break;
+      }
+    }
+
+    if (targetSelection === null) {
+      const terminalTurnStart = isProviderAccountConfirmedUnusable(currentProvider, {
+        nowMs,
+        maxUsageAgeMs,
+      });
+      yield* appendProviderFailureActivity({
+        threadId: input.thread.id,
+        kind: "provider.account.route.failed",
+        summary: "Provider account switch failed",
+        detail: lastStartFailureDetail ?? "No eligible provider account could be started.",
+        turnId: null,
+        createdAt: input.createdAt,
+        requestId: input.messageId,
+        ...(terminalTurnStart ? { terminalTurnStart: true as const } : {}),
+      });
+      if (terminalTurnStart) {
+        return PROVIDER_ACCOUNT_ROUTING_BLOCKED;
+      }
+      return currentSelection;
+    }
+
+    const targetProvider = providers.find(
+      (provider) => provider.instanceId === targetSelection?.instanceId,
+    );
+
+    return yield* Effect.gen(function* () {
+      yield* orchestrationEngine.dispatch({
+        type: "thread.provider-account.route",
+        commandId: yield* serverCommandId("provider-account-route"),
+        threadId: input.thread.id,
+        previousProviderInstanceId: currentSelection.instanceId,
+        modelSelection: targetSelection,
+        providerRoutingMode: targetRoutingMode,
+        activity: {
+          id: yield* serverEventId(),
+          tone: "info",
+          kind: "provider.account.routed",
+          summary:
+            decision.reason === "initial-placement"
+              ? "Selected provider account"
+              : "Switched provider account",
+          payload: {
+            previousProviderInstanceId: currentSelection.instanceId,
+            providerInstanceId: targetSelection.instanceId,
+            providerName: currentProvider.driver === "claudeAgent" ? "Claude" : "Codex",
+            previousProviderInstanceLabel: currentProvider.displayName,
+            providerInstanceLabel: targetProvider?.displayName ?? targetSelection.instanceId,
+            initialPlacement: decision.reason === "initial-placement",
+            reason: decision.reason,
+          },
+          turnId: null,
+          createdAt: input.createdAt,
+        },
+        createdAt: input.createdAt,
+      });
+      threadModelSelections.set(input.thread.id, targetSelection);
+      return targetSelection;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.gen(function* () {
+              yield* appendProviderFailureActivity({
+                threadId: input.thread.id,
+                kind: "provider.account.route.failed",
+                summary: "Provider account switch failed",
+                detail: formatFailureDetail(cause),
+                turnId: null,
+                createdAt: input.createdAt,
+                requestId: input.messageId,
+              }).pipe(
+                Effect.catchCause((activityCause) =>
+                  Effect.logWarning("failed to record provider account switch failure", {
+                    threadId: input.thread.id,
+                    cause: Cause.pretty(activityCause),
+                    originalCause: Cause.pretty(cause),
+                  }),
+                ),
+              );
+              // A failed durable commit must restore the provider binding before this prompt
+              // can fall back to the previously selected account.
+              const latestThread = yield* resolveThreadShell(input.thread.id);
+              const fallbackSelection = latestThread?.modelSelection ?? currentSelection;
+              yield* ensureSessionForThread(input.thread.id, input.createdAt, {
+                modelSelection: fallbackSelection,
+                pendingTurnStart: true,
+                ...(latestThread?.latestTurn === null
+                  ? { allowIncompatibleUnstartedReplacement: true as const }
+                  : {}),
+              });
+              threadModelSelections.set(input.thread.id, fallbackSelection);
+              return fallbackSelection;
+            }),
+      ),
+    );
+  });
+
+  const fixClaudeRoutingAfterInitialPlacement = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly modelSelection: ModelSelection;
+  }) {
+    const thread = yield* resolveThreadShell(input.threadId);
+    if (
+      thread?.providerRoutingMode !== "auto" ||
+      thread.latestTurn !== null ||
+      (yield* providerService.getInstanceInfo(input.modelSelection.instanceId)).driverKind !==
+        "claudeAgent"
+    ) {
+      return;
+    }
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: yield* serverCommandId("claude-initial-account-placement"),
+      threadId: input.threadId,
+      providerRoutingMode: "fixed",
+    });
+  });
+
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly messageId: MessageId;
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
     readonly createdAt: string;
+    readonly reconcileDurableSelection?: boolean;
   }) {
     const thread = yield* resolveThreadShell(input.threadId);
     if (!thread) {
@@ -837,12 +1124,18 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
+    const sessionModelSelection =
+      input.modelSelection ??
+      (input.reconcileDurableSelection === true ? thread.modelSelection : undefined);
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
-      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      ...(sessionModelSelection !== undefined ? { modelSelection: sessionModelSelection } : {}),
       pendingTurnStart: true,
+      ...(input.reconcileDurableSelection === true && thread.latestTurn === null
+        ? { allowIncompatibleUnstartedReplacement: true as const }
+        : {}),
     });
-    if (input.modelSelection !== undefined) {
-      threadModelSelections.set(input.threadId, input.modelSelection);
+    if (sessionModelSelection !== undefined) {
+      threadModelSelections.set(input.threadId, sessionModelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const normalizedAttachments = input.attachments ?? [];
@@ -876,11 +1169,52 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
+      requestId: input.messageId,
       ...(normalizedInput ? { input: normalizedInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
     };
+  });
+
+  const associatePendingTurnAdmission = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+    readonly turnId: TurnId;
+    readonly settled: boolean;
+  }) {
+    const getPendingTurnStart = projectionSnapshotQuery.getPendingTurnStartByThreadId;
+    if (getPendingTurnStart === undefined) return;
+    const pending = yield* getPendingTurnStart(input.threadId);
+    if (Option.isNone(pending) || pending.value.messageId !== input.messageId) return;
+    const thread = yield* resolveThreadShell(input.threadId);
+    if (!thread?.session) return;
+    const previousSession = thread.session;
+    const admittedAt = DateTime.formatIso(yield* DateTime.now);
+    yield* setThreadSession({
+      threadId: input.threadId,
+      session: {
+        ...previousSession,
+        status: "running",
+        activeTurnId: input.turnId,
+        lastError: null,
+        updatedAt: admittedAt,
+      },
+      createdAt: admittedAt,
+    });
+    if (input.settled || previousSession.status === "ready") {
+      yield* setThreadSession({
+        threadId: input.threadId,
+        session: {
+          ...previousSession,
+          status: "ready",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: admittedAt,
+        },
+        createdAt: admittedAt,
+      });
+    }
   });
 
   const maybeGenerateAndRenameWorktreeBranchForFirstTurn = Effect.fn(
@@ -1203,12 +1537,13 @@ const make = Effect.gen(function* () {
 
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     receivedEvent: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+    options?: { readonly recovery?: true },
   ) {
     const resumed =
       receivedEvent.commandId !== null ? resumedTurnStarts.get(receivedEvent.commandId) : undefined;
     const event = resumed ? { ...receivedEvent, payload: resumed.event.payload } : receivedEvent;
     const key = turnStartKeyForEvent(event);
-    if (yield* hasHandledTurnStartRecently(key)) {
+    if (options?.recovery !== true && (yield* hasHandledTurnStartRecently(key))) {
       return;
     }
 
@@ -1479,8 +1814,22 @@ const make = Effect.gen(function* () {
       turnsAfterCompaction.set(event.payload.threadId, queued);
       return;
     }
+    const routedModelSelection = yield* maybeRouteProviderAccount({
+      thread,
+      ...(event.payload.modelSelection !== undefined
+        ? { requestedModelSelection: event.payload.modelSelection }
+        : {}),
+      messageId: event.payload.messageId,
+      createdAt: event.payload.createdAt,
+      resumed: resumed !== undefined,
+      skip: event.payload.skipProviderAccountRouting === true,
+    });
+    if (routedModelSelection === PROVIDER_ACCOUNT_ROUTING_BLOCKED) {
+      return;
+    }
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      messageId: event.payload.messageId,
       messageText:
         event.payload.providerInput ??
         projectComposerContextForProvider({
@@ -1488,11 +1837,14 @@ const make = Effect.gen(function* () {
           records: message.context?.records ?? [],
         }),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
+      ...(routedModelSelection !== null
+        ? { modelSelection: routedModelSelection }
+        : event.payload.modelSelection !== undefined
+          ? { modelSelection: event.payload.modelSelection }
+          : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
+      reconcileDurableSelection: options?.recovery === true,
     }).pipe(
       Effect.map(Option.some),
       Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
@@ -1502,9 +1854,38 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const send = providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
+    const placedModelSelection =
+      routedModelSelection ?? event.payload.modelSelection ?? thread.modelSelection;
+    const placementPersisted = yield* fixClaudeRoutingAfterInitialPlacement({
+      threadId: event.payload.threadId,
+      modelSelection: placedModelSelection,
+    }).pipe(
+      Effect.as(true),
+      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(false))),
+    );
+    if (!placementPersisted) {
+      return;
+    }
+
+    const pendingSendKey = `${event.payload.threadId}:${event.payload.messageId}`;
+    if (pendingTurnSends.has(pendingSendKey) || admittedPendingTurns.has(pendingSendKey)) {
+      return;
+    }
+    pendingTurnSends.add(pendingSendKey);
+    const send = providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap((turn) =>
+        associatePendingTurnAdmission({
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          turnId: turn.turnId,
+          settled: false,
+        }),
+      ),
+      Effect.tap(() => Effect.sync(() => void admittedPendingTurns.add(pendingSendKey))),
+      Effect.asVoid,
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.ensuring(Effect.sync(() => void pendingTurnSends.delete(pendingSendKey))),
+    );
     // The forked send settles `sent` from here on, so drop the entry the post-processing hook uses.
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
     yield* send.pipe(
@@ -1512,6 +1893,177 @@ const make = Effect.gen(function* () {
       Effect.forkScoped,
     );
   });
+
+  const findPersistedTurnStart = Effect.fn("findPersistedTurnStart")(function* (pending: {
+    readonly threadId: ThreadId;
+    readonly messageId: string;
+  }) {
+    const head = yield* orchestrationEngine.latestSequence;
+    return yield* orchestrationEngine
+      .readThreadEvents({
+        threadId: pending.threadId,
+        fromSequenceExclusive: 0,
+        toSequenceInclusive: head,
+        limit: Number.MAX_SAFE_INTEGER,
+      })
+      .pipe(
+        Stream.filter(
+          (event): event is Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }> =>
+            event.type === "thread.turn-start-requested" &&
+            event.payload.messageId === pending.messageId,
+        ),
+        Stream.runLast,
+      );
+  });
+
+  const reconcilePendingTurn = Effect.fn("reconcilePendingTurn")(function* (threadId: ThreadId) {
+    if (pendingTurnReconciliations.has(threadId)) return;
+    pendingTurnReconciliations.add(threadId);
+    yield* Effect.gen(function* () {
+      const thread = yield* resolveThreadShell(threadId);
+      if (
+        !thread?.session ||
+        (thread.session.status !== "starting" && thread.session.status !== "ready")
+      ) {
+        return;
+      }
+      const getPendingTurnStart = projectionSnapshotQuery.getPendingTurnStartByThreadId;
+      const getTurnState = projectionSnapshotQuery.getTurnStateById;
+      if (getPendingTurnStart === undefined || getTurnState === undefined) return;
+      const pending = yield* getPendingTurnStart(threadId);
+      if (Option.isNone(pending)) {
+        yield* clearAdmittedPendingTurns(threadId);
+        return;
+      }
+      const pendingSendKey = `${threadId}:${pending.value.messageId}`;
+      if (pendingTurnSends.has(pendingSendKey) || admittedPendingTurns.has(pendingSendKey)) return;
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      const recoveryAnchorMs = Math.max(
+        DateTime.toEpochMillis(DateTime.makeUnsafe(pending.value.requestedAt)),
+        DateTime.toEpochMillis(DateTime.makeUnsafe(thread.session.updatedAt)),
+      );
+      if (nowMs - recoveryAnchorMs < Duration.toMillis(STARTING_SESSION_RECOVERY_TIMEOUT)) return;
+
+      const persistedAdmission = yield* (
+        providerService.getPersistedTurnAdmission?.(threadId) ?? Effect.succeed(null)
+      );
+      if (persistedAdmission?.messageId === pending.value.messageId) {
+        const providerStillRunsAdmission = (yield* providerService.listSessions()).some(
+          (session) =>
+            session.threadId === threadId && session.activeTurnId === persistedAdmission.turnId,
+        );
+        yield* associatePendingTurnAdmission({
+          threadId,
+          messageId: pending.value.messageId,
+          turnId: persistedAdmission.turnId,
+          settled: !persistedAdmission.active && !providerStillRunsAdmission,
+        });
+        return;
+      }
+
+      const liveSession = (yield* providerService.listSessions()).find(
+        (session) => session.threadId === threadId,
+      );
+      if (liveSession?.activeTurnId != null) {
+        const turnState = yield* getTurnState(threadId, liveSession.activeTurnId);
+        if (Option.isNone(turnState) || !TERMINAL_TURN_STATES.has(turnState.value)) return;
+        // The adapter still reports a turn the durable projection has already
+        // settled. Restart it before replaying the pending request.
+        yield* providerService.stopSession({ threadId });
+      }
+
+      const reconcilePersistedActiveTurn = providerService.reconcilePersistedActiveTurn;
+      let persistedRuntime = yield* (
+        reconcilePersistedActiveTurn?.({
+          threadId,
+          terminalTurnIds: new Set(),
+        }) ?? Effect.succeed({ status: "idle" as const })
+      );
+      if (persistedRuntime.status === "active") {
+        const turnState = yield* getTurnState(threadId, persistedRuntime.turnId);
+        if (Option.isNone(turnState) || !TERMINAL_TURN_STATES.has(turnState.value)) return;
+        persistedRuntime = yield* (
+          reconcilePersistedActiveTurn?.({
+            threadId,
+            terminalTurnIds: new Set([persistedRuntime.turnId]),
+          }) ?? Effect.succeed({ status: "idle" as const })
+        );
+        if (persistedRuntime.status === "active") return;
+      }
+
+      const latestPending = yield* getPendingTurnStart(threadId);
+      if (
+        Option.isNone(latestPending) ||
+        latestPending.value.messageId !== pending.value.messageId
+      ) {
+        return;
+      }
+      const originalEvent = yield* findPersistedTurnStart({
+        threadId,
+        messageId: pending.value.messageId,
+      });
+      if (Option.isNone(originalEvent)) return;
+      const latestThread = yield* resolveThreadShell(threadId);
+      if (!latestThread) return;
+      // Recheck the adapter immediately before replay. A reconnect can restore
+      // an admitted turn while the durable projection queries above are in flight.
+      if (
+        (yield* providerService.listSessions()).some(
+          (session) => session.threadId === threadId && session.activeTurnId != null,
+        )
+      ) {
+        return;
+      }
+      const recoveredEvent =
+        originalEvent.value.payload.modelSelection !== undefined &&
+        originalEvent.value.payload.modelSelection.instanceId !==
+          latestThread.modelSelection.instanceId
+          ? {
+              ...originalEvent.value,
+              payload: {
+                ...originalEvent.value.payload,
+                modelSelection: latestThread.modelSelection,
+                skipProviderAccountRouting: true as const,
+              },
+            }
+          : originalEvent.value;
+      yield* processTurnStartRequested(recoveredEvent, { recovery: true });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("pending provider turn reconciliation failed", {
+          threadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.ensuring(Effect.sync(() => void pendingTurnReconciliations.delete(threadId))),
+    );
+  });
+
+  const pendingTurnReconciliationWorker = yield* makeDrainableWorker(reconcilePendingTurn);
+  const scheduledPendingTurnReconciliations = new Set<ThreadId>();
+  const clearAdmittedPendingTurns = (threadId: ThreadId) =>
+    Effect.sync(() => {
+      const prefix = `${threadId}:`;
+      for (const key of admittedPendingTurns) {
+        if (key.startsWith(prefix)) admittedPendingTurns.delete(key);
+      }
+    });
+  const schedulePendingTurnReconciliation = (
+    threadId: ThreadId,
+    delay = STARTING_SESSION_RECOVERY_TIMEOUT,
+  ) => {
+    if (scheduledPendingTurnReconciliations.has(threadId)) return Effect.void;
+    scheduledPendingTurnReconciliations.add(threadId);
+    return forkParked(
+      Effect.sleep(delay).pipe(
+        Effect.andThen(pendingTurnReconciliationWorker.enqueue(threadId)),
+        Effect.ensuring(
+          Effect.sync(() => void scheduledPendingTurnReconciliations.delete(threadId)),
+        ),
+      ),
+    );
+  };
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>,
@@ -1940,6 +2492,25 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
+  const reconcilePendingTurns: ProviderCommandReactorShape["reconcilePendingTurns"] = (threadId) =>
+    (threadId !== undefined
+      ? pendingTurnReconciliationWorker.enqueue(threadId)
+      : (projectionSnapshotQuery.listPendingTurnStarts?.() ?? Effect.succeed([])).pipe(
+          Effect.flatMap((pendingTurns) =>
+            Effect.forEach(
+              pendingTurns,
+              (pending) => pendingTurnReconciliationWorker.enqueue(pending.threadId),
+              { concurrency: 1, discard: true },
+            ),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to find pending provider turns for reconciliation", {
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        )
+    ).pipe(Effect.andThen(pendingTurnReconciliationWorker.drain));
+
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const pendingTitles = yield* findPendingThreadTitles().pipe(
       Effect.catchCause((cause) => {
@@ -1966,13 +2537,54 @@ const make = Effect.gen(function* () {
         event.type === "thread.session-stop-requested" ||
         event.type === "thread.settled"
       ) {
-        return yield* worker.enqueue(event);
+        yield* worker.enqueue(event);
+      }
+      if (event.type === "thread.turn-start-requested") {
+        yield* schedulePendingTurnReconciliation(event.payload.threadId);
+      } else if (
+        event.type === "thread.meta-updated" &&
+        (event.payload.modelSelection !== undefined ||
+          event.payload.providerRoutingMode !== undefined)
+      ) {
+        yield* schedulePendingTurnReconciliation(event.payload.threadId);
       }
     });
 
     // Subscribe before returning, even while event handling waits for server activation.
     const domainEvents = yield* orchestrationEngine.subscribeDomainEvents;
     yield* forkParked(Stream.runForEach(domainEvents, processEvent));
+    yield* forkParked(
+      Stream.runForEach(providerService.streamEvents, (event) => {
+        const reconcile =
+          event.type === "session.started" ||
+          event.type === "session.state.changed" ||
+          event.type === "thread.started" ||
+          event.type === "turn.started" ||
+          event.type === "turn.completed" ||
+          event.type === "turn.aborted" ||
+          event.type === "session.exited"
+            ? schedulePendingTurnReconciliation(event.threadId)
+            : Effect.void;
+        return reconcile;
+      }),
+    );
+
+    // A standby server must not resume work while the incumbent is still live.
+    // Startup reconciliation is parked at the same activation boundary as the
+    // event streams; orphan cleanup separately preserves durable pending starts.
+    yield* forkParked(
+      Effect.gen(function* () {
+        yield* reconcilePendingTurns();
+        const pendingTurns = yield* (
+          projectionSnapshotQuery.listPendingTurnStarts?.() ?? Effect.succeed([])
+        ).pipe(Effect.orElseSucceed(() => []));
+        yield* Effect.forEach(
+          pendingTurns,
+          (pending) => schedulePendingTurnReconciliation(pending.threadId),
+          { concurrency: 1, discard: true },
+        );
+      }),
+    );
 
     // Earlier events do not replay. Clear interrupted requests by their captured
     // IDs, then schedule persisted refinements after subscribing to their events.
@@ -2007,8 +2619,10 @@ const make = Effect.gen(function* () {
 
   return {
     start,
+    reconcilePendingTurns,
     drain: Effect.gen(function* () {
       yield* worker.drain;
+      yield* pendingTurnReconciliationWorker.drain;
       yield* threadTitleRegenerationWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;

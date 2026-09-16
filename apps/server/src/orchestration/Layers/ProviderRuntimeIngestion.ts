@@ -1619,6 +1619,19 @@ const make = Effect.gen(function* () {
         return;
       }
 
+      if (event.type === "session.exited" && event.providerInstanceId !== undefined) {
+        // The projection can briefly still name the old account while its
+        // stop event arrives after the replacement binding commits.
+        if (
+          !(yield* providerService.isSessionEventAuthoritative(
+            event.threadId,
+            event.providerInstanceId,
+          ))
+        ) {
+          return;
+        }
+      }
+
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
@@ -1643,6 +1656,16 @@ const make = Effect.gen(function* () {
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
       const missingTurnForActiveTurn = activeTurnId !== null && eventTurnId === undefined;
+      const conflictsWithBoundProviderInstance =
+        thread.session?.providerInstanceId !== undefined &&
+        event.providerInstanceId !== undefined &&
+        thread.session.providerInstanceId !== event.providerInstanceId;
+
+      // Once a provider instance is bound, late events from the replaced
+      // account must not mutate the new session, messages, or activities.
+      if (conflictsWithBoundProviderInstance) {
+        return;
+      }
 
       // A turn.started that conflicts with the active turn is legitimate when
       // the server itself has a turn start pending for this thread AND the
@@ -2052,7 +2075,7 @@ const make = Effect.gen(function* () {
         }
       }
 
-      if (event.type === "session.exited") {
+      if (event.type === "session.exited" && shouldApplyThreadLifecycle) {
         yield* clearTurnStateForSession(thread.id);
       }
 
@@ -2154,8 +2177,9 @@ const make = Effect.gen(function* () {
       // cleared on settle so a finished plan never lingers as stale UI.
       // Events carrying a turn id that conflicts with the active turn are
       // stale (superseded turn) and must neither overwrite nor clear the
-      // active turn's progress; session.exited always clears.
-      if (event.type === "session.exited") {
+      // active turn's progress; an exit from the currently bound instance
+      // clears regardless of turn id.
+      if (event.type === "session.exited" && shouldApplyThreadLifecycle) {
         threadPlanProgress.clearThreadPlanProgress(thread.id);
       } else if (!conflictsWithActiveTurn) {
         if (event.type === "turn.plan.updated") {
@@ -2196,7 +2220,9 @@ const make = Effect.gen(function* () {
           break;
         }
         case "session.exited":
-          threadBackgroundLiveness.clearThreadLiveness(thread.id);
+          if (shouldApplyThreadLifecycle) {
+            threadBackgroundLiveness.clearThreadLiveness(thread.id);
+          }
           break;
         default:
           break;

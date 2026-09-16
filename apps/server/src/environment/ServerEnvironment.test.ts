@@ -181,6 +181,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.guardedSessionStopProviders).toEqual([
         ProviderDriverKind.make("codex"),
       ]);
+      expect(second.capabilities.providerAccountRouting).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
   );

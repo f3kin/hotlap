@@ -14,6 +14,16 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("gates provider account routing under server version skew", () => {
+    expect(decodeDescriptor(descriptor).capabilities.providerAccountRouting).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, providerAccountRouting: true },
+      }).capabilities.providerAccountRouting,
+    ).toBe(true);
+  });
+
   it("gates custom prompts under server version skew", () => {
     expect(decodeDescriptor(descriptor).capabilities.customPrompts).toBeUndefined();
     expect(

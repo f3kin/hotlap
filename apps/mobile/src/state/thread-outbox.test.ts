@@ -84,8 +84,10 @@ import {
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
+  resolveQueuedThreadMetadataUpdate,
   resolveQueuedThreadSettings,
   resolveThreadModelSelection,
+  shouldSkipQueuedProviderAccountRouting,
   shouldRetryThreadOutboxDelivery,
   threadOutboxRetryDelayMs,
   type QueuedThreadMessage,
@@ -116,10 +118,26 @@ function queuedMessage(input: {
 }
 
 describe("thread outbox", () => {
+  it("only allows automatic routing for prompts submitted for immediate online delivery", () => {
+    const queued = queuedMessage({
+      messageId: "offline-message",
+      createdAt: "2026-09-06T12:00:00.000Z",
+    });
+    expect(shouldSkipQueuedProviderAccountRouting(queued)).toBe(true);
+    expect(
+      shouldSkipQueuedProviderAccountRouting({
+        ...queued,
+        allowProviderAccountRouting: true,
+      }),
+    ).toBe(false);
+  });
+
   it("retains structured context through a persisted offline queue round trip", () => {
     const message: QueuedThreadMessage = {
       ...queuedMessage({ messageId: "context-message", createdAt: "2026-09-06T12:00:00.000Z" }),
       text: "[Build](t3-context://v1/terminal/build-output)",
+      providerRoutingMode: "auto",
+      allowProviderAccountRouting: true,
       context: {
         version: 1,
         records: [
@@ -454,6 +472,48 @@ describe("thread outbox", () => {
         { providerSelectionUnlocked: false },
       ).modelSelection,
     ).toEqual(codex);
+  });
+
+  it("syncs a queued routing-mode change even when the model is unchanged", () => {
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5.4",
+    };
+    const message = {
+      ...queuedMessage({ messageId: "mode-only", createdAt: "2026-09-15T10:00:00.000Z" }),
+      modelSelection,
+      providerRoutingMode: "auto",
+    } satisfies QueuedThreadMessage;
+
+    expect(
+      resolveQueuedThreadMetadataUpdate(message, {
+        modelSelection,
+        providerRoutingMode: "fixed",
+      }),
+    ).toEqual({ providerRoutingMode: "auto" });
+  });
+
+  it("syncs queued model and routing changes in one metadata update", () => {
+    const currentModelSelection = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5.4",
+    };
+    const nextModelSelection = {
+      instanceId: ProviderInstanceId.make("codex-personal"),
+      model: "gpt-5.4",
+    };
+    const message = {
+      ...queuedMessage({ messageId: "combined", createdAt: "2026-09-15T10:00:00.000Z" }),
+      modelSelection: nextModelSelection,
+      providerRoutingMode: "fixed",
+    } satisfies QueuedThreadMessage;
+
+    expect(
+      resolveQueuedThreadMetadataUpdate(message, {
+        modelSelection: currentModelSelection,
+        providerRoutingMode: "auto",
+      }),
+    ).toEqual({ modelSelection: nextModelSelection, providerRoutingMode: "fixed" });
   });
 
   it("normalizes queued plan mode against the queued provider, not the current thread", () => {

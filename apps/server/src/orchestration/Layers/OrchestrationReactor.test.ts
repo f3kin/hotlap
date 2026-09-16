@@ -28,6 +28,7 @@ describe("OrchestrationReactor", () => {
 
   it("starts every orchestration reactor", async () => {
     const started: string[] = [];
+    let pendingTurnReconciliations = 0;
 
     runtime = ManagedRuntime.make(
       Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
@@ -46,6 +47,10 @@ describe("OrchestrationReactor", () => {
               started.push("provider-command-reactor");
               return Effect.void;
             },
+            reconcilePendingTurns: () =>
+              Effect.sync(() => {
+                pendingTurnReconciliations += 1;
+              }),
             drain: Effect.void,
           }),
         ),
@@ -121,6 +126,8 @@ describe("OrchestrationReactor", () => {
       "pull-request-sync-reactor",
       "agent-awareness-relay",
     ]);
+    await runtime!.runPromise(reactor.reconcilePendingTurns());
+    expect(pendingTurnReconciliations).toBe(1);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));
   });

@@ -20,6 +20,7 @@ import type {
   OrchestrationThreadShell,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderRoutingMode,
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
@@ -167,6 +168,7 @@ export interface ThreadDetailScreenProps {
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateThreadInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly onUpdateThreadProviderRoutingMode: (mode: ProviderRoutingMode) => void;
   readonly onRespondToApproval: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -1068,6 +1070,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     onUpdateModelSelection={props.onUpdateThreadModelSelection}
                     onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
                     onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
+                    onUpdateProviderRoutingMode={props.onUpdateThreadProviderRoutingMode}
+                    providerRoutingMutable={props.creationState === null}
                     onExpandedChange={setComposerExpanded}
                     onEditorFocusChange={handleComposerFocusChange}
                   />

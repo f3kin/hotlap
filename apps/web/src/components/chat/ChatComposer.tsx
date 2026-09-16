@@ -8,6 +8,10 @@ import { importPastedComposerText, readPastedComposerContext } from "../composer
 import { elementContextToPreviewAnnotation } from "../../lib/elementContext";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
+  canEnableProviderRoutingAuto,
+  deriveProviderRoutingOptions,
+} from "../settings/ProviderRoutingSettings.logic";
+import {
   questionAttachmentDraftId,
   countQuestionAttachments,
   useQuestionAttachmentPreparation,
@@ -25,6 +29,8 @@ import type {
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
+  ProviderRoutingMode,
+  ProviderRoutingPolicy,
   ResolvedKeybindingsConfig,
   RuntimeMode,
   ScopedThreadRef,
@@ -82,6 +88,7 @@ import {
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
+  resolveProviderRoutingAccountInstanceId,
   threadShellHasStarted,
 } from "../ChatView.logic";
 import {
@@ -241,6 +248,7 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { ProviderRoutingModeControl } from "./ProviderRoutingModeControl";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -1356,6 +1364,9 @@ export interface ChatComposerProps {
   providerCatalogKnown: boolean;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
+  providerRoutingMode: ProviderRoutingMode;
+  providerRoutingSupported: boolean;
+  providerRoutingPolicy: ProviderRoutingPolicy | null;
 
   // Context window
   activeContextWindow: ContextWindowSnapshot | null;
@@ -1417,6 +1428,7 @@ export interface ChatComposerProps {
   ) => void;
 
   onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
+  onProviderRoutingModeChange: (mode: ProviderRoutingMode) => void;
   onOpenProviderSetup: (instanceId: ProviderInstanceId) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
   toggleInteractionMode: () => void;
@@ -1479,6 +1491,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerCatalogKnown,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
+    providerRoutingMode,
+    providerRoutingSupported,
+    providerRoutingPolicy,
     activeContextWindow,
     compactThreadUnavailable,
     compactDisabled,
@@ -1517,6 +1532,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
     onProviderModelSelect,
+    onProviderRoutingModeChange,
     onOpenProviderSetup,
     getModelDisabledReason,
     toggleInteractionMode,
@@ -1887,6 +1903,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
+  const routedAccountInstanceId = resolveProviderRoutingAccountInstanceId({
+    threadStarted: threadShellHasStarted(props.activeThreadShell),
+    composerInstanceId: selectedProviderEntry?.instanceId ?? null,
+    routedInstanceId: activeThreadModelSelection?.instanceId ?? null,
+  });
+  const routedAccountEntry = providerInstanceEntries.find(
+    (entry) => entry.instanceId === routedAccountInstanceId,
+  );
+  const showProviderRoutingMode =
+    providerRoutingSupported &&
+    (routedAccountEntry?.driverKind === "codex" ||
+      routedAccountEntry?.driverKind === "claudeAgent");
+  const providerRoutingAutoEnabled =
+    providerRoutingPolicy !== null &&
+    canEnableProviderRoutingAuto(
+      deriveProviderRoutingOptions([providerStatuses]),
+      providerRoutingPolicy.instanceIdsByDriver,
+      providerRoutingPolicy.usageThresholdPercent,
+      routedAccountEntry,
+    );
   const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
   const selectedProviderSkills = selectedProviderStatus
     ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
@@ -4966,6 +5002,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         onInstanceModelChange={onProviderModelSelect}
         onOpenProviderSetup={onOpenProviderSetup}
       />
+
+      {showProviderRoutingMode && routedAccountEntry ? (
+        <>
+          <ComposerControlSeparator size={composerControlsInStrip ? "xs" : "sm"} />
+          <ProviderRoutingModeControl
+            mode={providerRoutingMode}
+            accountLabel={routedAccountEntry.displayName}
+            autoEnabled={providerRoutingAutoEnabled}
+            size={composerControlsInStrip ? "xs" : "sm"}
+            disabled={providerCatalogPending}
+            onChange={onProviderRoutingModeChange}
+          />
+        </>
+      ) : null}
 
       {composerControlsCompact ? (
         <CompactComposerControlsMenu
