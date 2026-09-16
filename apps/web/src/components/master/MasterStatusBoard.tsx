@@ -111,7 +111,7 @@ export function MasterStatusBoard(props: { readonly activeThread: MasterBoardThr
           <p className="px-2 py-1 text-xs text-muted-foreground">No cards linked to this Master.</p>
         )}
         {board.peerMasters.length > 0 ? (
-          <div className="mt-1 flex items-center gap-1 border-t border-border/50 px-1 pt-1.5">
+          <div className="mt-1 flex flex-wrap items-center gap-1 border-t border-border/50 px-1 pt-1.5">
             <span className="px-1 text-[11px] text-muted-foreground">Other Masters</span>
             {board.peerMasters.map((thread) => (
               <Button
