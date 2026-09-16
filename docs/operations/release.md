@@ -8,11 +8,12 @@ The [Release workflow](../../.github/workflows/release.yml) builds npm, desktop,
 bundled web, and standalone CLI archives from one resolved commit.
 
 - Manual `channel=stable` promotes the latest published nightly's commit, not
-  the current `main`. Its version defaults to the version that nightly previewed;
-  the `version` input can override it.
+  the current `main`, using the stable version that nightly previewed.
 - Pushing a `vX.Y.Z` tag releases that exact commit.
 - Nightly checks run daily at 15:08 UTC. Automatic nightlies require new commits
   and a six-hour publication gap; manual `channel=nightly` bypasses those checks.
+  New nightlies preview the patch after the highest published stable version,
+  so they are newer than the stable channel they follow.
 - Manual `channel=preview` exercises the release pipeline for a maintainer test
   build. It publishes a real prerelease and npm `preview` dist-tag, but no desktop
   updater metadata. Stable and nightly users are never offered preview updates.

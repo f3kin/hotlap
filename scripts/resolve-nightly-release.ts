@@ -25,6 +25,7 @@ const RunNumberSchema = Schema.FiniteFromString.check(
   Schema.isGreaterThanOrEqualTo(1),
 );
 const ShaSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{7,40}$/i));
+const StableVersionSchema = Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+$/));
 const DesktopPackageJsonSchema = Schema.Struct({
   version: Schema.NonEmptyString,
 });
@@ -211,6 +212,11 @@ const command = Command.make(
       Flag.withSchema(ShaSchema),
       Flag.withDescription("Commit sha for the nightly build."),
     ),
+    baseVersion: Flag.string("base-version").pipe(
+      Flag.withSchema(StableVersionSchema),
+      Flag.withDescription("Stable version line this prerelease previews."),
+      Flag.optional,
+    ),
     channel: Flag.choice("channel", PrereleaseChannel.literals).pipe(
       Flag.withDescription("Prerelease channel whose identifier the version carries."),
       Flag.withDefault("nightly" as const),
@@ -224,8 +230,11 @@ const command = Command.make(
       Flag.optional,
     ),
   },
-  ({ date, runNumber, sha, channel, githubOutput, root }) =>
-    readDesktopBaseVersion(Option.getOrUndefined(root)).pipe(
+  ({ date, runNumber, sha, baseVersion, channel, githubOutput, root }) =>
+    Option.match(baseVersion, {
+      onNone: () => readDesktopBaseVersion(Option.getOrUndefined(root)),
+      onSome: (version) => Effect.succeed(version),
+    }).pipe(
       Effect.map((baseVersion) =>
         resolveNightlyReleaseMetadata(baseVersion, date, runNumber, sha, channel),
       ),

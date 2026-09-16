@@ -3,6 +3,7 @@ const test = require("node:test");
 const {
   assertCommitOnDefaultBranch,
   assertReleaseSource,
+  resolveNextNightlyVersion,
   shouldReleaseNightly,
 } = require("./check-nightly-release.cjs");
 
@@ -111,6 +112,42 @@ function fixture({ releases = [nightly(7)], comparisonStatus = "ahead" } = {}) {
     },
   };
 }
+
+test("puts nightly on the release after the newest stable version", async () => {
+  const { options } = fixture({
+    releases: [
+      nightly(1, { tag_name: "v0.0.41-nightly.20260915.29" }),
+      nightly(2, { tag_name: "v0.0.49", prerelease: false }),
+    ],
+  });
+
+  assert.equal(await resolveNextNightlyVersion(options), "0.0.50");
+});
+
+test("never moves nightly back from a higher existing release line", async () => {
+  const { options } = fixture({
+    releases: [
+      nightly(1, { tag_name: "v0.0.60-nightly.20260915.29" }),
+      nightly(2, { tag_name: "v0.0.49", prerelease: false }),
+    ],
+  });
+
+  assert.equal(await resolveNextNightlyVersion(options), "0.0.60");
+});
+
+test("continues an existing nightly line before the first stable release", async () => {
+  const { options } = fixture({
+    releases: [nightly(1, { tag_name: "v0.0.41-nightly.20260915.29" })],
+  });
+
+  assert.equal(await resolveNextNightlyVersion(options), "0.0.41");
+});
+
+test("falls back to the desktop package version before any release exists", async () => {
+  const { options } = fixture({ releases: [] });
+
+  assert.equal(await resolveNextNightlyVersion(options), undefined);
+});
 
 test("releases the first nightly when no nightly is published", async () => {
   const { options } = fixture({

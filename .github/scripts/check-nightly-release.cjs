@@ -39,6 +39,50 @@ async function assertReleaseSource({ github, context, releaseChannel }) {
 }
 
 const isNightlyTag = (tag) => /^v.*-nightly\./.test(tag) || tag.startsWith("nightly-v");
+const stableVersionFromTag = (tag) => {
+  const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+  return match ? match.slice(1).map(Number) : undefined;
+};
+const nightlyVersionFromTag = (tag) => {
+  const match = /^(?:nightly-)?v(\d+)\.(\d+)\.(\d+)-nightly\./.exec(tag);
+  return match ? match.slice(1).map(Number) : undefined;
+};
+
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    const difference = left[index] - right[index];
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+function highestPublishedVersion(releases, parseTag) {
+  return releases
+    .filter((release) => !release.draft && release.published_at)
+    .map((release) => parseTag(release.tag_name))
+    .filter(Boolean)
+    .sort((left, right) => compareVersions(right, left))[0];
+}
+
+async function resolveNextNightlyVersion({ github, context }) {
+  const releases = await github.paginate(github.rest.repos.listReleases, {
+    ...context.repo,
+    per_page: 100,
+  });
+  const latestStable = highestPublishedVersion(releases, stableVersionFromTag);
+  const latestNightly = highestPublishedVersion(releases, nightlyVersionFromTag);
+  const nextStable = latestStable
+    ? [latestStable[0], latestStable[1], latestStable[2] + 1]
+    : undefined;
+  const target =
+    latestNightly && (!nextStable || compareVersions(latestNightly, nextStable) > 0)
+      ? latestNightly
+      : nextStable;
+  if (!target) return undefined;
+
+  const [major, minor, patch] = target;
+  return `${major}.${minor}.${patch}`;
+}
 
 // Newest published nightly by publication time, or undefined when none exists.
 async function findLatestNightly({ github, context }) {
@@ -105,6 +149,7 @@ async function resolveLatestNightlyCommit({ github, context, core }) {
 module.exports = {
   assertCommitOnDefaultBranch,
   assertReleaseSource,
+  resolveNextNightlyVersion,
   shouldReleaseNightly,
   resolveLatestNightlyCommit,
 };
