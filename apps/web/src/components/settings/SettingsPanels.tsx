@@ -2318,32 +2318,6 @@ export function GeneralSettingsPanel() {
       ) : null}
 
       <SettingsSection id="behavior" title="Behavior">
-        <SettingsRow
-          {...searchableSetting("master-status-board")}
-          description="Show owned Card threads and other Masters above Master chats."
-          resetAction={
-            settings.masterStatusBoardEnabled !==
-            DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled ? (
-              <SettingResetButton
-                label="Master status board"
-                onClick={() =>
-                  updateSettings({
-                    masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.masterStatusBoardEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ masterStatusBoardEnabled: Boolean(checked) })
-              }
-              aria-label="Master status board"
-            />
-          }
-        />
         <NotificationSettings />
         <SettingsRow
           {...searchableSetting("in-app-notifications")}
@@ -2899,6 +2873,32 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection id="projects-and-threads" title="Projects & threads">
+        <SettingsRow
+          {...searchableSetting("master-status-board")}
+          description="Show owned Card threads and other Masters above Master chats."
+          resetAction={
+            settings.masterStatusBoardEnabled !==
+            DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled ? (
+              <SettingResetButton
+                label="Master status board"
+                onClick={() =>
+                  updateSettings({
+                    masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.masterStatusBoardEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ masterStatusBoardEnabled: Boolean(checked) })
+              }
+              aria-label="Master status board"
+            />
+          }
+        />
         <SettingsRow
           serverScoped
           settingKeys={["newWorktreesStartFromOrigin"]}
