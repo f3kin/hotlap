@@ -5,18 +5,23 @@ to keep a terminal open.
 
 ## Manage the service
 
-Run these commands on the machine that will host Hotlap:
+Run these commands on the machine that will host Hotlap. They work through the
+`hotlap` launcher ([Install Hotlap](./install.md#command-line)) or through npm:
 
-| Task                            | Command                               |
-| ------------------------------- | ------------------------------------- |
-| Install and start               | `npx hotlap@latest service install`   |
-| Inspect status and log location | `npx hotlap@latest service status`    |
-| Update or repair                | `npx hotlap@latest service update`    |
-| Stop and remove from startup    | `npx hotlap@latest service uninstall` |
+| Task                            | Command                    | With npm                              |
+| ------------------------------- | -------------------------- | ------------------------------------- |
+| Install and start               | `hotlap service install`   | `npx hotlap@latest service install`   |
+| Inspect status and log location | `hotlap service status`    | `npx hotlap@latest service status`    |
+| Update or repair the service    | `hotlap service update`    | `npx hotlap@latest service update`    |
+| Move to a newer release         | `hotlap update`            | —                                     |
+| Restart                         | `hotlap service restart`   | `npx hotlap@latest service restart`   |
+| Stop and remove from startup    | `hotlap service uninstall` | `npx hotlap@latest service uninstall` |
 
 Uninstalling the service leaves your projects, threads, and settings intact.
+Running `hotlap service install` again repairs a service that
+`hotlap service status` reports as broken.
 
-Install and update use the version of the CLI you invoke. For nightly, use
+Install and update through npm use the version of the CLI you invoke. For nightly, use
 `npx hotlap@nightly service update`; replace `nightly` with an exact version to pin
 one. An older CLI refuses to replace a newer service unless you explicitly add
 `--allow-downgrade`.

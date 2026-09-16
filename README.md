@@ -25,6 +25,14 @@ Install and sign in to at least one provider first:
 
 Hotlap keeps its data in `~/.hotlap`, so it runs side by side with a T3 Code install.
 
+For a persistent command-line install without npm, download and review
+`scripts/install.sh` or `scripts/install.ps1` from this repository and run it with
+`sh` or PowerShell. Do not use the installers at `t3.codes`; those install T3 Code.
+The scripts put a `hotlap` launcher in `~/.local/bin`, and from there
+`hotlap service install` keeps the server running in the background, `hotlap update`
+moves to a newer release, `hotlap uninstall` removes it, and `hotlap --help` has the
+full reference. Details in [Install and first run](./docs/user/install.md).
+
 ## Pair your phone or another machine
 
 On the machine that runs your agents, open **Settings → Connections** in the desktop app, enable **Network access**, and create a pairing link (or run `npx hotlap serve --host <tailnet-or-lan-ip>` and then `npx hotlap pair`). Scan the QR code with the phone app or paste the link into **Add environment** on another device. Over Tailscale this works from anywhere; over a LAN it works at home. Details in [Remote access](./docs/user/remote-access.md). There is no hosted relay, so the "T3 Connect" tunnel described there is unavailable.

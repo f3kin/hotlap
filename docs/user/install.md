@@ -18,7 +18,7 @@ the desktop app.
 You need an installed, authenticated provider before starting a thread. You can
 launch Hotlap and configure providers afterwards.
 
-## Run without installing
+## Command line
 
 ```bash
 npx hotlap@latest
@@ -26,6 +26,28 @@ npx hotlap@latest
 
 This starts the server and opens the local web app. Run
 `npx hotlap@latest --help` for command-line options.
+
+For an install that does not need npm, download and review `scripts/install.sh`
+or `scripts/install.ps1` from the
+[Hotlap repository](https://github.com/shwarmadev/hotlap/tree/main/scripts), then
+run it with `sh` or PowerShell. Do not use the installers at `t3.codes`; those
+install T3 Code.
+
+The scripts put a `hotlap` launcher in `~/.local/bin`. If your shell reports
+`command not found` afterwards, that directory is not on your `PATH` yet; the
+installer prints the line to add. Set `HOTLAP_CHANNEL=nightly` to install the
+nightly train, or `HOTLAP_VERSION` to pin an exact version. Intel Macs have no
+standalone build; use `npx hotlap@latest` or the desktop app there.
+
+| Task                                             | Command                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------- |
+| Start the server and open the web app            | `hotlap`                                                      |
+| Start the server without a browser               | `hotlap serve`                                                |
+| Keep it running in the background (macOS, Linux) | `hotlap service install` ([details](./background-service.md)) |
+| Move to the newest release                       | `hotlap update`                                               |
+| Remove it again                                  | `hotlap uninstall`                                            |
+
+Run `hotlap --help` for the full reference.
 
 Hotlap stores its data in `~/.hotlap`, separately from T3 Code. Installing
 Hotlap does not migrate or synchronize a T3 Code profile.
@@ -50,7 +72,8 @@ With the desktop app already running on the same machine:
 npx hotlap app
 ```
 
-This opens a new thread for the current directory, adding the project if needed.
+Use `hotlap app` instead when the launcher is installed. This opens a new thread
+for the current directory, adding the project if needed.
 Pass a path, such as `npx hotlap app ../my-project`, to open another directory. It requires
 the desktop app, so a standalone server or an SSH session is not enough. If the
 command cannot reach the app, start or update the desktop app and try again.
