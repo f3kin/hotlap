@@ -1,16 +1,16 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ChevronDownIcon, NetworkIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { cn } from "~/lib/utils";
-import { useThreadShells } from "~/state/entities";
+import { useThreadShellsForProjectRefs } from "~/state/entities";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
-import { deriveMasterBoard, type MasterBoardThread } from "./MasterStatusBoard.logic";
+import { deriveMasterBoard } from "./MasterStatusBoard.logic";
 
 const STATUS_LABEL: Record<SidebarThreadStatus, string> = {
   approval: "Approval",
@@ -30,6 +30,17 @@ const STATUS_DOT: Record<SidebarThreadStatus, string> = {
   ready: "bg-emerald-500",
 };
 
+function cardStatus(thread: EnvironmentThreadShell): {
+  readonly label: string;
+  readonly dot: string;
+} {
+  if (thread.settledOverride === "settled") {
+    return { label: "Completed", dot: "bg-muted-foreground" };
+  }
+  const status = resolveSidebarThreadStatus(thread);
+  return { label: STATUS_LABEL[status], dot: STATUS_DOT[status] };
+}
+
 function shortTitle(title: string): string {
   return title.replace(/^(master|card)\s*:\s*/i, "");
 }
@@ -38,22 +49,26 @@ function CardRow(props: {
   readonly thread: EnvironmentThreadShell;
   readonly onOpen: (thread: EnvironmentThreadShell) => void;
 }) {
-  const status = resolveSidebarThreadStatus(props.thread);
+  const status = cardStatus(props.thread);
   return (
     <Button
       variant="ghost"
       className="h-7 w-full justify-start gap-2 rounded-md px-2 text-xs font-normal"
       onClick={() => props.onOpen(props.thread)}
     >
-      <span className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[status])} />
+      <span className={cn("size-1.5 shrink-0 rounded-full", status.dot)} />
       <span className="min-w-0 flex-1 truncate text-left">{shortTitle(props.thread.title)}</span>
-      <span className="shrink-0 text-[11px] text-muted-foreground">{STATUS_LABEL[status]}</span>
+      <span className="shrink-0 text-[11px] text-muted-foreground">{status.label}</span>
     </Button>
   );
 }
 
-export function MasterStatusBoard(props: { readonly activeThread: MasterBoardThread }) {
-  const threads = useThreadShells();
+export function MasterStatusBoard(props: { readonly activeThread: EnvironmentThreadShell }) {
+  const projectRefs = useMemo(
+    () => [scopeProjectRef(props.activeThread.environmentId, props.activeThread.projectId)],
+    [props.activeThread.environmentId, props.activeThread.projectId],
+  );
+  const threads = useThreadShellsForProjectRefs(projectRefs);
   const navigate = useNavigate();
   const [open, setOpen] = useState(true);
   const board = useMemo(() => {
@@ -85,16 +100,16 @@ export function MasterStatusBoard(props: { readonly activeThread: MasterBoardThr
       className="mx-3 mt-2 shrink-0 rounded-lg border border-border/70 bg-muted/25"
       data-master-status-board=""
     >
-      <CollapsibleTrigger className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs">
-        <NetworkIcon className="size-3.5 text-muted-foreground" aria-hidden="true" />
-        <span className="font-medium">Master board</span>
-        <span className="text-muted-foreground">
+      <CollapsibleTrigger className="flex h-9 w-full min-w-0 items-center gap-2 px-3 text-left text-xs">
+        <NetworkIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <span className="shrink-0 whitespace-nowrap font-medium">Master board</span>
+        <span className="min-w-0 truncate text-muted-foreground">
           {board.cards.length} {board.cards.length === 1 ? "card" : "cards"}
           {attentionCount > 0 ? ` · ${attentionCount} need you` : ""}
         </span>
         <ChevronDownIcon
           className={cn(
-            "ml-auto size-3.5 text-muted-foreground transition-transform",
+            "ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform",
             open && "rotate-180",
           )}
           aria-hidden="true"
