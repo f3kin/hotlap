@@ -63,6 +63,19 @@ describe("MasterStatusBoard logic", () => {
     expect(board?.peerMasters).toEqual([migration]);
   });
 
+  it("assigns cards to their nearest Master ancestor", () => {
+    const fleet = thread("fleet", "Master: Fleet");
+    const migration = thread("migration", "Master: Migration", {
+      forkedFrom: { threadId: fleet.id },
+    });
+    const card = thread("card", "Card: Migration check", {
+      forkedFrom: { threadId: migration.id },
+    });
+
+    expect(deriveMasterBoard(fleet, [fleet, migration, card])?.cards).toEqual([]);
+    expect(deriveMasterBoard(migration, [fleet, migration, card])?.cards).toEqual([card]);
+  });
+
   it("isolates projects and environments", () => {
     const master = thread("master", "Master: Fleet");
     const otherProject = thread("other-project", "Card: Wrong project", {
