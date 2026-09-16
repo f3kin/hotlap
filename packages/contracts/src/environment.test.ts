@@ -38,6 +38,7 @@ describe("ExecutionEnvironmentDescriptor", () => {
     const legacy = decodeDescriptor(descriptor).capabilities;
     expect(legacy.threadTranscriptExport).toBeUndefined();
     expect(legacy.threadForking).toBeUndefined();
+    expect(legacy.threadForkModelSelection).toBeUndefined();
 
     const current = decodeDescriptor({
       ...descriptor,
@@ -45,10 +46,12 @@ describe("ExecutionEnvironmentDescriptor", () => {
         ...descriptor.capabilities,
         threadTranscriptExport: true,
         threadForking: true,
+        threadForkModelSelection: true,
       },
     }).capabilities;
     expect(current.threadTranscriptExport).toBe(true);
     expect(current.threadForking).toBe(true);
+    expect(current.threadForkModelSelection).toBe(true);
   });
 
   it("treats a missing pull-request capability as unsupported under version skew", () => {

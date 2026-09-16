@@ -1019,28 +1019,35 @@ describe("OrchestrationEngine", () => {
         assistantMessageId: sourceAssistantMessageId,
       });
 
+      const selectedModel = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      };
+      const forkCommandId = CommandId.make("cmd-fork-handoff-create");
       await system.run(
         engine.dispatch({
           type: "thread.fork",
-          commandId: CommandId.make("cmd-fork-handoff-create"),
+          commandId: forkCommandId,
           threadId: destinationThreadId,
           sourceThreadId,
           sourceMessageId: sourceAssistantMessageId,
+          modelSelection: selectedModel,
           createdAt,
         }),
       );
 
-      await system.run(
-        engine.dispatch({
-          type: "thread.meta.update",
-          commandId: CommandId.make("cmd-fork-handoff-provider-select"),
-          threadId: destinationThreadId,
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("claudeAgent"),
-            model: "claude-opus-4-6",
-          },
-        }),
-      );
+      const forkEvents = Array.from(await system.run(Stream.runCollect(engine.readEvents(0))));
+      expect(
+        forkEvents.some(
+          (event) =>
+            event.commandId === forkCommandId && event.type === "thread.turn-start-requested",
+        ),
+      ).toBe(false);
+      expect(Option.getOrThrow(await system.readThread(destinationThreadId))).toMatchObject({
+        modelSelection: selectedModel,
+        latestTurn: null,
+        session: null,
+      });
 
       const firstTurnCommandId = CommandId.make("cmd-fork-handoff-first-turn");
       await system.run(
@@ -1054,10 +1061,7 @@ describe("OrchestrationEngine", () => {
             text: "Continue with that choice.",
             attachments: [],
           },
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("claudeAgent"),
-            model: "claude-opus-4-6",
-          },
+          modelSelection: selectedModel,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
           createdAt,

@@ -467,6 +467,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
 
+      const modelSelection = command.modelSelection ?? forkSource.modelSelection;
+      const providerRoutingMode =
+        modelSelection.instanceId === forkSource.modelSelection.instanceId
+          ? (forkSource.providerRoutingMode ?? "fixed")
+          : "fixed";
       const createdEvent: PlannedOrchestrationEvent = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -479,10 +484,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           projectId: forkSource.projectId,
           title: `${forkSource.title} (fork)`,
-          modelSelection: forkSource.modelSelection,
+          modelSelection,
           runtimeMode: forkSource.runtimeMode,
           interactionMode: forkSource.interactionMode,
-          providerRoutingMode: forkSource.providerRoutingMode ?? "fixed",
+          providerRoutingMode,
           branch: forkSource.branch,
           worktreePath: forkSource.worktreePath,
           forkedFrom: {

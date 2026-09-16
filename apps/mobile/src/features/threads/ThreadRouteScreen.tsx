@@ -20,6 +20,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   type MessageId,
+  type ModelSelection,
   ThreadId,
   type ProjectScript,
 } from "@t3tools/contracts";
@@ -116,6 +117,15 @@ import {
   type ThreadInspectorMode,
 } from "./thread-inspector-content-stack";
 import { threadRouteIsHydrating } from "./thread-route-hydration";
+import { ForkConversationSheet } from "./ForkConversationSheet";
+import {
+  buildForkCommandInput,
+  buildForkModelOptions,
+  canConfirmForkModelSelection,
+  forkModelPickerShouldClose,
+  openForkModelPicker,
+  type ForkModelPickerState,
+} from "./fork-model-picker-state";
 
 interface ThreadInspectorSelection {
   readonly routeThreadIdentity: string | null;
@@ -303,10 +313,12 @@ function ThreadRouteContent(
   const loadThreadTranscript = useAtomCommand(copyThreadTranscript, { reportFailure: false });
   const forkWaitAbortRef = useRef<AbortController | null>(null);
   const [forkPending, setForkPending] = useState(false);
+  const [forkModelPicker, setForkModelPicker] = useState<ForkModelPickerState | null>(null);
   const cancelPendingFork = useCallback(() => {
     forkWaitAbortRef.current?.abort();
     forkWaitAbortRef.current = null;
     setForkPending(false);
+    setForkModelPicker(null);
   }, []);
   const navigation = useNavigation();
   const params = props.route.params;
@@ -406,26 +418,68 @@ function ThreadRouteContent(
     !selectedThread.hasPendingApprovals &&
     !selectedThread.hasPendingUserInput &&
     selectedThread.backgroundLiveness == null;
+  const forkServerConfig = routeEnvironmentRuntime?.serverConfig ?? null;
+  const supportsForkModelSelection =
+    forkServerConfig?.environment.capabilities.threadForkModelSelection === true;
+  const forkModelOptions = useMemo(
+    () =>
+      forkModelPicker && forkServerConfig
+        ? buildForkModelOptions(forkServerConfig, forkModelPicker.selectedModel)
+        : [],
+    [forkModelPicker, forkServerConfig],
+  );
   const supportsTranscriptExport =
     routeEnvironmentRuntime?.serverConfig?.environment.capabilities.threadTranscriptExport ===
       true && selectedThread !== null;
-  const handleForkAssistantMessage = useCallback(
-    async (sourceMessageId: MessageId) => {
-      if (!canForkConversation || selectedThread === null || forkWaitAbortRef.current !== null) {
-        return;
-      }
+  useLayoutEffect(() => {
+    if (!forkModelPicker) return;
+    if (
+      !canForkConversation ||
+      selectedThread === null ||
+      forkModelPickerShouldClose(forkModelPicker, {
+        connected: routeConnectionState === "connected",
+        environmentId: selectedThread.environmentId,
+        threadId: selectedThread.id,
+        sourceMessageAvailable: forkableAssistantMessageIds.has(forkModelPicker.source.messageId),
+      })
+    ) {
+      // External connection/source state owns this dismissal; retaining local
+      // picker state would let it resurface after a reconnect.
+      // oxlint-disable-next-line react/set-state-in-effect
+      cancelPendingFork();
+    }
+  }, [
+    canForkConversation,
+    cancelPendingFork,
+    forkModelPicker,
+    forkableAssistantMessageIds,
+    routeConnectionState,
+    selectedThread,
+  ]);
+  const executeFork = useCallback(
+    async (picker: ForkModelPickerState, includeModelSelection: boolean) => {
+      if (forkWaitAbortRef.current !== null) return;
       const destinationThreadId = ThreadId.make(uuidv4());
       const forkWaitAbort = new AbortController();
       forkWaitAbortRef.current = forkWaitAbort;
       setForkPending(true);
+      if (includeModelSelection) {
+        setForkModelPicker((current) =>
+          current?.source.messageId === picker.source.messageId
+            ? { ...current, status: "submitting", error: null }
+            : current,
+        );
+      }
       const result = await forkThread({
-        environmentId: selectedThread.environmentId,
-        input: {
-          threadId: destinationThreadId,
-          sourceThreadId: selectedThread.id,
-          sourceMessageId,
-          createdAt: new Date().toISOString(),
-        },
+        environmentId: picker.source.environmentId,
+        input: includeModelSelection
+          ? buildForkCommandInput(picker, destinationThreadId, new Date().toISOString())
+          : {
+              threadId: destinationThreadId,
+              sourceThreadId: picker.source.threadId,
+              sourceMessageId: picker.source.messageId,
+              createdAt: new Date().toISOString(),
+            },
       });
       if (forkWaitAbort.signal.aborted) return;
       if (result._tag === "Failure") {
@@ -433,19 +487,27 @@ function ThreadRouteContent(
           forkWaitAbortRef.current = null;
           setForkPending(false);
         }
-        if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          Alert.alert(
-            "Couldn’t fork conversation",
-            error instanceof Error ? error.message : "An error occurred.",
+        const interrupted = isAtomCommandInterrupted(result);
+        if (includeModelSelection) {
+          const error = interrupted ? null : squashAtomCommandFailure(result);
+          const message = interrupted
+            ? "Forking was interrupted. Try again."
+            : error instanceof Error
+              ? error.message
+              : "An error occurred.";
+          setForkModelPicker((current) =>
+            current?.source.messageId === picker.source.messageId
+              ? { ...current, status: "idle", error: message }
+              : current,
           );
+        } else if (!interrupted) {
+          const error = squashAtomCommandFailure(result);
+          const message = error instanceof Error ? error.message : "An error occurred.";
+          Alert.alert("Couldn’t fork conversation", message);
         }
         return;
       }
-      const destinationThreadRef = scopeThreadRef(
-        selectedThread.environmentId,
-        destinationThreadId,
-      );
+      const destinationThreadRef = scopeThreadRef(picker.source.environmentId, destinationThreadId);
       const destinationThreadAtom = environmentThreadDetails.stateAtom(destinationThreadRef);
       const forkSynced = await waitForSynchronizedValue({
         read: () => appAtomRegistry.get(destinationThreadAtom),
@@ -460,19 +522,101 @@ function ThreadRouteContent(
       }
       if (forkWaitAbort.signal.aborted) return;
       if (!forkSynced) {
-        Alert.alert(
-          "Fork is no longer available",
-          "The destination was deleted before it could be opened.",
-        );
+        const message = "The destination was deleted before it could be opened.";
+        if (includeModelSelection) {
+          setForkModelPicker((current) =>
+            current?.source.messageId === picker.source.messageId
+              ? { ...current, status: "idle", error: message }
+              : current,
+          );
+        } else {
+          Alert.alert("Fork is no longer available", message);
+        }
         return;
       }
+      setForkModelPicker(null);
       navigation.navigate("Thread", {
-        environmentId: String(selectedThread.environmentId),
+        environmentId: String(picker.source.environmentId),
         threadId: String(destinationThreadId),
       });
     },
-    [canForkConversation, forkThread, navigation, selectedThread],
+    [forkThread, navigation],
   );
+  const handleForkAssistantMessage = useCallback(
+    async (sourceMessageId: MessageId) => {
+      if (
+        !canForkConversation ||
+        selectedThread === null ||
+        forkWaitAbortRef.current !== null ||
+        forkModelPicker !== null
+      ) {
+        return;
+      }
+      const picker = openForkModelPicker({
+        environmentId: selectedThread.environmentId,
+        sourceThreadId: selectedThread.id,
+        sourceMessageId,
+        modelSelection: selectedThread.modelSelection,
+      });
+      if (supportsForkModelSelection) {
+        setForkModelPicker(picker);
+        return;
+      }
+      await executeFork(picker, false);
+    },
+    [canForkConversation, executeFork, forkModelPicker, selectedThread, supportsForkModelSelection],
+  );
+  const handleForkModelSelect = useCallback((modelSelection: ModelSelection) => {
+    setForkModelPicker((current) =>
+      current
+        ? {
+            ...current,
+            selectedModel: {
+              instanceId: modelSelection.instanceId,
+              model: modelSelection.model,
+              ...(modelSelection.options
+                ? { options: modelSelection.options.map((option) => ({ ...option })) }
+                : {}),
+            },
+            error: null,
+          }
+        : null,
+    );
+  }, []);
+  const handleForkModelConfirm = useCallback(async () => {
+    if (!forkModelPicker || forkModelPicker.status === "submitting") return;
+    if (
+      !supportsForkModelSelection ||
+      !canForkConversation ||
+      selectedThread === null ||
+      forkModelPickerShouldClose(forkModelPicker, {
+        connected: routeConnectionState === "connected",
+        environmentId: selectedThread.environmentId,
+        threadId: selectedThread.id,
+        sourceMessageAvailable: forkableAssistantMessageIds.has(forkModelPicker.source.messageId),
+      })
+    ) {
+      cancelPendingFork();
+      return;
+    }
+    if (!canConfirmForkModelSelection(forkModelPicker.selectedModel, forkModelOptions)) {
+      setForkModelPicker((current) =>
+        current ? { ...current, error: "Choose an available provider and model." } : null,
+      );
+      return;
+    }
+    await executeFork(forkModelPicker, true);
+  }, [
+    canForkConversation,
+    cancelPendingFork,
+    executeFork,
+    forkModelOptions,
+    forkModelPicker,
+    forkableAssistantMessageIds,
+    routeConnectionState,
+    selectedThread,
+    supportsForkModelSelection,
+  ]);
   const handleCopyTranscript = useCallback(async () => {
     if (!supportsTranscriptExport || selectedThread === null) return;
     const result = await loadThreadTranscript({
@@ -1241,6 +1385,17 @@ function ThreadRouteContent(
       {renderThreadRouteBody(
         Platform.OS !== "android" && !layout.usesSplitView && !usesNativeHeaderGlass,
       )}
+
+      {forkModelPicker && serverConfig ? (
+        <ForkConversationSheet
+          state={forkModelPicker}
+          serverConfig={serverConfig}
+          options={forkModelOptions}
+          onCancel={() => setForkModelPicker(null)}
+          onSelectModel={handleForkModelSelect}
+          onConfirm={() => void handleForkModelConfirm()}
+        />
+      ) : null}
     </>
   );
 }

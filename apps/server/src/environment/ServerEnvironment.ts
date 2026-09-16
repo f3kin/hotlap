@@ -234,6 +234,7 @@ export const make = Effect.gen(function* () {
       customPrompts: true,
       threadTranscriptExport: true,
       threadForking: true,
+      threadForkModelSelection: true,
       threadPinning: true,
       threadPinReorder: true,
       threadActiveReorder: true,

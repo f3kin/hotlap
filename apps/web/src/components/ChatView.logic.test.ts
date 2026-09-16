@@ -96,6 +96,7 @@ import {
   shouldRetargetThreadPullRequestPanel,
   shouldOpenProactiveTurnDiff,
   shouldRenderPreviewMiniPlayer,
+  shouldChooseForkModelBeforeCreate,
   shouldShowBranchMismatchBanner,
   shouldShowPlanFollowUpPrompt,
   shouldWriteThreadErrorToCurrentServerThread,
@@ -104,6 +105,14 @@ import {
   waitForRevertedMessage,
   prepareRevertedMessageAttachments,
 } from "./ChatView.logic";
+
+describe("fork model selection capability", () => {
+  it("uses the chooser only when the environment explicitly advertises support", () => {
+    expect(shouldChooseForkModelBeforeCreate({ threadForkModelSelection: true })).toBe(true);
+    expect(shouldChooseForkModelBeforeCreate({})).toBe(false);
+    expect(shouldChooseForkModelBeforeCreate({ threadForkModelSelection: false })).toBe(false);
+  });
+});
 
 describe("agent browser close confirmation", () => {
   const surfaces = [

@@ -108,7 +108,7 @@ export type ProjectionBoundedThreadSource<T> =
 export interface ProjectionThreadForkSource extends ProjectionThreadTranscriptSource {
   readonly projectId: ProjectId;
   readonly modelSelection: ModelSelection;
-  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly providerRoutingMode?: ProviderRoutingMode;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly branch: string | null;

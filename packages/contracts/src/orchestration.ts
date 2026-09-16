@@ -1139,6 +1139,7 @@ const ThreadForkCommand = Schema.Struct({
   threadId: ThreadId,
   sourceThreadId: ThreadId,
   sourceMessageId: MessageId,
+  modelSelection: Schema.optional(ModelSelection),
   createdAt: IsoDateTime,
 });
 
