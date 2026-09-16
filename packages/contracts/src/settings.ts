@@ -1007,7 +1007,7 @@ export const ProviderRoutingPolicy = Schema.Struct({
 });
 export type ProviderRoutingPolicy = typeof ProviderRoutingPolicy.Type;
 
-export const DEFAULT_PROVIDER_ROUTING_POLICY: ProviderRoutingPolicy = {
+const DEFAULT_PROVIDER_ROUTING_POLICY: ProviderRoutingPolicy = {
   defaultMode: "fixed",
   instanceIdsByDriver: {},
   usageThresholdPercent: null,

@@ -41,10 +41,6 @@ export interface McpProviderSessionHandoff {
   readonly previous: McpProviderSessionConfig | undefined;
 }
 
-export function setMcpProviderSession(config: McpProviderSessionConfig): void {
-  sessionsByThread.set(config.threadId, config);
-}
-
 export function beginMcpProviderSessionHandoff(
   target: McpProviderSessionConfig,
 ): McpProviderSessionHandoff {
