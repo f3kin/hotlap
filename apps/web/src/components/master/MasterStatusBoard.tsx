@@ -7,6 +7,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { cn } from "~/lib/utils";
 import { useThreadShellsForProjectRefs } from "~/state/entities";
 import { buildThreadRouteParams } from "~/threadRoutes";
+import type { Thread } from "~/types";
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -63,7 +64,7 @@ function CardRow(props: {
   );
 }
 
-export function MasterStatusBoard(props: { readonly activeThread: EnvironmentThreadShell }) {
+export function MasterStatusBoard(props: { readonly activeThread: Thread }) {
   const projectRefs = useMemo(
     () => [scopeProjectRef(props.activeThread.environmentId, props.activeThread.projectId)],
     [props.activeThread.environmentId, props.activeThread.projectId],

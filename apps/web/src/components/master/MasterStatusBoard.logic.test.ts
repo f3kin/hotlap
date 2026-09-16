@@ -132,10 +132,9 @@ describe("MasterStatusBoard logic", () => {
       updatedAt: "not-a-date",
     });
 
-    expect(deriveMasterBoard(master, [master, broken, cycleA, cycleB, zulu, alpha])?.cards).toEqual([
-      alpha,
-      zulu,
-    ]);
+    expect(deriveMasterBoard(master, [master, broken, cycleA, cycleB, zulu, alpha])?.cards).toEqual(
+      [alpha, zulu],
+    );
   });
 
   it("isolates projects and environments", () => {
