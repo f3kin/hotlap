@@ -118,10 +118,10 @@ export function MasterStatusBoard(props: { readonly activeThread: MasterBoardThr
                 key={thread.id}
                 variant="ghost"
                 size="xs"
-                className="h-6 max-w-40 truncate px-2 text-[11px]"
+                className="h-6 min-w-0 max-w-40 px-2 text-[11px]"
                 onClick={() => openThread(thread)}
               >
-                {shortTitle(thread.title)}
+                <span className="min-w-0 truncate">{shortTitle(thread.title)}</span>
               </Button>
             ))}
           </div>
