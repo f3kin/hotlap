@@ -27,6 +27,13 @@ async function assertReleaseSource({ github, context, releaseChannel }) {
   if (releaseChannel !== "stable" && releaseChannel !== "nightly") {
     throw new Error(`Unsupported release channel: ${releaseChannel}`);
   }
+  if (
+    releaseChannel === "stable" &&
+    context.eventName === "push" &&
+    !/^refs\/tags\/v\d+\.\d+\.\d+$/.test(context.ref)
+  ) {
+    throw new Error("Stable release tags must match vX.Y.Z exactly.");
+  }
 
   const defaultBranch = repositoryDefaultBranch(context);
   if (context.eventName === "workflow_dispatch" && context.ref !== `refs/heads/${defaultBranch}`) {
@@ -39,6 +46,10 @@ async function assertReleaseSource({ github, context, releaseChannel }) {
 }
 
 const isNightlyTag = (tag) => /^v.*-nightly\./.test(tag) || tag.startsWith("nightly-v");
+const versionFromCore = (value) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(value);
+  return match ? match.slice(1).map(Number) : undefined;
+};
 const stableVersionFromTag = (tag) => {
   const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
   return match ? match.slice(1).map(Number) : undefined;
@@ -64,12 +75,70 @@ function highestPublishedVersion(releases, parseTag) {
     .sort((left, right) => compareVersions(right, left))[0];
 }
 
-async function resolveNextNightlyVersion({ github, context }) {
-  const releases = await github.paginate(github.rest.repos.listReleases, {
-    ...context.repo,
-    per_page: 100,
+const formatVersion = ([major, minor, patch]) => `${major}.${minor}.${patch}`;
+const laterVersion = (left, right) => {
+  if (!left) return right;
+  if (!right) return left;
+  return compareVersions(left, right) >= 0 ? left : right;
+};
+
+async function resolveNpmLatestVersion(fetch) {
+  const response = await fetch("https://registry.npmjs.org/hotlap/latest", {
+    cache: "no-store",
+    headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
   });
-  const latestStable = highestPublishedVersion(releases, stableVersionFromTag);
+  if (response.status === 404) return undefined;
+  if (!response.ok) {
+    throw new Error(`npm registry returned ${response.status} while checking hotlap@latest.`);
+  }
+
+  const metadata = await response.json();
+  const version =
+    metadata && typeof metadata.version === "string"
+      ? versionFromCore(metadata.version)
+      : undefined;
+  if (!version) throw new Error("npm registry returned an invalid version for hotlap@latest.");
+  return version;
+}
+
+async function resolvePublishedStableVersion({ github, context, fetch = globalThis.fetch }) {
+  const [releases, npmLatest] = await Promise.all([
+    github.paginate(github.rest.repos.listReleases, {
+      ...context.repo,
+      per_page: 100,
+    }),
+    resolveNpmLatestVersion(fetch),
+  ]);
+  const githubLatest = highestPublishedVersion(releases, stableVersionFromTag);
+  return laterVersion(githubLatest, npmLatest);
+}
+
+async function assertReleaseVersionIsCurrent(options) {
+  if (options.releaseChannel === "preview") return;
+  const candidate = versionFromCore(options.version);
+  if (!candidate) throw new Error(`Invalid ${options.releaseChannel} version: ${options.version}.`);
+
+  const publishedStable = await resolvePublishedStableVersion(options);
+  if (publishedStable && compareVersions(candidate, publishedStable) <= 0) {
+    throw new Error(
+      `Release version ${options.version} is not newer than published stable ${formatVersion(publishedStable)}.`,
+    );
+  }
+}
+
+async function resolveNextNightlyVersion({ github, context, fetch = globalThis.fetch }) {
+  const [releases, npmLatest] = await Promise.all([
+    github.paginate(github.rest.repos.listReleases, {
+      ...context.repo,
+      per_page: 100,
+    }),
+    resolveNpmLatestVersion(fetch),
+  ]);
+  const latestStable = laterVersion(
+    highestPublishedVersion(releases, stableVersionFromTag),
+    npmLatest,
+  );
   const latestNightly = highestPublishedVersion(releases, nightlyVersionFromTag);
   const nextStable = latestStable
     ? [latestStable[0], latestStable[1], latestStable[2] + 1]
@@ -148,6 +217,7 @@ async function resolveLatestNightlyCommit({ github, context, core }) {
 
 module.exports = {
   assertCommitOnDefaultBranch,
+  assertReleaseVersionIsCurrent,
   assertReleaseSource,
   resolveNextNightlyVersion,
   shouldReleaseNightly,

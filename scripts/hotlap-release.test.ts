@@ -19,6 +19,7 @@ const Step = Schema.Struct({
   env: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   name: Schema.optional(Schema.String),
   run: Schema.optional(Schema.String),
+  uses: Schema.optional(Schema.String),
   with: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 });
 const Workflow = fromYaml(
@@ -68,6 +69,9 @@ it("keeps release outputs on Hotlap and gates npm on every native target", async
   const resolveCommit = release.jobs.resolve_commit!;
   const preflight = release.jobs.preflight!;
   const resolveVersion = preflight.steps?.find((step) => step.name === "Resolve release version");
+  const resolveCommitScript = resolveCommit.steps?.find(
+    (step) => step.name === "Resolve release commit",
+  )?.with?.script;
   NodeAssert.equal(
     release.concurrency?.group,
     "release-${{ inputs.channel == 'preview' && 'preview' || 'published' }}",
@@ -85,6 +89,12 @@ it("keeps release outputs on Hotlap and gates npm on every native target", async
   );
   NodeAssert.ok(resolveVersion?.run?.includes('"${nightly_base_args[@]}"'));
   NodeAssert.ok(!resolveVersion?.run?.includes("DISPATCH_VERSION"));
+  NodeAssert.ok(resolveVersion?.run?.includes("^[0-9]+\\.[0-9]+\\.[0-9]+$"));
+  NodeAssert.ok(String(resolveCommitScript).includes("assertReleaseVersionIsCurrent"));
+  NodeAssert.ok(
+    String(resolveCommitScript).includes("releaseChannel: 'stable', version"),
+    "stable dispatch must reject an obsolete nightly before building",
+  );
   const targets = Object.entries(release.jobs).filter(
     ([, job]) => job.uses === "./.github/workflows/release-desktop.yml",
   );
@@ -95,6 +105,13 @@ it("keeps release outputs on Hotlap and gates npm on every native target", async
     NodeAssert.ok(!String(job.with?.runner).includes("blacksmith"));
   }
   const steps = publish.steps ?? [];
+  const revalidateIndex = steps.findIndex((step) => step.name === "Revalidate release version");
+  const publishIndex = steps.findIndex((step) => step.name === "Publish CLI package");
+  NodeAssert.ok(revalidateIndex >= 0 && revalidateIndex < publishIndex);
+  NodeAssert.equal(steps[revalidateIndex]?.uses, "actions/github-script@v8");
+  NodeAssert.ok(
+    String(steps[revalidateIndex]?.with?.script).includes("assertReleaseVersionIsCurrent"),
+  );
   NodeAssert.equal(
     steps.find((step) => step.name === "Download JS bundle")?.with?.name,
     "js-bundle",

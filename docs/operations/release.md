@@ -9,7 +9,8 @@ bundled web, and standalone CLI archives from one resolved commit.
 
 - Manual `channel=stable` promotes the latest published nightly's commit, not
   the current `main`, using the stable version that nightly previewed.
-- Pushing a `vX.Y.Z` tag releases that exact commit.
+- Pushing an exact `vX.Y.Z` tag releases that commit. Suffixed tags are rejected
+  from the stable channel.
 - Nightly checks run daily at 15:08 UTC. Automatic nightlies require new commits
   and a six-hour publication gap; manual `channel=nightly` bypasses those checks.
   New nightlies preview the patch after the highest published stable version,
@@ -21,6 +22,9 @@ bundled web, and standalone CLI archives from one resolved commit.
   publish a stable release. Stable and nightly dispatches must select `main`, and
   their commit must be contained in it; preview builds any branch.
 - Publishers are serialized and are not cancelled by newer releases.
+- Stable and nightly versions are checked against both GitHub releases and npm
+  `latest` before work starts and again immediately before npm publication. A
+  stale version stops instead of moving either update channel backwards.
 
 Hotlap has no hosted web, relay, or marketing deployment. Its web app ships inside
 npm, desktop, and CLI archives. Relay/Clerk configuration is empty. Upstream-only

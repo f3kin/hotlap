@@ -64,6 +64,7 @@ jobs:
             const {
               assertCommitOnDefaultBranch,
               assertReleaseSource,
+              assertReleaseVersionIsCurrent,
               resolveNextNightlyVersion,
               shouldReleaseNightly,
               resolveLatestNightlyCommit,
@@ -88,6 +89,7 @@ jobs:
               }
             } else if (context.eventName === 'workflow_dispatch' && dispatchChannel === 'stable') {
               const { tag, sha, version } = await resolveLatestNightlyCommit({ github, context, core });
+              await assertReleaseVersionIsCurrent({ github, context, releaseChannel: 'stable', version });
               await assertCommitOnDefaultBranch({ github, context, sha });
               core.notice(`Stable release builds ${sha}, the commit shipped by ${tag}.`);
               core.setOutput('ref', sha);
@@ -97,6 +99,9 @@ jobs:
               if (context.eventName === 'workflow_dispatch' && dispatchChannel === 'nightly') {
                 const nextNightlyVersion = await resolveNextNightlyVersion({ github, context });
                 if (nextNightlyVersion) core.setOutput('next_nightly_version', nextNightlyVersion);
+              } else if (context.eventName === 'push') {
+                const version = context.ref.replace(/^refs\/tags\/v/, '');
+                await assertReleaseVersionIsCurrent({ github, context, releaseChannel: 'stable', version });
               }
             }
 
@@ -202,7 +207,7 @@ jobs:
             fi
 
             version="${raw#v}"
-            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "Invalid release version: $raw" >&2
               exit 1
             fi
@@ -212,13 +217,8 @@ jobs:
             echo "tag=v$version" >> "$GITHUB_OUTPUT"
             echo "name=Hotlap v$version" >> "$GITHUB_OUTPUT"
             echo "cli_dist_tag=latest" >> "$GITHUB_OUTPUT"
-            if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-              echo "make_latest=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-              echo "make_latest=false" >> "$GITHUB_OUTPUT"
-            fi
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
           fi
 
       - id: previous_tag
@@ -656,6 +656,24 @@ jobs:
 
       - name: Check Hotlap package (dry run)
         run: node apps/server/scripts/cli.ts publish --tag "${{ needs.preflight.outputs.cli_dist_tag }}" --app-version "${{ needs.preflight.outputs.version }}" --dry-run --verbose
+
+      # Build jobs can run for long enough that an out-of-band publication may
+      # change the stable floor. Refuse to publish a stale version.
+      - name: Revalidate release version
+        uses: actions/github-script@v8
+        env:
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        with:
+          script: |
+            const { assertReleaseVersionIsCurrent } = require('./.github/scripts/check-nightly-release.cjs');
+            await assertReleaseVersionIsCurrent({
+              github,
+              context,
+              fetch: globalThis.fetch,
+              releaseChannel: process.env.RELEASE_CHANNEL,
+              version: process.env.RELEASE_VERSION,
+            });
 
       - name: Publish CLI package
         run: node apps/server/scripts/cli.ts publish --tag "${{ needs.preflight.outputs.cli_dist_tag }}" --app-version "${{ needs.preflight.outputs.version }}" --verbose

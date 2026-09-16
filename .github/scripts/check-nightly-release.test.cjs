@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   assertCommitOnDefaultBranch,
+  assertReleaseVersionIsCurrent,
   assertReleaseSource,
   resolveNextNightlyVersion,
   shouldReleaseNightly,
@@ -15,6 +16,15 @@ const nightly = (hoursAgo, overrides = {}) => ({
   published_at: new Date(now - hoursAgo * hour).toISOString(),
   ...overrides,
 });
+
+const npmLatest = (version) => async () => ({
+  ok: true,
+  status: 200,
+  async json() {
+    return { version };
+  },
+});
+const npmMissing = async () => ({ ok: false, status: 404 });
 
 function releaseSourceFixture({
   comparisonStatus = "ahead",
@@ -87,12 +97,64 @@ test("accepts a release commit already contained in main", async () => {
   }
 });
 
+test("rejects suffixed tags from the stable channel", async () => {
+  const { options, calls } = releaseSourceFixture({
+    eventName: "push",
+    ref: "refs/tags/v1.2.3-rc.1",
+  });
+
+  await assert.rejects(
+    assertReleaseSource({ ...options, releaseChannel: "stable" }),
+    /Stable release tags must match vX\.Y\.Z/,
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("rejects stable promotion when its nightly is not newer than published stable", async () => {
+  const { options } = fixture({ releases: [] });
+
+  await assert.rejects(
+    assertReleaseVersionIsCurrent({
+      ...options,
+      fetch: npmLatest("0.0.49"),
+      releaseChannel: "stable",
+      version: "0.0.41",
+    }),
+    /0\.0\.41.*not newer.*0\.0\.49/,
+  );
+});
+
+test("accepts stable and nightly versions only when their core is ahead", async () => {
+  const { options } = fixture({ releases: [] });
+  const published = { ...options, fetch: npmLatest("0.0.49") };
+
+  await assertReleaseVersionIsCurrent({
+    ...published,
+    releaseChannel: "stable",
+    version: "0.0.50",
+  });
+  await assertReleaseVersionIsCurrent({
+    ...published,
+    releaseChannel: "nightly",
+    version: "0.0.50-nightly.20260916.30",
+  });
+  await assert.rejects(
+    assertReleaseVersionIsCurrent({
+      ...published,
+      releaseChannel: "nightly",
+      version: "0.0.49-nightly.20260916.30",
+    }),
+    /not newer than published stable/,
+  );
+});
+
 function fixture({ releases = [nightly(7)], comparisonStatus = "ahead" } = {}) {
   const calls = [];
   return {
     calls,
     options: {
       now,
+      fetch: npmMissing,
       context: { repo: { owner: "example", repo: "app" }, sha: "new" },
       core: { info() {} },
       github: {
@@ -122,6 +184,17 @@ test("puts nightly on the release after the newest stable version", async () => 
   });
 
   assert.equal(await resolveNextNightlyVersion(options), "0.0.50");
+});
+
+test("puts nightly after npm stable when GitHub release publication failed", async () => {
+  const { options } = fixture({
+    releases: [nightly(1, { tag_name: "v0.0.41-nightly.20260915.29" })],
+  });
+
+  assert.equal(
+    await resolveNextNightlyVersion({ ...options, fetch: npmLatest("0.0.49") }),
+    "0.0.50",
+  );
 });
 
 test("never moves nightly back from a higher existing release line", async () => {
