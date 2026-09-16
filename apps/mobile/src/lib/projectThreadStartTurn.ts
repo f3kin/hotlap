@@ -6,6 +6,7 @@ import {
   type OrchestrationMessageContext,
   type ProjectId,
   type ProviderInteractionMode,
+  type ProviderRoutingMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
@@ -36,6 +37,8 @@ export interface ProjectThreadStartTurnSpec {
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly providerRoutingMode?: ProviderRoutingMode;
+  readonly allowProviderAccountRouting?: true;
   readonly workspaceMode: "local" | "worktree";
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -66,11 +69,13 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
     titleSeed: title,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
+    ...(spec.allowProviderAccountRouting ? { allowProviderAccountRouting: true as const } : {}),
     bootstrap: {
       createThread: {
         projectId: spec.projectId,
         title,
         modelSelection: spec.modelSelection,
+        providerRoutingMode: spec.providerRoutingMode ?? "fixed",
         runtimeMode: spec.runtimeMode,
         interactionMode: spec.interactionMode,
         branch: spec.branch,

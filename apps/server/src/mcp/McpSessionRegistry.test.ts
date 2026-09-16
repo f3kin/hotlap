@@ -55,6 +55,85 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
+it.effect("keeps the previous credential valid until its replacement activates", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-handoff");
+    const previous = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-primary"),
+      capabilities: new Set(["preview"]),
+    });
+    const replacement = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-secondary"),
+      capabilities: new Set(["preview"]),
+    });
+    const previousToken = previous.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const replacementToken = replacement.config.authorizationHeader.replace(/^Bearer\s+/, "");
+
+    expect((yield* registry.resolve(previousToken))?.providerInstanceId).toBe("codex-primary");
+    expect((yield* registry.resolve(replacementToken))?.providerInstanceId).toBe("codex-secondary");
+
+    yield* replacement.activate;
+
+    expect(yield* registry.resolve(previousToken)).toBeUndefined();
+    expect((yield* registry.resolve(replacementToken))?.providerInstanceId).toBe("codex-secondary");
+  }),
+);
+
+it.effect("revokes a failed replacement without invalidating the previous credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-failed-handoff");
+    const previous = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-primary"),
+      capabilities: new Set(),
+    });
+    const replacement = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-secondary"),
+      capabilities: new Set(),
+    });
+    const previousToken = previous.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const replacementToken = replacement.config.authorizationHeader.replace(/^Bearer\s+/, "");
+
+    yield* replacement.revoke;
+
+    expect((yield* registry.resolve(previousToken))?.providerInstanceId).toBe("codex-primary");
+    expect(yield* registry.resolve(replacementToken)).toBeUndefined();
+  }),
+);
+
+it.effect("does not let an obsolete staged credential revoke a newer replacement", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-concurrent-handoff");
+    yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-primary"),
+      capabilities: new Set(),
+    });
+    const obsolete = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-secondary"),
+      capabilities: new Set(),
+    });
+    const latest = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex-tertiary"),
+      capabilities: new Set(),
+    });
+    const latestToken = latest.config.authorizationHeader.replace(/^Bearer\s+/, "");
+
+    yield* latest.activate;
+    yield* obsolete.activate;
+
+    expect((yield* registry.resolve(latestToken))?.providerInstanceId).toBe("codex-tertiary");
+  }),
+);
+
 it.effect("always grants pull-requests and gates browser and device access independently", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000);

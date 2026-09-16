@@ -1939,6 +1939,37 @@ describe("composerDraftStore modelSelection", () => {
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionExplicit).toBeUndefined();
   });
 
+  it("consumes the explicit selection after that selection is submitted", () => {
+    const submitted = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "high",
+    });
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(threadRef, submitted, { explicit: true });
+
+    store.consumeExplicitModelSelection(threadRef, submitted);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionExplicit).toBeUndefined();
+  });
+
+  it("preserves a newer picker change while the submitted turn is starting", () => {
+    const submitted = modelSelection(CODEX_DRIVER, "gpt-5.4", {
+      reasoningEffort: "high",
+    });
+    const newerSelection = modelSelection(CODEX_DRIVER, "gpt-5.6-sol", {
+      reasoningEffort: "xhigh",
+    });
+    const store = useComposerDraftStore.getState();
+    store.setModelSelection(threadRef, submitted, { explicit: true });
+
+    store.setModelSelection(threadRef, newerSelection, { explicit: true });
+    store.consumeExplicitModelSelection(threadRef, submitted);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      modelSelectionExplicit: true,
+      modelSelectionByProvider: { [CODEX_INSTANCE]: newerSelection },
+    });
+  });
+
   it("persists the explicit marker through storage round-trips", async () => {
     vi.useFakeTimers();
     try {
@@ -2731,6 +2762,25 @@ describe("composerDraftStore runtime and interaction settings", () => {
     store.setInteractionMode(threadRef, "plan");
 
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.interactionMode).toBe("plan");
+  });
+
+  it("restores an explicit provider routing choice after rehydration", async () => {
+    await useComposerDraftStore.persist.clearStorage();
+    vi.useFakeTimers();
+    try {
+      const store = useComposerDraftStore.getState();
+      store.setPrompt(threadRef, "keep this draft");
+      store.setProviderRoutingMode(threadRef, "fixed");
+      await vi.advanceTimersByTimeAsync(300);
+
+      resetComposerDraftStore();
+      await useComposerDraftStore.persist.rehydrate();
+
+      expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.providerRoutingMode).toBe("fixed");
+    } finally {
+      await useComposerDraftStore.persist.clearStorage();
+      vi.useRealTimers();
+    }
   });
 
   it("removes empty settings-only drafts when overrides are cleared", () => {

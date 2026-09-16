@@ -78,6 +78,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
             }) as never,
         ),
       ),
+    isSessionEventAuthoritative: () => Effect.succeed(true),
     getCapabilities: () => Effect.die("unused"),
     assertConversationRollbackSupported: () => Effect.die("unused"),
     getInstanceInfo: () => Effect.die("unused"),
@@ -86,16 +87,32 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     streamEvents: Stream.empty,
   }) satisfies ProviderService.ProviderService["Service"];
 
-const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>) =>
+const queryWithThreads = (
+  threads: ReadonlyArray<ReturnType<typeof makeThread>>,
+  pendingTurnThreadIds: ReadonlySet<ThreadId> = new Set(),
+) =>
   ({
     getUserInputActivity: () => Effect.die("unused"),
     getCommandReadModel: () => Effect.succeed({ threads } as never),
+    getPendingTurnStartByThreadId: (threadId: ThreadId) =>
+      Effect.succeed(
+        pendingTurnThreadIds.has(threadId)
+          ? Option.some({
+              threadId,
+              messageId: "pending-message",
+              sourceProposedPlanThreadId: null,
+              sourceProposedPlanId: null,
+              requestedAt: updatedAt,
+            } as never)
+          : Option.none(),
+      ),
   }) as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
 
 const runReconciliation = (input: {
   readonly threads: ReadonlyArray<ReturnType<typeof makeThread>>;
   readonly continueAfterRestart?: boolean;
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
+  readonly pendingTurnThreadIds?: ReadonlySet<ThreadId>;
   readonly providerService?: ProviderService.ProviderService["Service"];
   readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
   readonly dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"];
@@ -103,7 +120,7 @@ const runReconciliation = (input: {
   ServerRuntimeStartup.reconcileProviderSessions.pipe(
     Effect.provideService(
       ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-      queryWithThreads(input.threads),
+      queryWithThreads(input.threads, input.pendingTurnThreadIds),
     ),
     Effect.provideService(
       ProviderService.ProviderService,
@@ -276,6 +293,23 @@ it.effect("does not reconcile a sole live session from a different provider inst
     dispatch: (command) =>
       Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: 1 })),
   }).pipe(Effect.tap(() => Effect.sync(() => assert.deepStrictEqual(dispatched, []))));
+});
+
+it.effect("preserves orphaned starting sessions with a durable pending turn", () => {
+  const thread = makeThread("thread-pending-startup", "starting");
+  return runReconciliation({
+    threads: [thread],
+    pendingTurnThreadIds: new Set([thread.id]),
+    directory: {
+      getBinding: () => Effect.die("pending start must not be settled"),
+      upsert: () => Effect.die("pending start must not be settled"),
+      recordImportedTranscript: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: () => Effect.die("pending start must not be settled"),
+  });
 });
 
 it.effect("marks active running sessions that have persisted resume state", () => {

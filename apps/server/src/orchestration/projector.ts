@@ -426,6 +426,7 @@ export function projectEvent(
             projectId: payload.projectId,
             title: payload.title,
             modelSelection: payload.modelSelection,
+            providerRoutingMode: payload.providerRoutingMode ?? "fixed",
             runtimeMode: payload.runtimeMode,
             interactionMode: payload.interactionMode,
             branch: payload.branch,
@@ -621,6 +622,9 @@ export function projectEvent(
                 : {}),
               ...(payload.modelSelection !== undefined
                 ? { modelSelection: payload.modelSelection }
+                : {}),
+              ...(payload.providerRoutingMode !== undefined
+                ? { providerRoutingMode: payload.providerRoutingMode }
                 : {}),
               ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
               ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),

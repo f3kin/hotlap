@@ -82,6 +82,7 @@ describe("orchestration projector", () => {
           instanceId: "codex",
           model: "gpt-5-codex",
         },
+        providerRoutingMode: "fixed",
         runtimeMode: "full-access",
         interactionMode: "default",
         branch: null,
@@ -106,6 +107,53 @@ describe("orchestration projector", () => {
         session: null,
       },
     ]);
+  });
+
+  it("projects provider routing mode changes", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const created = await Effect.runPromise(
+      projectEvent(
+        createEmptyReadModel(now),
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-thread-create",
+          payload: {
+            threadId: "thread-1",
+            projectId: "project-1",
+            title: "demo",
+            modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+            providerRoutingMode: "auto",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      ),
+    );
+    expect(created.threads[0]?.providerRoutingMode).toBe("auto");
+
+    const updated = await Effect.runPromise(
+      projectEvent(
+        created,
+        makeEvent({
+          sequence: 2,
+          type: "thread.meta-updated",
+          aggregateKind: "thread",
+          aggregateId: "thread-1",
+          occurredAt: now,
+          commandId: "cmd-thread-fixed",
+          payload: { threadId: "thread-1", providerRoutingMode: "fixed", updatedAt: now },
+        }),
+      ),
+    );
+    expect(updated.threads[0]?.providerRoutingMode).toBe("fixed");
   });
 
   effectIt.effect("sets and clears branch pull requests without changing manual links", () =>

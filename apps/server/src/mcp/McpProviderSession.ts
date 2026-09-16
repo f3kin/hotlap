@@ -36,8 +36,28 @@ export function withAgentDeviceEnvironment(
 
 const sessionsByThread = new Map<ThreadId, McpProviderSessionConfig>();
 
-export function setMcpProviderSession(config: McpProviderSessionConfig): void {
-  sessionsByThread.set(config.threadId, config);
+export interface McpProviderSessionHandoff {
+  readonly target: McpProviderSessionConfig;
+  readonly previous: McpProviderSessionConfig | undefined;
+}
+
+export function beginMcpProviderSessionHandoff(
+  target: McpProviderSessionConfig,
+): McpProviderSessionHandoff {
+  const previous = sessionsByThread.get(target.threadId);
+  sessionsByThread.set(target.threadId, target);
+  return { target, previous };
+}
+
+export function rollbackMcpProviderSessionHandoff(handoff: McpProviderSessionHandoff): boolean {
+  const current = sessionsByThread.get(handoff.target.threadId);
+  if (current?.providerSessionId !== handoff.target.providerSessionId) return false;
+  if (handoff.previous) {
+    sessionsByThread.set(handoff.target.threadId, handoff.previous);
+  } else {
+    sessionsByThread.delete(handoff.target.threadId);
+  }
+  return true;
 }
 
 export function readMcpProviderSession(threadId: ThreadId): McpProviderSessionConfig | undefined {

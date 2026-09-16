@@ -600,6 +600,24 @@ export const reconcileProviderSessions = Effect.gen(function* () {
     if (session === null) {
       continue;
     }
+    const getPendingTurnStart = query.getPendingTurnStartByThreadId;
+    if (session.status === "starting" && getPendingTurnStart !== undefined) {
+      const pendingTurnStart = yield* getPendingTurnStart(thread.id).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to inspect pending provider turn during startup", {
+                threadId: thread.id,
+                cause,
+              }).pipe(Effect.as(Option.none())),
+        ),
+      );
+      // The command reactor resumes this durable request after activation.
+      // Settling it here would delete the only recoverable pending admission.
+      if (Option.isSome(pendingTurnStart)) {
+        continue;
+      }
+    }
     const binding = yield* directory.getBinding(thread.id).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterrupts(cause)
@@ -1114,6 +1132,13 @@ export const make = (options?: StartupOptions) =>
         }),
       );
       yield* options?.activate ?? Effect.void;
+
+      // Activation releases the parked provider roots. Reconcile durable work
+      // before accepting another prompt so one thread cannot gain two pending turns.
+      yield* runStartupPhase(
+        "provider-turns.reconcile",
+        orchestrationReactor.reconcilePendingTurns(),
+      );
 
       yield* Effect.logDebug("Accepting commands");
       yield* commandGate.signalCommandReady;

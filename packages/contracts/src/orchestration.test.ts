@@ -319,6 +319,32 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
     assert.strictEqual(parsed.modelSelection, undefined);
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
     assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
+    assert.strictEqual(parsed.allowProviderAccountRouting, undefined);
+  }),
+);
+
+it.effect("preserves explicit one-turn provider account routing consent", () =>
+  Effect.gen(function* () {
+    const command = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-allow-routing",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-allow-routing",
+        role: "user",
+        text: "route this foreground turn",
+        attachments: [],
+      },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      allowProviderAccountRouting: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    if (command.type !== "thread.turn.start") {
+      assert.fail(`Expected thread.turn.start, received ${command.type}.`);
+    }
+    assert.strictEqual(command.allowProviderAccountRouting, true);
   }),
 );
 
@@ -600,6 +626,7 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
             provider: "codex",
             model: "gpt-5.4",
           },
+          providerRoutingMode: "auto",
           runtimeMode: "full-access",
           interactionMode: "default",
           branch: null,
@@ -617,6 +644,7 @@ it.effect("accepts bootstrap metadata in thread.turn.start", () =>
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     assert.strictEqual(parsed.bootstrap?.createThread?.projectId, "project-1");
+    assert.strictEqual(parsed.bootstrap?.createThread?.providerRoutingMode, "auto");
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.baseBranch, "main");
     assert.strictEqual(parsed.bootstrap?.prepareWorktree?.startFromOrigin, true);
     assert.strictEqual(parsed.bootstrap?.runSetupScript, true);
@@ -642,6 +670,7 @@ it.effect("decodes thread.created runtime mode for historical events", () =>
 
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
     assert.strictEqual(parsed.modelSelection.instanceId, "codex");
+    assert.strictEqual(parsed.providerRoutingMode, undefined);
   }),
 );
 
@@ -781,8 +810,10 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
 
     assert.strictEqual(thread.settledOverride, null);
     assert.strictEqual(thread.settledAt, null);
+    assert.strictEqual(thread.providerRoutingMode, undefined);
     assert.strictEqual(shell.settledOverride, null);
     assert.strictEqual(shell.settledAt, null);
+    assert.strictEqual(shell.providerRoutingMode, undefined);
     // Pre-link servers omit the array entirely.
     assert.deepStrictEqual(thread.pullRequests, []);
     assert.deepStrictEqual(shell.pullRequests, []);
@@ -1177,6 +1208,75 @@ it.effect("accepts a title regeneration intent in thread.meta.update", () =>
   }),
 );
 
+it.effect("accepts explicit automatic provider routing on thread creation", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.create",
+      commandId: "cmd-thread-auto",
+      threadId: "thread-auto",
+      projectId: "project-1",
+      title: "Automatic routing",
+      modelSelection: { instanceId: "codex_work", model: "gpt-5.4" },
+      providerRoutingMode: "auto",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.create");
+    if (parsed.type === "thread.create") {
+      assert.strictEqual(parsed.providerRoutingMode, "auto");
+    }
+  }),
+);
+
+it.effect("accepts changing an existing thread's provider routing mode", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.meta.update",
+      commandId: "cmd-thread-routing-mode",
+      threadId: "thread-1",
+      providerRoutingMode: "auto",
+    });
+
+    assert.strictEqual(parsed.type, "thread.meta.update");
+    if (parsed.type === "thread.meta.update") {
+      assert.strictEqual(parsed.providerRoutingMode, "auto");
+    }
+  }),
+);
+
+it.effect("accepts an internal atomic provider account route", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeOrchestrationCommand({
+      type: "thread.provider-account.route",
+      commandId: "cmd-provider-account-route",
+      threadId: "thread-1",
+      previousProviderInstanceId: "codex-personal",
+      modelSelection: { instanceId: "codex-work", model: "gpt-5.4" },
+      providerRoutingMode: "auto",
+      activity: {
+        id: "activity-provider-account-route",
+        tone: "info",
+        kind: "provider.account.routed",
+        summary: "Switched provider account",
+        payload: {
+          previousProviderInstanceId: "codex-personal",
+          providerInstanceId: "codex-work",
+          reason: "usage-threshold",
+        },
+        turnId: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.provider-account.route");
+  }),
+);
+
 it.effect("accepts thread.pull-request.link and .unlink commands", () =>
   Effect.gen(function* () {
     const link = yield* decodeOrchestrationCommand({
@@ -1349,7 +1449,20 @@ it.effect(
       assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
       assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
       assert.strictEqual(parsed.sourceProposedPlan, undefined);
+      assert.strictEqual(parsed.allowProviderAccountRouting, undefined);
     }),
+);
+
+it.effect("decodes turn-start-requested routing consent", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadTurnStartRequestedPayload({
+      threadId: "thread-1",
+      messageId: "msg-allow-routing",
+      allowProviderAccountRouting: true,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    assert.strictEqual(parsed.allowProviderAccountRouting, true);
+  }),
 );
 
 it.effect("decodes thread.turn-start-requested source proposed plan metadata when present", () =>

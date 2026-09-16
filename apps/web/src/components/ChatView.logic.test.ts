@@ -70,6 +70,11 @@ import {
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
   resolveThreadMetadataUpdateForNextTurn,
+  resolveComposerSelectionAfterProviderRouting,
+  resolveProviderRoutingAccountInstanceId,
+  resolveProviderRoutingModeAfterSelection,
+  providerAccountRoutingConsentForSubmission,
+  resolveNewThreadProviderRoutingMode,
   resolveSendEnvMode,
   threadShellHasStarted,
   resolveDraftHeroState,
@@ -86,6 +91,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
+  shouldClearAcknowledgedProviderRoutingIntent,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
   shouldOpenProactiveTurnDiff,
@@ -1167,6 +1173,269 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
         nextBranch: "feature/current",
       }),
     ).toBeNull();
+  });
+
+  it("keeps automatic routing when only the model changes within the current account", () => {
+    expect(
+      resolveThreadMetadataUpdateForNextTurn({
+        currentModelSelection: modelSelection,
+        currentProviderRoutingMode: "auto",
+        nextModelSelection: { ...modelSelection, model: "gpt-5.6-sol" },
+        currentBranch: "main",
+      }),
+    ).toEqual({ modelSelection: { ...modelSelection, model: "gpt-5.6-sol" } });
+  });
+
+  it("pins automatic routing when the user selects another account", () => {
+    expect(
+      resolveThreadMetadataUpdateForNextTurn({
+        currentModelSelection: modelSelection,
+        currentProviderRoutingMode: "auto",
+        nextModelSelection: {
+          ...modelSelection,
+          instanceId: ProviderInstanceId.make("codex_personal"),
+        },
+        currentBranch: "main",
+      }),
+    ).toEqual({
+      modelSelection: {
+        ...modelSelection,
+        instanceId: ProviderInstanceId.make("codex_personal"),
+      },
+      providerRoutingMode: "fixed",
+    });
+  });
+
+  it("persists a pending Auto choice before starting the turn", () => {
+    expect(
+      resolveThreadMetadataUpdateForNextTurn({
+        currentModelSelection: modelSelection,
+        currentProviderRoutingMode: "fixed",
+        nextProviderRoutingMode: "auto",
+        currentBranch: "main",
+      }),
+    ).toEqual({ providerRoutingMode: "auto" });
+  });
+});
+
+describe("resolveProviderRoutingModeAfterSelection", () => {
+  it("pins only account changes, not model changes on the same account", () => {
+    const codex = ProviderInstanceId.make("codex");
+    expect(resolveProviderRoutingModeAfterSelection("auto", codex, codex)).toBe("auto");
+    expect(
+      resolveProviderRoutingModeAfterSelection(
+        "auto",
+        codex,
+        ProviderInstanceId.make("codex_personal"),
+      ),
+    ).toBe("fixed");
+    expect(
+      resolveProviderRoutingModeAfterSelection(
+        "auto",
+        codex,
+        ProviderInstanceId.make("codex_personal"),
+        true,
+      ),
+    ).toBe("auto");
+  });
+});
+
+describe("shouldClearAcknowledgedProviderRoutingIntent", () => {
+  it("clears the latest saved Fixed intent when Auto was coalesced before projection", () => {
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: true,
+        intendedMode: "fixed",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps an intent until its save is acknowledged and projected", () => {
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: false,
+        intendedMode: "fixed",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(false);
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: true,
+        intendedMode: "fixed",
+        authoritativeMode: "auto",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("resolveNewThreadProviderRoutingMode", () => {
+  const work = ProviderInstanceId.make("codex_work");
+  const personal = ProviderInstanceId.make("codex_personal");
+  const options = [
+    { instanceId: work, driver: ProviderDriverKind.make("codex"), displayName: "Work" },
+    {
+      instanceId: personal,
+      driver: ProviderDriverKind.make("codex"),
+      displayName: "Personal",
+    },
+  ];
+
+  it("keeps Auto only when the new thread's selected account is eligible", () => {
+    const base = {
+      routingSupported: true,
+      usesProjectPolicy: true,
+      policy: {
+        defaultMode: "auto" as const,
+        instanceIdsByDriver: { codex: [work, personal] },
+        usageThresholdPercent: 80,
+      },
+      options,
+    };
+
+    expect(
+      resolveNewThreadProviderRoutingMode({
+        ...base,
+        selectedAccount: { instanceId: work },
+      }),
+    ).toBe("auto");
+    expect(
+      resolveNewThreadProviderRoutingMode({
+        ...base,
+        selectedAccount: { instanceId: ProviderInstanceId.make("codex_other") },
+      }),
+    ).toBe("fixed");
+  });
+
+  it("uses Fixed for unsupported servers and inherited policies", () => {
+    const policy = {
+      defaultMode: "auto" as const,
+      instanceIdsByDriver: { codex: [work, personal] },
+      usageThresholdPercent: 80,
+    };
+    expect(
+      resolveNewThreadProviderRoutingMode({
+        routingSupported: false,
+        usesProjectPolicy: true,
+        policy,
+        options,
+        selectedAccount: { instanceId: work },
+      }),
+    ).toBe("fixed");
+    expect(
+      resolveNewThreadProviderRoutingMode({
+        routingSupported: true,
+        usesProjectPolicy: false,
+        policy,
+        options,
+        selectedAccount: { instanceId: work },
+      }),
+    ).toBe("fixed");
+  });
+
+  it("uses Fixed until the project has an explicit threshold", () => {
+    expect(
+      resolveNewThreadProviderRoutingMode({
+        routingSupported: true,
+        usesProjectPolicy: true,
+        policy: {
+          defaultMode: "auto",
+          instanceIdsByDriver: { [ProviderDriverKind.make("codex")]: [work, personal] },
+          usageThresholdPercent: null,
+        },
+        options,
+        selectedAccount: { instanceId: work },
+      }),
+    ).toBe("fixed");
+  });
+});
+
+describe("resolveComposerSelectionAfterProviderRouting", () => {
+  const currentSelection = {
+    instanceId: ProviderInstanceId.make("codex"),
+    model: "gpt-5.6-sol",
+  };
+  const routedSelection = {
+    ...currentSelection,
+    instanceId: ProviderInstanceId.make("codex_personal"),
+  };
+
+  it("reconciles a seeded composer selection to the account routed by the server", () => {
+    expect(
+      resolveComposerSelectionAfterProviderRouting({
+        composerInstanceId: currentSelection.instanceId,
+        composerSelectionExplicit: false,
+        routedSelection,
+      }),
+    ).toEqual(routedSelection);
+  });
+
+  it("preserves an explicit user selection", () => {
+    expect(
+      resolveComposerSelectionAfterProviderRouting({
+        composerInstanceId: currentSelection.instanceId,
+        composerSelectionExplicit: true,
+        routedSelection,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveProviderRoutingAccountInstanceId", () => {
+  const composerInstanceId = ProviderInstanceId.make("codex_personal");
+  const routedInstanceId = ProviderInstanceId.make("codex_work");
+
+  it("shows the live composer account before the first turn", () => {
+    expect(
+      resolveProviderRoutingAccountInstanceId({
+        threadStarted: false,
+        composerInstanceId,
+        routedInstanceId,
+      }),
+    ).toBe(composerInstanceId);
+  });
+
+  it("shows the durable routed account after the thread starts", () => {
+    expect(
+      resolveProviderRoutingAccountInstanceId({
+        threadStarted: true,
+        composerInstanceId,
+        routedInstanceId,
+      }),
+    ).toBe(routedInstanceId);
+  });
+});
+
+describe("providerAccountRoutingConsentForSubmission", () => {
+  it("opts in only supported foreground Auto turns", () => {
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({ allowProviderAccountRouting: true });
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "background",
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({});
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: "fixed",
+        supported: true,
+      }),
+    ).toEqual({});
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: "auto",
+        supported: false,
+      }),
+    ).toEqual({});
   });
 });
 

@@ -46,11 +46,12 @@ import {
 import { removeThreadOutboxMessage } from "./thread-outbox-removal";
 import {
   isQueuedThreadCreationSendable,
-  modelSelectionsEqual,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
+  resolveQueuedThreadMetadataUpdate,
   resolveQueuedThreadSettings,
+  shouldAllowQueuedProviderAccountRouting,
   shouldRetryThreadOutboxDelivery,
   threadOutboxRetryDelayMs,
   type QueuedThreadCreation,
@@ -319,6 +320,9 @@ export async function recoverEditedCreationAfterDelivery(
       ...(kept.modelSelection !== undefined ? { modelSelection: kept.modelSelection } : {}),
       ...(kept.runtimeMode !== undefined ? { runtimeMode: kept.runtimeMode } : {}),
       ...(kept.interactionMode !== undefined ? { interactionMode: kept.interactionMode } : {}),
+      ...(kept.providerRoutingMode !== undefined
+        ? { providerRoutingMode: kept.providerRoutingMode }
+        : {}),
     });
     // The append only schedules a debounced write; the queue entry is the
     // only durable copy until the draft lands, so flush before removing.
@@ -411,6 +415,9 @@ export async function restoreRejectedQueuedMessage(
       ...(queuedMessage.modelSelection ? { modelSelection: queuedMessage.modelSelection } : {}),
       ...(queuedMessage.runtimeMode ? { runtimeMode: queuedMessage.runtimeMode } : {}),
       ...(queuedMessage.interactionMode ? { interactionMode: queuedMessage.interactionMode } : {}),
+      ...(queuedMessage.providerRoutingMode
+        ? { providerRoutingMode: queuedMessage.providerRoutingMode }
+        : {}),
       ...(queuedMessage.creation
         ? {
             workspaceSelection: {
@@ -706,13 +713,17 @@ export function useThreadOutboxDrain(): void {
       }
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
 
-      if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
+      const metadataUpdate = resolveQueuedThreadMetadataUpdate(
+        { ...queuedMessage, modelSelection: settings.modelSelection },
+        thread,
+      );
+      if (metadataUpdate) {
         const updateResult = await updateThreadMetadata({
           environmentId: queuedMessage.environmentId,
           input: {
             commandId: settingsCommandId(queuedMessage, "model-selection"),
             threadId: queuedMessage.threadId,
-            modelSelection: settings.modelSelection,
+            ...metadataUpdate,
           },
         });
         if (AsyncResult.isFailure(updateResult)) {
@@ -825,6 +836,13 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          ...(shouldAllowQueuedProviderAccountRouting(
+            queuedMessage,
+            "providerAccountRouting" in currentConfig.environment.capabilities &&
+              currentConfig.environment.capabilities.providerAccountRouting === true,
+          )
+            ? { allowProviderAccountRouting: true as const }
+            : {}),
           createdAt: queuedMessage.createdAt,
         },
       });
@@ -953,6 +971,14 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
+          providerRoutingMode: queuedMessage.providerRoutingMode ?? "fixed",
+          ...(shouldAllowQueuedProviderAccountRouting(
+            queuedMessage,
+            "providerAccountRouting" in currentConfig.environment.capabilities &&
+              currentConfig.environment.capabilities.providerAccountRouting === true,
+          )
+            ? { allowProviderAccountRouting: true as const }
+            : {}),
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,

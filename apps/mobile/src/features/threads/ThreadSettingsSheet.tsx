@@ -4,6 +4,7 @@ import type {
   ProviderInstanceId,
   ProviderOptionDescriptor,
   ProviderOptionSelection,
+  ProviderRoutingMode,
   RuntimeMode,
 } from "@t3tools/contracts";
 import type { LegendListRenderItemProps } from "@legendapp/list/react-native";
@@ -294,6 +295,7 @@ function SwitchRow(props: {
   readonly value: boolean;
   readonly onValueChange: (value: boolean) => void;
   readonly isLast?: boolean;
+  readonly disabled?: boolean;
 }) {
   return (
     <View
@@ -305,6 +307,7 @@ function SwitchRow(props: {
       <Text className="text-sm font-t3-medium text-foreground">{props.label}</Text>
       <ThemedSwitch
         accessibilityLabel={props.label}
+        disabled={props.disabled}
         onValueChange={props.onValueChange}
         value={props.value}
       />
@@ -326,6 +329,11 @@ type ThreadSettingsSessionProps = {
   readonly onUpdateOptionSelections: (selections: ReadonlyArray<ProviderOptionSelection>) => void;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly providerRoutingSupported: boolean;
+  readonly providerRoutingCanEnableAuto: boolean;
+  readonly providerAccountLabel: string;
+  readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
 };
 
 export type ExistingThreadSettingsRouteSession = ThreadSettingsSessionProps & {
@@ -375,6 +383,11 @@ type ThreadSettingsSessionValue = {
   readonly providerGroups: ReadonlyArray<ProviderGroup>;
   readonly runtimeMode: RuntimeMode;
   readonly onUpdateRuntimeMode: (mode: RuntimeMode) => void;
+  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly providerRoutingSupported: boolean;
+  readonly providerRoutingCanEnableAuto: boolean;
+  readonly providerAccountLabel: string;
+  readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly providerExpansionOverrides: ReadonlySet<string>;
   readonly hasLegacyModels: boolean;
@@ -503,6 +516,11 @@ function ThreadSettingsSessionProvider(
       providerGroups: props.providerGroups,
       runtimeMode: props.runtimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      providerRoutingMode: props.providerRoutingMode,
+      providerRoutingSupported: props.providerRoutingSupported,
+      providerRoutingCanEnableAuto: props.providerRoutingCanEnableAuto,
+      providerAccountLabel: props.providerAccountLabel,
+      onUpdateProviderRoutingMode: props.onUpdateProviderRoutingMode,
       displayedDescriptors,
       providerExpansionOverrides,
       hasLegacyModels,
@@ -534,7 +552,12 @@ function ThreadSettingsSessionProvider(
       pressModel,
       providerFilter,
       props.onUpdateRuntimeMode,
+      props.onUpdateProviderRoutingMode,
+      props.providerAccountLabel,
       props.providerGroups,
+      props.providerRoutingMode,
+      props.providerRoutingSupported,
+      props.providerRoutingCanEnableAuto,
       props.runtimeMode,
       searchQuery,
       showLegacyToggle,
@@ -721,6 +744,27 @@ function ThreadSettingsOptionsItem(props: {
         className="mx-4 overflow-hidden rounded-2xl bg-card"
         layout={THREAD_SETTINGS_OPTIONS_LAYOUT_TRANSITION}
       >
+        {session.providerRoutingSupported ? (
+          <>
+            <View className="min-h-11 flex-row items-center gap-2 border-b border-border-subtle bg-card px-4 py-2">
+              <Text className="text-sm font-t3-medium text-foreground">Account</Text>
+              <View className="flex-1" />
+              <Text className="shrink text-sm text-foreground-muted" numberOfLines={1}>
+                {session.providerAccountLabel}
+              </Text>
+            </View>
+            <SwitchRow
+              label="Automatic account switching"
+              value={session.providerRoutingMode === "auto"}
+              disabled={
+                session.providerRoutingMode === "fixed" && !session.providerRoutingCanEnableAuto
+              }
+              onValueChange={(enabled) =>
+                session.onUpdateProviderRoutingMode(enabled ? "auto" : "fixed")
+              }
+            />
+          </>
+        ) : null}
         {session.displayedDescriptors.map((descriptor) => {
           if (descriptor.type === "select") {
             return (
@@ -1308,6 +1352,11 @@ export function NewTaskThreadSettingsRouteScreen() {
       onUpdateOptionSelections={flow.setSelectedModelOptions}
       runtimeMode={flow.runtimeMode}
       onUpdateRuntimeMode={flow.setRuntimeMode}
+      providerRoutingMode={flow.providerRoutingMode}
+      providerRoutingSupported={flow.providerRoutingSupported}
+      providerRoutingCanEnableAuto={flow.providerRoutingCanEnableAuto}
+      providerAccountLabel={flow.providerAccountLabel}
+      onUpdateProviderRoutingMode={flow.setProviderRoutingMode}
     >
       <ThreadSettingsPickerNavigator onClose={() => navigation.goBack()} />
     </ThreadSettingsSessionProvider>

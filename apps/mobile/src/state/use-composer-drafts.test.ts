@@ -194,6 +194,7 @@ import {
   stickyComposerModelSelectionAtom,
   undoComposerDraftMerge,
   undoComposerDraftMergeState,
+  updateComposerDraftSettings,
 } from "./use-composer-drafts";
 
 const DRAFT: ComposerDraft = {
@@ -405,6 +406,19 @@ describe("mobile composer drafts", () => {
     ).drafts[key];
     expect(reloaded?.context?.records[0]).toMatchObject({ name: file.name, attachmentId: file.id });
     expect(reloaded?.context?.records[0]?.label.length).toBeLessThanOrEqual(200);
+  });
+
+  it("keeps an explicit provider routing choice through reload", () => {
+    const key = "new-task:routing-choice";
+    updateComposerDraftSettings(key, { providerRoutingMode: "fixed" });
+
+    const draft = getComposerDraftSnapshot(key);
+    const reloaded = decodePersistedComposerState({
+      schemaVersion: 1,
+      drafts: { [key]: draft },
+    }).drafts[key];
+
+    expect(reloaded?.providerRoutingMode).toBe("fixed");
   });
 
   it("gives a folded paste a chip that survives the send", () => {

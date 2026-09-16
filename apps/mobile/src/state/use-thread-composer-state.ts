@@ -12,6 +12,7 @@ import {
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
+  type ProviderRoutingMode,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -31,6 +32,13 @@ import { uuidv4 } from "../lib/uuid";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
 import { isModelSelectionUnavailable } from "../lib/modelOptions";
+import {
+  modelSelectionsMatch,
+  reconcileDraftModelSelectionAfterAutomaticRoute,
+  resolveProviderRoutingModeForSubmission,
+  routingModeAfterManualModelSelection,
+  shouldClearAcknowledgedProviderRoutingIntent,
+} from "../lib/providerRouting";
 import { resolveProviderInteractionMode } from "../features/threads/legacy-plan-mode";
 import {
   convertPastedImagesToAttachments,
@@ -142,10 +150,28 @@ export function useThreadComposerState() {
   const uploadThreadFeedback = useAtomCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
+  const updateThreadMetadata = useAtomCommand(
+    threadEnvironment.updateMetadata,
+    "account switching mode",
+  );
   const pastedTextFileNamesRef = useRef<{ threadKey: string | null; names: Set<string> }>({
     threadKey: null,
     names: new Set(),
   });
+  const providerRoutingSaveRevisionRef = useRef(0);
+  const providerRoutingSaveRef = useRef<{
+    readonly revision: number;
+    readonly threadKey: string;
+    readonly mode: ProviderRoutingMode;
+    acknowledged: boolean;
+  } | null>(null);
+  const authoritativeProviderRoutingModeRef = useRef<{
+    readonly threadKey: string;
+    readonly mode: ProviderRoutingMode;
+  } | null>(null);
+  const explicitModelSelectionThreadKeysRef = useRef(new Set<string>());
+  const consumedDraftModelSelectionsRef = useRef<Record<string, ModelSelection>>({});
+  const previousThreadModelSelectionsRef = useRef<Record<string, ModelSelection>>({});
   const reservePastedTextFileName = useCallback(
     (threadKey: string, existingNames: ReadonlyArray<string>) => {
       if (pastedTextFileNamesRef.current.threadKey !== threadKey) {
@@ -261,6 +287,113 @@ export function useThreadComposerState() {
       ? 1
       : 0);
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
+
+  useEffect(() => {
+    if (!selectedThreadKey || !selectedThread) return;
+    authoritativeProviderRoutingModeRef.current = {
+      threadKey: selectedThreadKey,
+      mode: selectedThread.providerRoutingMode ?? "fixed",
+    };
+  }, [selectedThread, selectedThreadKey]);
+
+  const clearProjectedProviderRoutingIntent = useCallback(
+    (threadKey: string, mode: ProviderRoutingMode) => {
+      if (getComposerDraftSnapshot(threadKey).providerRoutingMode !== mode) return;
+      updateComposerDraftSettings(threadKey, { providerRoutingMode: undefined });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!selectedThreadKey || !selectedThread) return;
+    const authoritativeMode = selectedThread.providerRoutingMode ?? "fixed";
+    const pendingSave = providerRoutingSaveRef.current;
+    if (pendingSave?.threadKey === selectedThreadKey) {
+      if (
+        !shouldClearAcknowledgedProviderRoutingIntent({
+          acknowledged: pendingSave.acknowledged,
+          intendedMode: pendingSave.mode,
+          authoritativeMode,
+        })
+      ) {
+        return;
+      }
+      clearProjectedProviderRoutingIntent(selectedThreadKey, pendingSave.mode);
+      providerRoutingSaveRef.current = null;
+      return;
+    }
+    const draftMode = getComposerDraftSnapshot(selectedThreadKey).providerRoutingMode;
+    if (draftMode === authoritativeMode) {
+      clearProjectedProviderRoutingIntent(selectedThreadKey, authoritativeMode);
+    }
+  }, [clearProjectedProviderRoutingIntent, selectedThread, selectedThreadKey]);
+
+  const persistProviderRoutingModeIntent = useCallback(
+    (threadKey: string, mode: ProviderRoutingMode) => {
+      updateComposerDraftSettings(threadKey, { providerRoutingMode: mode });
+      const revision = providerRoutingSaveRevisionRef.current + 1;
+      providerRoutingSaveRevisionRef.current = revision;
+      providerRoutingSaveRef.current = {
+        revision,
+        threadKey,
+        mode,
+        acknowledged: false,
+      };
+      const threadId = selectedThreadShell?.id;
+      const environmentId = selectedThreadShell?.environmentId;
+      if (!threadId || !environmentId) return;
+      void updateThreadMetadata({
+        environmentId,
+        input: { threadId, providerRoutingMode: mode },
+      }).then((result) => {
+        const pendingSave = providerRoutingSaveRef.current;
+        if (!pendingSave || pendingSave.revision !== revision) return;
+        pendingSave.acknowledged = result._tag === "Success";
+        const currentMode = authoritativeProviderRoutingModeRef.current;
+        if (
+          currentMode?.threadKey === threadKey &&
+          shouldClearAcknowledgedProviderRoutingIntent({
+            acknowledged: pendingSave.acknowledged,
+            intendedMode: mode,
+            authoritativeMode: currentMode.mode,
+          })
+        ) {
+          clearProjectedProviderRoutingIntent(threadKey, mode);
+          providerRoutingSaveRef.current = null;
+        }
+      });
+    },
+    [clearProjectedProviderRoutingIntent, selectedThreadShell, updateThreadMetadata],
+  );
+
+  useEffect(() => {
+    if (!selectedThreadKey || !selectedThread) return;
+
+    const previousThreadSelection = previousThreadModelSelectionsRef.current[selectedThreadKey];
+    previousThreadModelSelectionsRef.current[selectedThreadKey] = selectedThread.modelSelection;
+    if (!previousThreadSelection) return;
+
+    const consumedDraftSelection = consumedDraftModelSelectionsRef.current[selectedThreadKey];
+    if (
+      consumedDraftSelection &&
+      modelSelectionsMatch(consumedDraftSelection, selectedThread.modelSelection)
+    ) {
+      delete consumedDraftModelSelectionsRef.current[selectedThreadKey];
+    }
+    const draftSelection = getComposerDraftSnapshot(selectedThreadKey).modelSelection;
+    const reconciledSelection = reconcileDraftModelSelectionAfterAutomaticRoute({
+      providerRoutingMode: selectedThread.providerRoutingMode ?? "fixed",
+      previousThreadSelection: consumedDraftSelection ?? previousThreadSelection,
+      currentThreadSelection: selectedThread.modelSelection,
+      draftSelection,
+      draftSelectionIsExplicit: explicitModelSelectionThreadKeysRef.current.has(selectedThreadKey),
+    });
+    if (reconciledSelection !== draftSelection) {
+      delete consumedDraftModelSelectionsRef.current[selectedThreadKey];
+      updateComposerDraftSettings(selectedThreadKey, { modelSelection: reconciledSelection });
+    }
+  }, [selectedThread, selectedThreadKey]);
+
   const authoritativeModelSelection = selectedThread?.modelSelection;
   const modelSelection = authoritativeModelSelection
     ? resolveThreadModelSelection(
@@ -460,6 +593,18 @@ export function useThreadComposerState() {
 
     const metadata = makeQueuedMessageMetadata();
     const messageId = MessageId.make(metadata.messageId);
+    const providerRoutingMode = resolveProviderRoutingModeForSubmission({
+      draftMode: draft.providerRoutingMode,
+      authoritativeMode: thread.providerRoutingMode ?? "fixed",
+      authoritativeInstanceId: thread.modelSelection.instanceId,
+      selectedInstanceId: modelSelection.instanceId,
+    });
+    const providerAccountRoutingSupported = Boolean(
+      serverConfig &&
+      "providerAccountRouting" in serverConfig.environment.capabilities &&
+      serverConfig.environment.capabilities.providerAccountRouting === true,
+    );
+    const modelSelectionWasExplicit = explicitModelSelectionThreadKeysRef.current.has(threadKey);
     // Enqueue publishes the queued atom synchronously (the durable write
     // happens behind it), so clearing the draft here gives send feedback on
     // the tap frame instead of after file I/O. If the write fails the message
@@ -479,8 +624,14 @@ export function useThreadComposerState() {
         provider,
         draft.interactionMode ?? thread.interactionMode,
       ),
+      providerRoutingMode,
+      ...(providerRoutingMode === "auto" && providerAccountRoutingSupported
+        ? { allowProviderAccountRouting: true as const }
+        : {}),
       createdAt: metadata.createdAt,
     });
+    explicitModelSelectionThreadKeysRef.current.delete(threadKey);
+    consumedDraftModelSelectionsRef.current[threadKey] = modelSelection;
     clearComposerDraftContent(threadKey, { deferAttachmentCleanup: true });
     enqueuePromise.then(
       () => {
@@ -490,6 +641,10 @@ export function useThreadComposerState() {
         scheduleUnusedComposerAttachmentCleanup(attachments);
       },
       (error: unknown) => {
+        delete consumedDraftModelSelectionsRef.current[threadKey];
+        if (modelSelectionWasExplicit) {
+          explicitModelSelectionThreadKeysRef.current.add(threadKey);
+        }
         // Restore text via merge (idempotent) but attachments via the uncapped
         // append: the merge path slots existing attachments first and truncates
         // at the send limit, which would silently drop this message's images if
@@ -792,8 +947,32 @@ export function useThreadComposerState() {
           ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
           : {}),
       });
+      explicitModelSelectionThreadKeysRef.current.add(selectedThreadKey);
+      delete consumedDraftModelSelectionsRef.current[selectedThreadKey];
+      const currentProviderRoutingMode =
+        getComposerDraftSnapshot(selectedThreadKey).providerRoutingMode ??
+        selectedThread?.providerRoutingMode ??
+        "fixed";
+      if (
+        selectedThreadShell &&
+        selectedThread &&
+        routingModeAfterManualModelSelection(
+          currentProviderRoutingMode,
+          selectedThread.modelSelection.instanceId,
+          value.instanceId,
+        ) === "fixed" &&
+        currentProviderRoutingMode === "auto"
+      ) {
+        persistProviderRoutingModeIntent(selectedThreadKey, "fixed");
+      }
     },
-    [selectedEnvironmentRuntime?.serverConfig, selectedThreadKey],
+    [
+      selectedEnvironmentRuntime?.serverConfig,
+      selectedThread,
+      selectedThreadKey,
+      selectedThreadShell,
+      persistProviderRoutingModeIntent,
+    ],
   );
 
   const onUpdateRuntimeMode = useCallback(
@@ -824,6 +1003,15 @@ export function useThreadComposerState() {
     [selectedEnvironmentRuntime?.serverConfig, selectedThread?.modelSelection, selectedThreadKey],
   );
 
+  const onUpdateProviderRoutingMode = useCallback(
+    (providerRoutingMode: ProviderRoutingMode) => {
+      if (!selectedThreadShell) return;
+      const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
+      persistProviderRoutingModeIntent(threadKey, providerRoutingMode);
+    },
+    [persistProviderRoutingModeIntent, selectedThreadShell],
+  );
+
   return {
     feedbackSubmissions,
     dismissFeedback,
@@ -850,5 +1038,6 @@ export function useThreadComposerState() {
     onUpdateModelSelection,
     onUpdateRuntimeMode,
     onUpdateInteractionMode,
+    onUpdateProviderRoutingMode,
   };
 }

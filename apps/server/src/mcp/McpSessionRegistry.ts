@@ -19,6 +19,10 @@ export interface McpCredentialRequest {
 
 export interface McpIssuedCredential {
   readonly config: McpProviderSession.McpProviderSessionConfig;
+  /** Makes this the only live credential for its thread after the provider starts. */
+  readonly activate: Effect.Effect<void>;
+  /** Revokes only this credential, leaving an earlier session usable on rollback. */
+  readonly revoke: Effect.Effect<void>;
 }
 
 export interface McpSessionRegistryShape {
@@ -135,10 +139,16 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         ]),
         issuedAt,
       };
-      yield* SynchronizedRef.update(state, ({ records }) => {
+      const supersededTokenHashes = yield* SynchronizedRef.modify(state, ({ records }) => {
         const next = new Map(pruneDead(records, issuedAt));
+        // Capture only credentials that predate this issue. If concurrent
+        // handoffs finish out of order, an obsolete activation must not revoke
+        // the newer credential.
+        const superseded = Array.from(next)
+          .filter(([, record]) => record.scope.threadId === scope.threadId)
+          .map(([existingTokenHash]) => existingTokenHash);
         next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt });
-        return { records: next };
+        return [superseded, { records: next }] as const;
       });
       return {
         config: {
@@ -150,6 +160,15 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           authorizationHeader: `Bearer ${rawToken}`,
           capabilities: scope.capabilities,
         },
+        activate: SynchronizedRef.update(state, ({ records }) => {
+          if (!records.has(tokenHash)) return { records };
+          const next = new Map(records);
+          for (const supersededTokenHash of supersededTokenHashes) {
+            next.delete(supersededTokenHash);
+          }
+          return { records: next };
+        }),
+        revoke: revokeWhere((record) => record.scope.providerSessionId === providerSessionId),
       };
     },
   );
@@ -230,11 +249,7 @@ export const layer = Layer.effect(McpSessionRegistry, make);
 export const issueActiveMcpCredential = (
   request: McpCredentialRequest,
 ): Effect.Effect<McpIssuedCredential | undefined> =>
-  activeMcpSessionRegistry
-    ? activeMcpSessionRegistry
-        .revokeThread(request.threadId)
-        .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
-    : Effect.sync((): McpIssuedCredential | undefined => undefined);
+  activeMcpSessionRegistry ? activeMcpSessionRegistry.issue(request) : Effect.succeed(undefined);
 
 /**
  * Refreshes the liveness of a thread's MCP credential. Called on every provider

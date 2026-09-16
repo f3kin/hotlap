@@ -12,6 +12,8 @@ import {
   type ProviderInteractionMode,
   ProviderDriverKind,
   type ProviderInstanceId,
+  type ProviderRoutingMode,
+  type ProviderRoutingPolicy,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
@@ -61,6 +63,10 @@ import {
   resolveSelectableProviderInstanceEntry,
   type ProviderInstanceEntry,
 } from "../providerInstances";
+import {
+  resolveProviderRoutingDefaultMode,
+  type ProviderRoutingOption,
+} from "./settings/ProviderRoutingSettings.logic";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
@@ -503,13 +509,88 @@ export function startNewThreadForProject(
   return true;
 }
 
+export function resolveProviderRoutingModeAfterSelection(
+  currentMode: ProviderRoutingMode,
+  currentInstanceId: ProviderInstanceId,
+  nextInstanceId: ProviderInstanceId,
+  preserveExplicitAuto = false,
+): ProviderRoutingMode {
+  return currentMode === "auto" && currentInstanceId !== nextInstanceId && !preserveExplicitAuto
+    ? "fixed"
+    : currentMode;
+}
+
+export function shouldClearAcknowledgedProviderRoutingIntent(input: {
+  readonly acknowledged: boolean;
+  readonly intendedMode: ProviderRoutingMode;
+  readonly authoritativeMode: ProviderRoutingMode;
+}): boolean {
+  return input.acknowledged && input.intendedMode === input.authoritativeMode;
+}
+
+export function resolveNewThreadProviderRoutingMode(input: {
+  readonly routingSupported: boolean;
+  readonly usesProjectPolicy: boolean;
+  readonly policy: ProviderRoutingPolicy;
+  readonly options: ReadonlyArray<ProviderRoutingOption>;
+  readonly selectedAccount: { readonly instanceId: ProviderInstanceId } | null;
+}): ProviderRoutingMode {
+  if (!input.routingSupported || !input.usesProjectPolicy) return "fixed";
+  return resolveProviderRoutingDefaultMode(
+    input.policy.defaultMode,
+    input.options,
+    input.policy.instanceIdsByDriver,
+    input.policy.usageThresholdPercent,
+    input.selectedAccount,
+  );
+}
+
+export function resolveComposerSelectionAfterProviderRouting(input: {
+  readonly composerInstanceId: ProviderInstanceId | null;
+  readonly composerSelectionExplicit: boolean;
+  readonly routedSelection: ModelSelection;
+}): ModelSelection | null {
+  if (
+    input.composerSelectionExplicit ||
+    input.composerInstanceId === input.routedSelection.instanceId
+  ) {
+    return null;
+  }
+  return input.routedSelection;
+}
+
+export function resolveProviderRoutingAccountInstanceId(input: {
+  readonly threadStarted: boolean;
+  readonly composerInstanceId: ProviderInstanceId | null;
+  readonly routedInstanceId: ProviderInstanceId | null;
+}): ProviderInstanceId | null {
+  return input.threadStarted
+    ? (input.routedInstanceId ?? input.composerInstanceId)
+    : (input.composerInstanceId ?? input.routedInstanceId);
+}
+
+export function providerAccountRoutingConsentForSubmission(input: {
+  readonly submissionIntent: ComposerSubmissionIntent;
+  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly supported: boolean;
+}): { readonly allowProviderAccountRouting?: true } {
+  return input.supported &&
+    input.submissionIntent === "foreground" &&
+    input.providerRoutingMode === "auto"
+    ? { allowProviderAccountRouting: true }
+    : {};
+}
+
 export function resolveThreadMetadataUpdateForNextTurn(input: {
   currentModelSelection: ModelSelection;
+  currentProviderRoutingMode?: ProviderRoutingMode;
+  nextProviderRoutingMode?: ProviderRoutingMode;
   nextModelSelection?: ModelSelection;
   currentBranch: string | null;
   nextBranch?: string;
 }): {
   modelSelection?: ModelSelection;
+  providerRoutingMode?: ProviderRoutingMode;
   branch?: string;
   worktreePath?: null;
 } | null {
@@ -521,11 +602,25 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
       JSON.stringify(nextModelSelection.options ?? null) !==
         JSON.stringify(input.currentModelSelection.options ?? null));
   const branchChanged = input.nextBranch !== undefined && input.nextBranch !== input.currentBranch;
-  if (!modelSelectionChanged && !branchChanged) {
+  const accountChanged =
+    input.currentProviderRoutingMode === "auto" &&
+    nextModelSelection !== undefined &&
+    resolveProviderRoutingModeAfterSelection(
+      input.currentProviderRoutingMode,
+      input.currentModelSelection.instanceId,
+      nextModelSelection.instanceId,
+    ) === "fixed";
+  const nextProviderRoutingMode =
+    input.nextProviderRoutingMode ?? (accountChanged ? "fixed" : undefined);
+  const providerRoutingModeChanged =
+    nextProviderRoutingMode !== undefined &&
+    nextProviderRoutingMode !== (input.currentProviderRoutingMode ?? "fixed");
+  if (!modelSelectionChanged && !branchChanged && !providerRoutingModeChanged) {
     return null;
   }
   return {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
+    ...(providerRoutingModeChanged ? { providerRoutingMode: nextProviderRoutingMode } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
   };
 }
@@ -534,6 +629,7 @@ export function buildLocalDraftThread(
   threadId: ThreadId,
   draftThread: DraftThreadState,
   fallbackModelSelection: ModelSelection,
+  providerRoutingMode: ProviderRoutingMode = "fixed",
 ): Thread {
   return {
     id: threadId,
@@ -541,6 +637,7 @@ export function buildLocalDraftThread(
     projectId: draftThread.projectId,
     title: "New thread",
     modelSelection: fallbackModelSelection,
+    providerRoutingMode,
     runtimeMode: draftThread.runtimeMode,
     interactionMode: draftThread.interactionMode,
     session: null,

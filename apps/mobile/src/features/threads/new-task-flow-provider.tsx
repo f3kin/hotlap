@@ -6,6 +6,7 @@ import type {
   ProjectReadFileResult,
   ProviderInteractionMode,
   ProviderOptionSelection,
+  ProviderRoutingMode,
   RuntimeMode,
   ServerProvider,
 } from "@t3tools/contracts";
@@ -38,6 +39,11 @@ import {
   resolveNewTaskModelSelection,
   resolveSelectableModelSelection,
 } from "../../lib/modelOptions";
+import {
+  canEnableProviderRoutingAuto,
+  eligibleProjectDefaultProviderRoutingMode,
+  resolveNewTaskProviderRoutingMode,
+} from "../../lib/providerRouting";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { projectEnvironment } from "../../state/projects";
@@ -162,6 +168,10 @@ type NewTaskFlowContextValue = {
   readonly currentCheckoutBranchName: string | null;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
+  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly providerRoutingSupported: boolean;
+  readonly providerRoutingCanEnableAuto: boolean;
+  readonly providerAccountLabel: string;
   readonly planModeEnabled: boolean;
   readonly expandedProvider: string | null;
   readonly environments: ReadonlyArray<{
@@ -216,6 +226,7 @@ type NewTaskFlowContextValue = {
   readonly loadMoreBranches: () => void;
   readonly setRuntimeMode: (value: RuntimeMode) => void;
   readonly setInteractionMode: (value: ProviderInteractionMode) => void;
+  readonly setProviderRoutingMode: (value: ProviderRoutingMode) => void;
   readonly setSelectedModelOptions: (
     value: ReadonlyArray<ProviderOptionSelection> | undefined,
   ) => void;
@@ -533,6 +544,49 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       ) ?? null,
     [selectedEnvironmentServerConfig, selectedModel?.instanceId],
   );
+  const providerRoutingSupported = Boolean(
+    selectedEnvironmentServerConfig &&
+    "providerAccountRouting" in selectedEnvironmentServerConfig.environment.capabilities &&
+    selectedEnvironmentServerConfig.environment.capabilities.providerAccountRouting === true &&
+    (selectedProviderStatus?.driver === "codex" ||
+      selectedProviderStatus?.driver === "claudeAgent"),
+  );
+  const providerRoutingCanEnableAuto = Boolean(
+    providerRoutingSupported &&
+    projectSettings.sources.providerRoutingPolicy === "project" &&
+    selectedProviderStatus &&
+    canEnableProviderRoutingAuto(
+      selectedEnvironmentServerConfig?.providers ?? [],
+      projectSettings.settings.providerRoutingPolicy.instanceIdsByDriver,
+      projectSettings.settings.providerRoutingPolicy.usageThresholdPercent,
+      selectedProviderStatus.instanceId,
+    ),
+  );
+  const defaultProviderRoutingMode: ProviderRoutingMode =
+    providerRoutingSupported && projectSettings.sources.providerRoutingPolicy === "project"
+      ? eligibleProjectDefaultProviderRoutingMode(
+          projectSettings.settings.providerRoutingPolicy.defaultMode,
+          providerRoutingCanEnableAuto,
+        )
+      : "fixed";
+  const providerRoutingMode =
+    selectedProjectDraft.providerRoutingMode ??
+    resolveNewTaskProviderRoutingMode({
+      editingMode: editingPendingTask === null ? null : editingPendingTask.providerRoutingMode,
+      projectDefault: defaultProviderRoutingMode,
+    });
+  const setProviderRoutingMode = useCallback(
+    (mode: ProviderRoutingMode) => {
+      if (
+        !selectedProjectDraftKey ||
+        !providerRoutingSupported ||
+        (mode === "auto" && !providerRoutingCanEnableAuto)
+      )
+        return;
+      updateComposerDraftSettings(selectedProjectDraftKey, { providerRoutingMode: mode });
+    },
+    [providerRoutingCanEnableAuto, providerRoutingSupported, selectedProjectDraftKey],
+  );
   const planModeEnabled =
     legacyPlanModeEnabled && selectedProviderStatus?.showInteractionModeToggle !== false;
   const interactionMode = planModeEnabled
@@ -559,9 +613,22 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
           ? { interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE }
           : {}),
       });
+      if (
+        providerRoutingMode === "auto" &&
+        selectedModel !== null &&
+        selection.instanceId !== selectedModel.instanceId
+      ) {
+        updateComposerDraftSettings(selectedProjectDraftKey, { providerRoutingMode: "fixed" });
+      }
       setStickyComposerModelSelection(selection);
     },
-    [modelOptions, selectedEnvironmentServerConfig, selectedProjectDraftKey],
+    [
+      modelOptions,
+      providerRoutingMode,
+      selectedEnvironmentServerConfig,
+      selectedModel,
+      selectedProjectDraftKey,
+    ],
   );
   const setSelectedModelOptions = useCallback(
     (options: ReadonlyArray<ProviderOptionSelection> | undefined) => {
@@ -931,6 +998,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         modelSelection: message.modelSelection,
         runtimeMode: message.runtimeMode,
         interactionMode: message.interactionMode,
+        providerRoutingMode: message.providerRoutingMode ?? "fixed",
         workspaceSelection: {
           mode: message.creation.workspaceMode,
           branch: message.creation.branch,
@@ -1004,6 +1072,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
             (candidate) => candidate.instanceId === draftModelSelection.instanceId,
           ),
         }),
+        providerRoutingMode,
         creation: {
           projectId: selectedProject.id,
           ...(projectTitle !== undefined ? { projectTitle } : {}),
@@ -1039,6 +1108,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectedProjectDraftKey,
       legacyPlanModeEnabled,
       planModePreferenceLoaded,
+      providerRoutingMode,
       startFromOrigin,
       workspaceMode,
     ],
@@ -1170,6 +1240,11 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       currentCheckoutBranchName,
       runtimeMode,
       interactionMode,
+      providerRoutingMode,
+      providerRoutingSupported,
+      providerRoutingCanEnableAuto,
+      providerAccountLabel:
+        selectedProviderStatus?.displayName ?? selectedModel?.instanceId ?? "Unavailable",
       planModeEnabled,
       expandedProvider,
       environments,
@@ -1203,6 +1278,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       loadMoreBranches,
       setRuntimeMode,
       setInteractionMode,
+      setProviderRoutingMode,
       setSelectedModelOptions,
       setExpandedProvider,
     }),
@@ -1224,6 +1300,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       finishEditingPendingTask,
       interactionMode,
       planModeEnabled,
+      providerRoutingMode,
+      providerRoutingSupported,
+      providerRoutingCanEnableAuto,
       loadBranches,
       loadMoreBranches,
       projectScopes,
@@ -1250,6 +1329,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       selectBranch,
       selectEnvironment,
       setInteractionMode,
+      setProviderRoutingMode,
       setPrompt,
       setRuntimeMode,
       setSelectedModelKey,

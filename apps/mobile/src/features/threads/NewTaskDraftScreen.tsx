@@ -66,6 +66,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { hasProviderUsageLimits, isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
+import { providerAccountRoutingConsentForSubmission } from "../../lib/providerRouting";
 import { COMPOSER_LAYOUT_TRANSITION, ComposerSurface } from "./ThreadComposer";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
 import { useComposerCommandMenu } from "./use-composer-command-menu";
@@ -1290,14 +1291,27 @@ export function NewTaskDraftScreen(props: {
           createdAt: editingPendingTask.createdAt,
         }
       : makeTurnCommandMetadata();
-    const message = flow.buildPendingTaskMessage(metadata, {
+    const builtMessage = flow.buildPendingTaskMessage(metadata, {
       // A task that waits in the outbox cannot know the checkout it will
       // drain against; one that sends now runs against the live one.
       currentCheckoutBranch: queuesInsteadOfStarting ? null : flow.currentCheckoutBranchName,
     });
-    if (!message) {
+    if (!builtMessage) {
       return;
     }
+    // Supported Auto submissions carry consent even when queued. Editing a
+    // historical row preserves its missing consent so it remains pinned.
+    const message = {
+      ...builtMessage,
+      ...providerAccountRoutingConsentForSubmission({
+        editingConsent:
+          editingPendingTask === null
+            ? null
+            : editingPendingTask.allowProviderAccountRouting === true,
+        providerRoutingMode: builtMessage.providerRoutingMode ?? "fixed",
+        supported: flow.providerRoutingSupported,
+      }),
+    };
     if (!queuesInsteadOfStarting) {
       // Arm the lock-screen card before the async thread creation: backgrounding
       // the app right after tapping submit would otherwise reject the foreground

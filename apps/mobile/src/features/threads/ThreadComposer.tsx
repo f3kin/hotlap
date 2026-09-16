@@ -4,6 +4,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { pastedTextDisposition, replaceTextSelection } from "@t3tools/client-runtime/text-paste";
 import {
+  DEFAULT_SERVER_SETTINGS,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type EnvironmentId,
@@ -11,10 +12,12 @@ import {
   type ModelSelection,
   type OrchestrationThreadShell,
   type ProviderInteractionMode,
+  type ProviderRoutingMode,
   type RuntimeMode,
   type ServerConfig as T3ServerConfig,
   type UsageLimitsReport,
 } from "@t3tools/contracts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   collectProviderUsageLimits,
   hasProviderUsageLimits,
@@ -49,6 +52,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { canEnableProviderRoutingAuto } from "../../lib/providerRouting";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import {
@@ -159,6 +163,8 @@ export interface ThreadComposerProps {
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
+  readonly providerRoutingMutable?: boolean;
   readonly onExpandedChange?: (expanded: boolean) => void;
   /** Fires on editor focus/blur; hosts use it to vet stale keyboard state. */
   readonly onEditorFocusChange?: (focused: boolean) => void;
@@ -353,6 +359,34 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  const projectSettings = useMemo(
+    () =>
+      resolveProjectSettings(
+        serverSettings ?? props.serverConfig?.settings ?? DEFAULT_SERVER_SETTINGS,
+        project?.id ?? null,
+        project,
+      ),
+    [project, props.serverConfig?.settings, serverSettings],
+  );
+  const providerRoutingSupported = Boolean(
+    props.providerRoutingMutable !== false &&
+    props.serverConfig &&
+    "providerAccountRouting" in props.serverConfig.environment.capabilities &&
+    props.serverConfig.environment.capabilities.providerAccountRouting === true &&
+    (selectedProviderStatus?.driver === "codex" ||
+      selectedProviderStatus?.driver === "claudeAgent"),
+  );
+  const providerRoutingCanEnableAuto = Boolean(
+    providerRoutingSupported &&
+    selectedProviderStatus &&
+    projectSettings.sources.providerRoutingPolicy === "project" &&
+    canEnableProviderRoutingAuto(
+      props.serverConfig?.providers ?? [],
+      projectSettings.settings.providerRoutingPolicy.instanceIdsByDriver,
+      projectSettings.settings.providerRoutingPolicy.usageThresholdPercent,
+      currentModelSelection.instanceId,
+    ),
+  );
   const composerOwnerKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
     Keyboard.dismiss();
@@ -604,13 +638,23 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         props.onUpdateModelSelection({ ...currentModelSelection, options }),
       runtimeMode: currentRuntimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
+      providerRoutingMode: props.selectedThread.providerRoutingMode ?? "fixed",
+      providerRoutingSupported,
+      providerRoutingCanEnableAuto,
+      providerAccountLabel: selectedProviderStatus?.displayName ?? currentModelSelection.instanceId,
+      onUpdateProviderRoutingMode: props.onUpdateProviderRoutingMode,
     }),
     [
       currentModelSelection,
       currentRuntimeMode,
       props.onUpdateModelSelection,
       props.onUpdateRuntimeMode,
+      props.onUpdateProviderRoutingMode,
+      props.selectedThread.providerRoutingMode,
       providerOptionDescriptors,
+      providerRoutingSupported,
+      providerRoutingCanEnableAuto,
+      selectedProviderStatus?.displayName,
       settingsOwnerId,
       threadProviderGroups,
     ],

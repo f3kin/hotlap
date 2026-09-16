@@ -128,6 +128,14 @@ function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   return typeof requestId === "string" ? ApprovalRequestId.make(requestId) : null;
 }
 
+function isTerminalTurnStartActivityPayload(payload: unknown): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as Record<string, unknown>).terminalTurnStart === true
+  );
+}
+
 function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
   if (detail === null) {
     return false;
@@ -615,6 +623,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             projectId: event.payload.projectId,
             title: event.payload.title,
             modelSelection: event.payload.modelSelection,
+            providerRoutingMode: event.payload.providerRoutingMode ?? "fixed",
             runtimeMode: event.payload.runtimeMode,
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
@@ -823,6 +832,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               : {}),
             ...(event.payload.modelSelection !== undefined
               ? { modelSelection: event.payload.modelSelection }
+              : {}),
+            ...(event.payload.providerRoutingMode !== undefined
+              ? { providerRoutingMode: event.payload.providerRoutingMode }
               : {}),
             ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
             ...(event.payload.worktreePath !== undefined
@@ -1373,23 +1385,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
 
         case "thread.turn-start-requested": {
-          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
-            threadId: event.payload.threadId,
-          });
-          if (Option.isSome(pendingTurnStart)) {
-            const pendingMessage = yield* projectionThreadMessageRepository.getByMessageId({
-              messageId: pendingTurnStart.value.messageId,
-            });
-            if (
-              Option.isSome(pendingMessage) &&
-              pendingMessage.value.role === "user" &&
-              (pendingMessage.value.attachments?.length ?? 0) === 0 &&
-              pendingMessage.value.text.trim().toLowerCase() === "/compact"
-            ) {
-              return;
-            }
-          }
-          yield* projectionTurnRepository.replacePendingTurnStart({
+          yield* projectionTurnRepository.insertPendingTurnStartIfAbsent({
             threadId: event.payload.threadId,
             messageId: event.payload.messageId,
             sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
@@ -1414,7 +1410,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
             return;
           }
-          if (event.payload.activity.kind !== "provider.turn.start.failed") return;
+          if (
+            event.payload.activity.kind !== "provider.turn.start.failed" &&
+            !(
+              event.payload.activity.kind === "provider.account.route.failed" &&
+              isTerminalTurnStartActivityPayload(event.payload.activity.payload)
+            )
+          ) {
+            return;
+          }
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId(
             event.payload,
           );

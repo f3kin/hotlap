@@ -41,6 +41,24 @@ Claude Code's verbose mode can stay enabled when you use Claude for text generat
 thread titles, branch names, commit messages, and pull request descriptions. On a remote connection,
 T3 Code uses the Claude configuration on the connected server.
 
+## Choose an account automatically
+
+In project settings, choose a usage threshold and at least two Claude accounts,
+then enable automatic account routing. Set a new thread to **Auto**. Use
+**Fixed** when the thread must stay on the selected account.
+
+Before the first normal message, T3 Code chooses the eligible account whose
+weekly limit resets first. The usage report must be recent and include the
+five-hour and seven-day reset times. After that placement, the thread becomes
+**Fixed** because the Claude SDK cannot yet safely continue the full native
+conversation across separate accounts. Model-specific limits do not trigger a
+change.
+
+Authentication commands, `/compact`, approvals, answers, steering, and
+background work never trigger a change. New queued prompts remain eligible when
+they are sent. If an account cannot start, T3 Code tries the remaining eligible
+accounts before falling back to a usable selected account.
+
 ## Compact long conversations
 
 Set **Auto-compact after** in the Claude provider settings to an integer between

@@ -123,6 +123,7 @@ function createProviderServiceHarness(
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),
     listSessions,
+    isSessionEventAuthoritative: () => Effect.succeed(true),
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     assertConversationRollbackSupported,
     getInstanceInfo: (instanceId) =>

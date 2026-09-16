@@ -26,6 +26,11 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { toastManager } from "../ui/toast";
 import { Switch } from "../ui/switch";
 import type { ProjectSettingsCategory } from "./ProjectSettingsPanel";
+import { ProviderRoutingSettings } from "./ProviderRoutingSettings";
+import {
+  deriveProviderRoutingOptions,
+  resolveProviderRoutingDefaultMode,
+} from "./ProviderRoutingSettings.logic";
 import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
@@ -38,6 +43,7 @@ import {
   useScopedSettings,
   useScopedSettingsMixed,
   useScopedSettingSource,
+  useUpdateScopedProviderRoutingPolicy,
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 
@@ -50,6 +56,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const { scope, target, targets, connectedEnvironments } = useSettingsScope();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  const updateRoutingPolicy = useUpdateScopedProviderRoutingPolicy();
   const navigate = useNavigate();
   const { environments } = useEnvironments();
   const representative = target
@@ -78,6 +85,13 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const workspaceSource = useScopedSettingSource(["defaultThreadEnvMode"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   const unavailable = connectedEnvironments.length === 0;
+  const providerRoutingOptions = deriveProviderRoutingOptions(
+    targets.map(
+      (candidate) =>
+        environments.find((entry) => entry.environmentId === candidate.environmentId)?.serverConfig
+          ?.providers ?? [],
+    ),
+  );
 
   // A checkout's t3.json wins over the environment default when the project
   // has no override of its own; show which one "inherit" resolves to.
@@ -127,6 +141,24 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     const reason = value ? modelDisabledReason(value.instanceId, value.model) : null;
     if (reason) {
       toastManager.add({ type: "error", title: "Default model not saved", description: reason });
+      return;
+    }
+    const nextSelection = resolveDefaultProviderModelSelection(providers, value);
+    if (isProjectScope) {
+      updateRoutingPolicy(
+        (targetSettings) => {
+          const policy = targetSettings.providerRoutingPolicy;
+          const nextMode = resolveProviderRoutingDefaultMode(
+            policy.defaultMode,
+            providerRoutingOptions,
+            policy.instanceIdsByDriver,
+            policy.usageThresholdPercent,
+            nextSelection,
+          );
+          return nextMode === policy.defaultMode ? null : { defaultMode: nextMode };
+        },
+        { defaultModelSelection: value },
+      );
       return;
     }
     updateSettings({ defaultModelSelection: value });
@@ -223,6 +255,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
               )
             }
           />
+          <ProviderRoutingSettings selectedModelSelection={selection} />
           <SettingsRow
             serverScoped
             settingKeys={["defaultRuntimeMode"]}

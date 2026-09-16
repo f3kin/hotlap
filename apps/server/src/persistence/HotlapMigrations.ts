@@ -4,6 +4,7 @@ import * as Migrator from "effect/unstable/sql/Migrator";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import Migration0001 from "./HotlapMigrations/001_ProjectionThreadForks.ts";
+import Migration0002 from "./HotlapMigrations/002_ProjectionThreadProviderRoutingMode.ts";
 
 type MigrationManifest = ReadonlyArray<readonly [id: number, name: string]>;
 type MigrationRow = {
@@ -15,7 +16,10 @@ const SHARED_LEDGER = "effect_sql_migrations";
 const HOTLAP_LEDGER = "hotlap_sql_migrations";
 const LEGACY_FORK_MIGRATION = [52, "ProjectionThreadForks"] as const;
 
-const hotlapMigrationEntries = [[1, "ProjectionThreadForks", Migration0001]] as const;
+const hotlapMigrationEntries = [
+  [1, "ProjectionThreadForks", Migration0001],
+  [2, "ProjectionThreadProviderRoutingMode", Migration0002],
+] as const;
 const hotlapMigrationManifest = hotlapMigrationEntries.map(([id, name]) => [id, name] as const);
 
 export class MigrationLedgerError extends Schema.TaggedError<MigrationLedgerError>()(

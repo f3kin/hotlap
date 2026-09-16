@@ -125,6 +125,10 @@ export const ModelSelection = ModelSelectionSource.pipe(
 );
 export type ModelSelection = typeof ModelSelection.Type;
 
+/** Whether a thread stays on its selected provider instance or may route within its project. */
+export const ProviderRoutingMode = Schema.Literals(["fixed", "auto"]);
+export type ProviderRoutingMode = typeof ProviderRoutingMode.Type;
+
 export const RuntimeMode = Schema.Literals([
   "approval-required",
   "auto-accept-edits",
@@ -775,6 +779,8 @@ export const OrchestrationThread = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  /** Missing on older snapshots and therefore interpreted as fixed. */
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -864,6 +870,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  /** Missing on older snapshots and therefore interpreted as fixed. */
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1114,6 +1122,7 @@ const ThreadCreateCommand = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1237,6 +1246,7 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   regenerateTitle: Schema.optional(Schema.Literal(true)),
   modelSelection: Schema.optional(ModelSelection),
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1285,6 +1295,7 @@ const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(TrimmedNonEmptyString),
@@ -1326,6 +1337,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1346,6 +1358,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1629,6 +1642,18 @@ const ThreadActivityAppendCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Internal atomic commit after a provider account handoff starts successfully. */
+const ThreadProviderAccountRouteCommand = Schema.Struct({
+  type: Schema.Literal("thread.provider-account.route"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  previousProviderInstanceId: ProviderInstanceId,
+  modelSelection: ModelSelection,
+  providerRoutingMode: ProviderRoutingMode,
+  activity: OrchestrationThreadActivity,
+  createdAt: IsoDateTime,
+});
+
 const ThreadRevertCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.revert.complete"),
   commandId: CommandId,
@@ -1701,6 +1726,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
+  ThreadProviderAccountRouteCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
   ThreadTitleGenerateCompleteCommand,
@@ -1794,6 +1820,8 @@ export const ThreadCreatedPayload = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
+  /** Missing on historical events and therefore interpreted as fixed. */
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
@@ -1885,6 +1913,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
   modelSelection: Schema.optional(ModelSelection),
+  providerRoutingMode: Schema.optional(ProviderRoutingMode),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // No longer produced; kept so persisted events from before
@@ -1954,6 +1983,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   /** Exact first-turn provider input for a fork; the visible user message stays unchanged. */
   providerInput: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),

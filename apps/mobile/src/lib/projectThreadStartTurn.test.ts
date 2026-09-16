@@ -54,6 +54,8 @@ describe("project thread title", () => {
       modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
       runtimeMode: "full-access",
       interactionMode: "default",
+      providerRoutingMode: "auto",
+      allowProviderAccountRouting: true,
       workspaceMode: "local",
       branch: null,
       worktreePath: null,
@@ -63,6 +65,8 @@ describe("project thread title", () => {
 
     expect(input.titleSeed).toBe(title);
     expect(input.bootstrap.createThread.title).toBe(input.titleSeed);
+    expect(input.bootstrap.createThread.providerRoutingMode).toBe("auto");
+    expect(input.allowProviderAccountRouting).toBe(true);
     expect(input.message.text).toBe(text);
   });
 });
@@ -100,4 +104,28 @@ describe("new thread on an existing branch", () => {
       expect(input.threadId).toBe("new-thread");
     },
   );
+
+  it("omits routing consent for a Fixed thread", () => {
+    const input = buildProjectThreadStartTurnInput({
+      projectId: ProjectId.make("project"),
+      projectCwd: "/workspace",
+      threadId: "new-thread",
+      commandId: "command",
+      messageId: "message",
+      createdAt: "2026-09-06T00:00:00Z",
+      text: "Start fixed",
+      uploadedAttachments: [],
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      providerRoutingMode: "fixed",
+      workspaceMode: "local",
+      branch: null,
+      worktreePath: null,
+      startFromOrigin: false,
+      worktreeBranchName: "unused",
+    });
+
+    expect(input).not.toHaveProperty("allowProviderAccountRouting");
+  });
 });

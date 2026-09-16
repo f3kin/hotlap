@@ -1,10 +1,12 @@
 import type {
   AgentSessionImportSource,
   ProviderInstanceId,
+  MessageId,
   ProviderDriverKind,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Context from "effect/Context";
@@ -64,6 +66,21 @@ export interface ProviderSessionDirectoryShape {
   readonly getBinding: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProviderRuntimeBinding>, ProviderSessionDirectoryReadError>;
+
+  /** Clear a terminal turn only while the same provider instance still owns it. */
+  readonly clearActiveTurnIfMatches?: (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly turnId: TurnId;
+  }) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
+
+  /** Clear one exact orphaned admission without touching a newer provider turn. */
+  readonly clearTurnAdmissionIfMatches?: (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly messageId: MessageId;
+    readonly turnId: TurnId;
+  }) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
 
   readonly listThreadIds: () => Effect.Effect<
     ReadonlyArray<ThreadId>,

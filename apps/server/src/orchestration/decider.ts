@@ -482,6 +482,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           modelSelection: forkSource.modelSelection,
           runtimeMode: forkSource.runtimeMode,
           interactionMode: forkSource.interactionMode,
+          providerRoutingMode: forkSource.providerRoutingMode ?? "fixed",
           branch: forkSource.branch,
           worktreePath: forkSource.worktreePath,
           forkedFrom: {
@@ -547,6 +548,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           modelSelection: command.modelSelection,
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
+          providerRoutingMode:
+            command.historyImport === true ? "fixed" : (command.providerRoutingMode ?? "fixed"),
           branch: command.branch,
           worktreePath: command.worktreePath,
           createdAt: command.createdAt,
@@ -1137,6 +1140,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread.branch !== command.expectedBranch
           ? thread.branch
           : command.branch;
+      const providerRoutingMode =
+        command.providerRoutingMode ??
+        (command.modelSelection !== undefined &&
+        command.modelSelection.instanceId !== thread.modelSelection.instanceId
+          ? "fixed"
+          : undefined);
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -1179,6 +1188,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
+          ...(providerRoutingMode !== undefined ? { providerRoutingMode } : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
           ...(command.linkedPullRequest !== undefined
@@ -1625,6 +1635,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          ...(command.allowProviderAccountRouting === true
+            ? { allowProviderAccountRouting: true as const }
+            : {}),
           ...(providerInput !== undefined ? { providerInput } : {}),
           createdAt: command.createdAt,
         },
@@ -2345,6 +2358,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             modelSelection: command.action.modelSelection,
             runtimeMode: command.action.runtimeMode,
             interactionMode: command.action.interactionMode,
+            providerRoutingMode: "fixed",
             branch: command.action.branch,
             worktreePath: command.action.worktreePath,
             createdAt: command.action.createdAt,
@@ -2525,6 +2539,50 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [unsettledEvent, activityAppendedEvent];
+    }
+
+    case "thread.provider-account.route": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.modelSelection.instanceId !== command.previousProviderInstanceId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' changed provider accounts before automatic routing could commit.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      const metadataEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.meta-updated",
+        payload: {
+          threadId: command.threadId,
+          modelSelection: command.modelSelection,
+          providerRoutingMode: command.providerRoutingMode,
+          updatedAt: occurredAt,
+        },
+      };
+      const activityEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: command.activity,
+        },
+      };
+      return [metadataEvent, activityEvent];
     }
 
     default: {

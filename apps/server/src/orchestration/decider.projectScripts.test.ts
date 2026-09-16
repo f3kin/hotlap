@@ -461,6 +461,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
           ]),
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
+          allowProviderAccountRouting: true,
           createdAt: now,
         },
         readModel,
@@ -484,6 +485,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
           { id: "fastMode", value: true },
         ]),
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
       });
     }),
   );

@@ -35,6 +35,7 @@ const creation: QueuedThreadMessage = {
     },
   ],
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
+  providerRoutingMode: "auto",
   runtimeMode: "full-access",
   creation: {
     projectId: ProjectId.make("project-1"),
@@ -165,6 +166,7 @@ describe("pendingThreadCreationShell", () => {
       projectId: creation.creation!.projectId,
       title: "Fix the flaky login test",
       modelSelection: creation.modelSelection,
+      providerRoutingMode: "auto",
       runtimeMode: "full-access",
       interactionMode: "default",
       branch: "main",
@@ -173,6 +175,13 @@ describe("pendingThreadCreationShell", () => {
       session: null,
       latestUserMessageAt: creation.createdAt,
     });
+  });
+
+  it("defaults legacy queued creations to fixed routing", () => {
+    expect(
+      pendingThreadCreationShell({ ...creation, providerRoutingMode: undefined })
+        ?.providerRoutingMode,
+    ).toBe("fixed");
   });
 
   it("keeps a local task's explicit worktree path", () => {

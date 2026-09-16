@@ -29,6 +29,7 @@ import {
   type ProviderApprovalDecision,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
+  type ProviderRoutingMode,
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
@@ -252,6 +253,7 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
+  resolveDefaultProviderModelSelection,
   sortProviderInstanceEntries,
 } from "../providerInstances";
 import {
@@ -421,6 +423,7 @@ import {
   isBranchMismatchDismissedForSession,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
+  shouldClearAcknowledgedProviderRoutingIntent,
   shouldShowBranchMismatchBanner,
   shouldShowPlanFollowUpPrompt,
   shouldOpenProactivePullRequest,
@@ -456,7 +459,11 @@ import {
   timelineHasEphemeralPreviewUrls,
   observeProactivePanelUserChoice,
   resolveProactiveTurnDiffAction,
+  resolveComposerSelectionAfterProviderRouting,
   resolveThreadMetadataUpdateForNextTurn,
+  providerAccountRoutingConsentForSubmission,
+  resolveProviderRoutingModeAfterSelection,
+  resolveNewThreadProviderRoutingMode,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
   revokeUserMessagePreviewUrls,
@@ -467,6 +474,7 @@ import {
   waitForStartedServerThread,
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
+import { deriveProviderRoutingOptions } from "./settings/ProviderRoutingSettings.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useComposerHandleContext } from "../composerHandleContext";
@@ -1600,8 +1608,14 @@ export default function ChatView(props: ChatViewProps) {
   const composerInteractionMode = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.interactionMode ?? null,
   );
+  const composerProviderRoutingMode = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.providerRoutingMode ?? null,
+  );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
+  );
+  const composerModelSelectionExplicit = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.modelSelectionExplicit === true,
   );
   const composerHasUnsentContent = useComposerDraftStore((store) =>
     composerDraftHasUserContent(store.getComposerDraft(composerDraftTarget)),
@@ -1626,9 +1640,15 @@ export default function ChatView(props: ChatViewProps) {
   );
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
+  const consumeExplicitModelSelection = useComposerDraftStore(
+    (store) => store.consumeExplicitModelSelection,
+  );
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
+  );
+  const setComposerDraftProviderRoutingMode = useComposerDraftStore(
+    (store) => store.setProviderRoutingMode,
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -1829,6 +1849,43 @@ export default function ChatView(props: ChatViewProps) {
     ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
     : null;
   const fallbackDraftProject = useProject(fallbackDraftProjectRef);
+  const fallbackDraftProjectSettings = useMemo(
+    () =>
+      resolveProjectSettings(
+        settings,
+        fallbackDraftProject?.id ?? null,
+        fallbackDraftProject ?? undefined,
+      ),
+    [fallbackDraftProject, settings],
+  );
+  const fallbackDraftServerConfig = draftThread
+    ? environmentById.get(draftThread.environmentId)?.serverConfig
+    : undefined;
+  const fallbackDraftCapabilities = fallbackDraftServerConfig?.environment.capabilities;
+  const fallbackDraftRoutingSupported = Boolean(
+    fallbackDraftCapabilities &&
+    "providerAccountRouting" in fallbackDraftCapabilities &&
+    fallbackDraftCapabilities.providerAccountRouting === true,
+  );
+  const fallbackDraftModelSelection = useMemo(
+    () =>
+      resolveDefaultProviderModelSelection(
+        fallbackDraftServerConfig?.providers ?? EMPTY_PROVIDERS,
+        fallbackDraftProjectSettings.settings.defaultModelSelection,
+      ),
+    [fallbackDraftProjectSettings.settings.defaultModelSelection, fallbackDraftServerConfig],
+  );
+  const fallbackDraftProviderRoutingMode: ProviderRoutingMode = resolveNewThreadProviderRoutingMode(
+    {
+      routingSupported: fallbackDraftRoutingSupported,
+      usesProjectPolicy: fallbackDraftProjectSettings.sources.providerRoutingPolicy === "project",
+      policy: fallbackDraftProjectSettings.settings.providerRoutingPolicy,
+      options: deriveProviderRoutingOptions(
+        fallbackDraftServerConfig ? [fallbackDraftServerConfig.providers] : [],
+      ),
+      selectedAccount: fallbackDraftModelSelection,
+    },
+  );
   const localDraftError = activeServerThread
     ? null
     : ((draftId ? localDraftErrorsByDraftId[draftId]?.message : null) ?? null);
@@ -1874,14 +1931,11 @@ export default function ChatView(props: ChatViewProps) {
         ? buildLocalDraftThread(
             threadId,
             draftThread,
-            resolveProjectSettings(
-              settings,
-              fallbackDraftProject?.id ?? null,
-              fallbackDraftProject ?? undefined,
-            ).settings.defaultModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
+            fallbackDraftModelSelection ?? NO_PROVIDER_MODEL_SELECTION,
+            fallbackDraftProviderRoutingMode,
           )
         : undefined,
-    [draftThread, fallbackDraftProject, settings, threadId],
+    [draftThread, fallbackDraftModelSelection, fallbackDraftProviderRoutingMode, threadId],
   );
   // Promotion is data-driven: the draft route keeps rendering while the
   // server thread (same pre-allocated ref) starts, so live state must not
@@ -2572,6 +2626,147 @@ export default function ChatView(props: ChatViewProps) {
     attachmentEnvironmentConfig?.environment.capabilities.attachmentUploads === true;
   const supportsCustomPrompts =
     attachmentEnvironmentConfig?.environment.capabilities.customPrompts === true;
+  const providerRoutingSupported = Boolean(
+    serverConfig &&
+    "providerAccountRouting" in serverConfig.environment.capabilities &&
+    serverConfig.environment.capabilities.providerAccountRouting === true,
+  );
+  const providerRoutingSaveRevisionRef = useRef(0);
+  const providerRoutingSaveRef = useRef<{
+    readonly revision: number;
+    readonly threadKey: string;
+    readonly mode: ProviderRoutingMode;
+    acknowledged: boolean;
+  } | null>(null);
+  const authoritativeProviderRoutingModeRef = useRef<{
+    readonly threadKey: string;
+    readonly mode: ProviderRoutingMode;
+  } | null>(null);
+  useEffect(() => {
+    if (!activeServerThread) return;
+    authoritativeProviderRoutingModeRef.current = {
+      threadKey: scopedThreadKey(
+        scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+      ),
+      mode: activeServerThread.providerRoutingMode ?? "fixed",
+    };
+  }, [activeServerThread]);
+  const providerRoutingMode =
+    composerProviderRoutingMode ??
+    activeServerThread?.providerRoutingMode ??
+    fallbackDraftProviderRoutingMode;
+  const handleProviderRoutingModeChange = useCallback(
+    async (mode: ProviderRoutingMode) => {
+      if (!providerRoutingSupported) return;
+      const currentMode =
+        useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+          ?.providerRoutingMode ??
+        activeServerThread?.providerRoutingMode ??
+        fallbackDraftProviderRoutingMode;
+      if (mode === currentMode) return;
+      setComposerDraftProviderRoutingMode(composerDraftTarget, mode);
+      if (!activeServerThread) {
+        return;
+      }
+      const revision = providerRoutingSaveRevisionRef.current + 1;
+      providerRoutingSaveRevisionRef.current = revision;
+      const routingThreadKey = scopedThreadKey(
+        scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+      );
+      providerRoutingSaveRef.current = {
+        revision,
+        threadKey: routingThreadKey,
+        mode,
+        acknowledged: false,
+      };
+      const result = await updateThreadMetadata({
+        environmentId,
+        input: { threadId: activeServerThread.id, providerRoutingMode: mode },
+      });
+      const pendingSave = providerRoutingSaveRef.current;
+      if (pendingSave?.revision === revision) {
+        pendingSave.acknowledged = result._tag === "Success";
+        const currentMode = authoritativeProviderRoutingModeRef.current;
+        if (
+          currentMode?.threadKey === routingThreadKey &&
+          shouldClearAcknowledgedProviderRoutingIntent({
+            acknowledged: pendingSave.acknowledged,
+            intendedMode: mode,
+            authoritativeMode: currentMode.mode,
+          })
+        ) {
+          setComposerDraftProviderRoutingMode(composerDraftTarget, null);
+          providerRoutingSaveRef.current = null;
+        }
+      }
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        toastManager.add({
+          type: "error",
+          title: "Account switching mode not saved",
+          description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+        });
+      }
+    },
+    [
+      activeServerThread,
+      activeThreadKey,
+      composerDraftTarget,
+      environmentId,
+      fallbackDraftProviderRoutingMode,
+      providerRoutingSupported,
+      setComposerDraftProviderRoutingMode,
+      updateThreadMetadata,
+    ],
+  );
+  useEffect(() => {
+    if (!activeServerThread || composerProviderRoutingMode === null) return;
+    const authoritativeMode = activeServerThread.providerRoutingMode ?? "fixed";
+    const pendingSave = providerRoutingSaveRef.current;
+    if (pendingSave?.threadKey === activeThreadKey) {
+      if (
+        !shouldClearAcknowledgedProviderRoutingIntent({
+          acknowledged: pendingSave.acknowledged,
+          intendedMode: pendingSave.mode,
+          authoritativeMode,
+        })
+      ) {
+        return;
+      }
+      if (composerProviderRoutingMode === pendingSave.mode) {
+        setComposerDraftProviderRoutingMode(composerDraftTarget, null);
+      }
+      providerRoutingSaveRef.current = null;
+      return;
+    }
+    if (composerProviderRoutingMode === authoritativeMode) {
+      setComposerDraftProviderRoutingMode(composerDraftTarget, null);
+    }
+  }, [
+    activeServerThread,
+    activeThreadKey,
+    composerDraftTarget,
+    composerProviderRoutingMode,
+    setComposerDraftProviderRoutingMode,
+  ]);
+  useEffect(() => {
+    if (!activeServerThread) return;
+    const reconciledSelection = resolveComposerSelectionAfterProviderRouting({
+      composerInstanceId: composerActiveProvider,
+      composerSelectionExplicit: composerModelSelectionExplicit,
+      routedSelection: activeServerThread.modelSelection,
+    });
+    if (!reconciledSelection) return;
+    setComposerDraftModelSelection(
+      scopeThreadRef(activeServerThread.environmentId, activeServerThread.id),
+      reconciledSelection,
+      { replaceOptions: true },
+    );
+  }, [
+    activeServerThread,
+    composerActiveProvider,
+    composerModelSelectionExplicit,
+    setComposerDraftModelSelection,
+  ]);
   const supportsThreadForking =
     attachmentEnvironmentConfig?.environment.capabilities.threadForking === true;
   const supportsThreadTranscriptExport =
@@ -5262,8 +5457,15 @@ export default function ChatView(props: ChatViewProps) {
       }
 
       let result: AtomCommandResult<void, unknown> = AsyncResult.success(undefined);
+      const pendingProviderRoutingMode = useComposerDraftStore
+        .getState()
+        .getComposerDraft(composerDraftTarget)?.providerRoutingMode;
       const metadataUpdate = resolveThreadMetadataUpdateForNextTurn({
         currentModelSelection: serverThread.modelSelection,
+        currentProviderRoutingMode: serverThread.providerRoutingMode ?? "fixed",
+        ...(pendingProviderRoutingMode
+          ? { nextProviderRoutingMode: pendingProviderRoutingMode }
+          : {}),
         ...(input.modelSelection ? { nextModelSelection: input.modelSelection } : {}),
         currentBranch: serverThread.branch,
         ...(input.branch ? { nextBranch: input.branch } : {}),
@@ -5318,6 +5520,7 @@ export default function ChatView(props: ChatViewProps) {
     },
     [
       environmentId,
+      composerDraftTarget,
       serverThread,
       setThreadInteractionMode,
       setThreadRuntimeMode,
@@ -7211,6 +7414,15 @@ export default function ChatView(props: ChatViewProps) {
                 modelSelection: context.selectedModelSelection,
                 runtimeMode,
                 interactionMode: context.interactionMode,
+                ...providerAccountRoutingConsentForSubmission({
+                  submissionIntent: "foreground",
+                  providerRoutingMode:
+                    useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                      ?.providerRoutingMode ?? providerRoutingMode,
+                  supported:
+                    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)
+                      ?.environment.capabilities.providerAccountRouting === true,
+                }),
                 createdAt,
               },
             });
@@ -7418,6 +7630,18 @@ export default function ChatView(props: ChatViewProps) {
       interactionMode: sendInteractionMode,
       interactionModeEnabled: sendInteractionModeEnabled,
     } = sendCtx;
+    const composerDraftAtSubmission = useComposerDraftStore
+      .getState()
+      .getComposerDraft(composerDraftTarget);
+    const providerRoutingModeAtSubmission =
+      composerDraftAtSubmission?.providerRoutingMode ?? providerRoutingMode;
+    const explicitModelSelectionAtSubmission =
+      composerDraftAtSubmission?.modelSelectionExplicit === true &&
+      composerDraftAtSubmission.activeProvider !== null
+        ? (composerDraftAtSubmission.modelSelectionByProvider[
+            composerDraftAtSubmission.activeProvider
+          ] ?? null)
+        : null;
     const annotationImageAlreadyAttached =
       directAnnotation?.image !== undefined &&
       sendContextImages.some((image) => image.id === directAnnotation.image?.id);
@@ -7995,6 +8219,12 @@ export default function ChatView(props: ChatViewProps) {
       ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
       ctxSelectedModelSelection.options,
     );
+    const threadCreateProviderRoutingMode = resolveProviderRoutingModeAfterSelection(
+      providerRoutingModeAtSubmission,
+      activeThread.modelSelection.instanceId,
+      threadCreateModelSelection.instanceId,
+      composerDraftAtSubmission?.providerRoutingMode === "auto",
+    );
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
     // Auto-title from first message
@@ -8051,6 +8281,7 @@ export default function ChatView(props: ChatViewProps) {
                       projectId: activeProject.id,
                       title,
                       modelSelection: threadCreateModelSelection,
+                      providerRoutingMode: threadCreateProviderRoutingMode,
                       runtimeMode,
                       interactionMode: sendInteractionMode,
                       branch: activeThreadBranch,
@@ -8119,6 +8350,13 @@ export default function ChatView(props: ChatViewProps) {
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
+          ...providerAccountRoutingConsentForSubmission({
+            submissionIntent: resolvedSubmissionIntent,
+            providerRoutingMode: threadCreateProviderRoutingMode,
+            supported:
+              appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+                .capabilities.providerAccountRouting === true,
+          }),
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },
@@ -8152,6 +8390,9 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        if (explicitModelSelectionAtSubmission) {
+          consumeExplicitModelSelection(composerDraftTarget, explicitModelSelectionAtSubmission);
+        }
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.
@@ -8732,6 +8973,15 @@ export default function ChatView(props: ChatViewProps) {
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
+            ...providerAccountRoutingConsentForSubmission({
+              submissionIntent: "foreground",
+              providerRoutingMode:
+                useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                  ?.providerRoutingMode ?? providerRoutingMode,
+              supported:
+                appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+                  .capabilities.providerAccountRouting === true,
+            }),
             ...(nextInteractionMode === "default" && activeProposedPlan
               ? {
                   sourceProposedPlan: {
@@ -8786,6 +9036,8 @@ export default function ChatView(props: ChatViewProps) {
       environmentId,
       composerRef,
       clearUsageLimitsFor,
+      composerDraftTarget,
+      providerRoutingMode,
       routeThreadKey,
     ],
   );
@@ -8832,6 +9084,13 @@ export default function ChatView(props: ChatViewProps) {
     }
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
+    const nextThreadProviderRoutingMode = resolveNewThreadProviderRoutingMode({
+      routingSupported: providerRoutingSupported,
+      usesProjectPolicy: activeProjectSettings.sources.providerRoutingPolicy === "project",
+      policy: activeProjectSettings.settings.providerRoutingPolicy,
+      options: deriveProviderRoutingOptions([providerStatuses]),
+      selectedAccount: nextThreadModelSelection,
+    });
 
     sendInFlightRef.current = true;
     beginLocalDispatch({ preparingWorktree: false });
@@ -8847,6 +9106,7 @@ export default function ChatView(props: ChatViewProps) {
         projectId: activeProject.id,
         title: nextThreadTitle,
         modelSelection: nextThreadModelSelection,
+        providerRoutingMode: nextThreadProviderRoutingMode,
         runtimeMode: defaultRuntimeMode,
         interactionMode: "default",
         branch: activeThreadBranch,
@@ -8872,6 +9132,13 @@ export default function ChatView(props: ChatViewProps) {
           titleSeed: nextThreadTitle,
           runtimeMode: defaultRuntimeMode,
           interactionMode: "default",
+          ...providerAccountRoutingConsentForSubmission({
+            submissionIntent: "foreground",
+            providerRoutingMode: nextThreadProviderRoutingMode,
+            supported:
+              appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment
+                .capabilities.providerAccountRouting === true,
+          }),
           sourceProposedPlan: {
             threadId: activeThread.id,
             planId: activeProposedPlan.id,
@@ -8932,6 +9199,7 @@ export default function ChatView(props: ChatViewProps) {
     finish();
   }, [
     activeProject,
+    activeProjectSettings,
     activeProposedPlan,
     activeThreadBranch,
     activeThread,
@@ -8947,6 +9215,8 @@ export default function ChatView(props: ChatViewProps) {
     defaultRuntimeMode,
     startThreadTurn,
     environmentId,
+    providerRoutingSupported,
+    providerStatuses,
     composerRef,
   ]);
 
@@ -9031,12 +9301,24 @@ export default function ChatView(props: ChatViewProps) {
         nextModelSelection,
         { explicit: true },
       );
+      if (
+        providerRoutingMode === "auto" &&
+        resolveProviderRoutingModeAfterSelection(
+          providerRoutingMode,
+          activeThread.modelSelection.instanceId,
+          instanceId,
+        ) === "fixed"
+      ) {
+        void handleProviderRoutingModeChange("fixed");
+      }
       setStickyComposerModelSelection(nextModelSelection);
       scheduleComposerFocus();
     },
     [
       activeThread,
+      handleProviderRoutingModeChange,
       lockedProvider,
+      providerRoutingMode,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
       setStickyComposerModelSelection,
@@ -9805,6 +10087,13 @@ export default function ChatView(props: ChatViewProps) {
                             providerCatalogKnown={serverConfig !== null}
                             activeProjectDefaultModelSelection={activeProjectDefaultModelSelection}
                             activeThreadModelSelection={activeThread?.modelSelection}
+                            providerRoutingMode={providerRoutingMode}
+                            providerRoutingSupported={providerRoutingSupported}
+                            providerRoutingPolicy={
+                              activeProjectSettings.sources.providerRoutingPolicy === "project"
+                                ? activeProjectSettings.settings.providerRoutingPolicy
+                                : null
+                            }
                             activeContextWindow={activeContextWindow}
                             compactThreadUnavailable={compactThreadUnavailable}
                             compactDisabled={compactDisabled}
@@ -9854,6 +10143,7 @@ export default function ChatView(props: ChatViewProps) {
                               onChangeActivePendingUserInputCustomAnswer
                             }
                             onProviderModelSelect={onProviderModelSelect}
+                            onProviderRoutingModeChange={handleProviderRoutingModeChange}
                             onOpenProviderSetup={openProviderSetup}
                             getModelDisabledReason={getModelDisabledReason}
                             toggleInteractionMode={toggleInteractionMode}
