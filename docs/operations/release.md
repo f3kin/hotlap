@@ -16,6 +16,9 @@ bundled web, and standalone CLI archives from one resolved commit.
 - Manual `channel=preview` exercises the release pipeline for a maintainer test
   build. It publishes a real prerelease and npm `preview` dist-tag, but no desktop
   updater metadata. Stable and nightly users are never offered preview updates.
+- The dispatch channel defaults to `preview`, so an omitted selection cannot
+  publish a stable release. Stable and nightly dispatches must select `main`, and
+  their commit must be contained in it; preview builds any branch.
 - Publishers are serialized and are not cancelled by newer releases.
 
 Hotlap has no hosted web, relay, or marketing deployment. Its web app ships inside
