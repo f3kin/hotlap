@@ -12,6 +12,7 @@ import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import {
   AgentSessionImportSource,
   IsoDateTime,
+  MessageId,
   ProviderInstanceId,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
@@ -74,6 +75,16 @@ export const ClearProviderSessionActiveTurnInput = Schema.Struct({
 });
 export type ClearProviderSessionActiveTurnInput = typeof ClearProviderSessionActiveTurnInput.Type;
 
+export const ClearProviderSessionTurnAdmissionInput = Schema.Struct({
+  threadId: ThreadId,
+  providerInstanceId: ProviderInstanceId,
+  messageId: MessageId,
+  turnId: TurnId,
+  clearedAt: IsoDateTime,
+});
+export type ClearProviderSessionTurnAdmissionInput =
+  typeof ClearProviderSessionTurnAdmissionInput.Type;
+
 export interface ProviderSessionRuntimeUpsertOptions {
   readonly onConflict?: "update" | "ignore";
 }
@@ -113,6 +124,11 @@ export class ProviderSessionRuntimeRepository extends Context.Service<
     /** Clear only the still-matching provider turn, preserving newer admissions. */
     readonly clearActiveTurnIfMatches: (
       input: ClearProviderSessionActiveTurnInput,
+    ) => Effect.Effect<boolean, ProviderSessionRuntimeRepositoryError>;
+
+    /** Clear one exact orphaned admission without touching a newer provider turn. */
+    readonly clearTurnAdmissionIfMatches: (
+      input: ClearProviderSessionTurnAdmissionInput,
     ) => Effect.Effect<boolean, ProviderSessionRuntimeRepositoryError>;
 
     /**
@@ -404,6 +420,37 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  const clearTurnAdmissionIfMatchesRow = SqlSchema.findOneOption({
+    Request: ClearProviderSessionTurnAdmissionInput,
+    Result: ClearActiveTurnResultSchema,
+    execute: ({ threadId, providerInstanceId, messageId, turnId, clearedAt }) =>
+      sql`
+        UPDATE provider_session_runtime
+        SET
+          last_seen_at = ${clearedAt},
+          runtime_payload_json = json_remove(
+            json_set(
+              CASE
+                WHEN json_valid(runtime_payload_json)
+                  AND json_type(runtime_payload_json) = 'object'
+                THEN runtime_payload_json
+                ELSE '{}'
+              END,
+              '$.activeTurnId',
+              json('null')
+            ),
+            '$.lastAdmittedMessageId',
+            '$.lastAdmittedTurnId'
+          )
+        WHERE thread_id = ${threadId}
+          AND provider_instance_id = ${providerInstanceId}
+          AND json_extract(runtime_payload_json, '$.activeTurnId') = ${turnId}
+          AND json_extract(runtime_payload_json, '$.lastAdmittedMessageId') = ${messageId}
+          AND json_extract(runtime_payload_json, '$.lastAdmittedTurnId') = ${turnId}
+        RETURNING thread_id AS "threadId"
+      `,
+  });
+
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
     (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
       Effect.mapError(
@@ -467,6 +514,19 @@ export const make = Effect.gen(function* () {
         Effect.map(Option.isSome),
       );
 
+  const clearTurnAdmissionIfMatches: ProviderSessionRuntimeRepository["Service"]["clearTurnAdmissionIfMatches"] =
+    (input) =>
+      clearTurnAdmissionIfMatchesRow(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProviderSessionRuntimeRepository.clearTurnAdmissionIfMatches:query",
+            "ProviderSessionRuntimeRepository.clearTurnAdmissionIfMatches:decodeRow",
+            { threadId: input.threadId },
+          ),
+        ),
+        Effect.map(Option.isSome),
+      );
+
   const list: ProviderSessionRuntimeRepository["Service"]["list"] = () =>
     listRuntimeRows(undefined).pipe(
       Effect.mapError(
@@ -521,6 +581,7 @@ export const make = Effect.gen(function* () {
     recordImportedTranscript,
     getByThreadId,
     clearActiveTurnIfMatches,
+    clearTurnAdmissionIfMatches,
     list,
     deleteByThreadId,
   } satisfies ProviderSessionRuntimeRepository["Service"];

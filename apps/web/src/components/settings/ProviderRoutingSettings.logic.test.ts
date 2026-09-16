@@ -3,9 +3,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   canEnableProviderRoutingAuto,
+  canEnableProviderRoutingAutoForEveryPolicy,
   deriveProviderRoutingOptions,
   mergeProviderRoutingOptions,
   resolveProviderRoutingDefaultMode,
+  providerRoutingPoolPatch,
   supportsProviderAccountRouting,
   toggleProviderRoutingInstance,
 } from "./ProviderRoutingSettings.logic";
@@ -179,5 +181,71 @@ describe("provider routing pool", () => {
         instanceId: first,
       }),
     ).toBe("auto");
+  });
+
+  it("enables Auto only when every selected target has a valid pool", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const options = [
+      { instanceId: first, driver: codex, displayName: "Work" },
+      { instanceId: second, driver: codex, displayName: "Personal" },
+    ];
+
+    expect(
+      canEnableProviderRoutingAutoForEveryPolicy(
+        options,
+        [
+          {
+            defaultMode: "fixed",
+            usageThresholdPercent: 80,
+            instanceIdsByDriver: { [codex]: [first, second] },
+          },
+          {
+            defaultMode: "fixed",
+            usageThresholdPercent: 80,
+            instanceIdsByDriver: { [codex]: [first] },
+          },
+        ],
+        { instanceId: first },
+      ),
+    ).toBe(false);
+  });
+
+  it("disables Auto only on targets whose edited pool becomes invalid", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const options = [
+      { instanceId: first, driver: codex, displayName: "Work" },
+      { instanceId: second, driver: codex, displayName: "Personal" },
+    ];
+    const instanceIds = [first];
+
+    expect(
+      providerRoutingPoolPatch(
+        {
+          defaultMode: "auto",
+          usageThresholdPercent: 80,
+          instanceIdsByDriver: { [codex]: [first, second] },
+        },
+        codex,
+        instanceIds,
+        options,
+        { instanceId: first },
+      ),
+    ).toEqual({
+      defaultMode: "fixed",
+      instanceIdsByDriver: { [codex]: instanceIds },
+    });
+    expect(
+      providerRoutingPoolPatch(
+        {
+          defaultMode: "fixed",
+          usageThresholdPercent: 80,
+          instanceIdsByDriver: { [codex]: [first, second] },
+        },
+        codex,
+        instanceIds,
+        options,
+        { instanceId: first },
+      ),
+    ).toEqual({ instanceIdsByDriver: { [codex]: instanceIds } });
   });
 });

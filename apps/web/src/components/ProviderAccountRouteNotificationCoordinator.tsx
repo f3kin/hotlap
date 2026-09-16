@@ -3,10 +3,11 @@ import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
-import { useThreadDetail } from "../state/entities";
+import { useThreadDetail, useThreadStatus } from "../state/entities";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
 const ROUTE_TOAST_VISIBLE_MS = 5_000;
+const EMPTY_ACTIVITIES = Object.freeze([]);
 
 /**
  * Observes the active thread's existing detail subscription. There is no
@@ -25,12 +26,22 @@ export function ProviderAccountRouteNotificationCoordinator() {
           threadId: ThreadId.make(threadId),
         },
   );
+  const threadStatus = useThreadStatus(
+    environmentId === null || threadId === null
+      ? null
+      : {
+          environmentId: EnvironmentId.make(environmentId),
+          threadId: ThreadId.make(threadId),
+        },
+  );
   const [tracker] = useState(createProviderAccountRouteNotificationTracker);
   const [foreground, setForeground] = useState(
     () => document.visibilityState === "visible" && document.hasFocus(),
   );
   const threadKey =
     environmentId === null || threadId === null ? null : `${environmentId}:${threadId}`;
+  const activities = thread?.activities ?? EMPTY_ACTIVITIES;
+  const detailResolved = thread !== null && threadStatus === "live";
 
   useEffect(() => {
     const updateForeground = () =>
@@ -46,9 +57,12 @@ export function ProviderAccountRouteNotificationCoordinator() {
   }, []);
 
   useEffect(() => {
-    const observedThreadKey = threadKey !== null && thread !== null ? threadKey : null;
-    const activities = observedThreadKey === null ? [] : (thread?.activities ?? []);
-    for (const notification of tracker.observe(observedThreadKey, activities, foreground)) {
+    const observedThreadKey = threadKey !== null && detailResolved ? threadKey : null;
+    for (const notification of tracker.observe(
+      observedThreadKey,
+      observedThreadKey === null ? EMPTY_ACTIVITIES : activities,
+      foreground,
+    )) {
       toastManager.add(
         stackedThreadToast({
           type: notification.kind,
@@ -63,7 +77,7 @@ export function ProviderAccountRouteNotificationCoordinator() {
         }),
       );
     }
-  }, [foreground, thread, threadKey, tracker]);
+  }, [activities, detailResolved, foreground, threadKey, tracker]);
 
   return null;
 }

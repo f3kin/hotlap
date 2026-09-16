@@ -87,7 +87,7 @@ import {
   resolveQueuedThreadMetadataUpdate,
   resolveQueuedThreadSettings,
   resolveThreadModelSelection,
-  shouldSkipQueuedProviderAccountRouting,
+  shouldAllowQueuedProviderAccountRouting,
   shouldRetryThreadOutboxDelivery,
   threadOutboxRetryDelayMs,
   type QueuedThreadMessage,
@@ -118,17 +118,41 @@ function queuedMessage(input: {
 }
 
 describe("thread outbox", () => {
-  it("only allows automatic routing for prompts submitted for immediate online delivery", () => {
+  it("only allows automatic routing for explicitly opted-in Auto prompts on supported servers", () => {
     const queued = queuedMessage({
       messageId: "offline-message",
       createdAt: "2026-09-06T12:00:00.000Z",
     });
-    expect(shouldSkipQueuedProviderAccountRouting(queued)).toBe(true);
+    expect(shouldAllowQueuedProviderAccountRouting(queued, true)).toBe(false);
     expect(
-      shouldSkipQueuedProviderAccountRouting({
-        ...queued,
-        allowProviderAccountRouting: true,
-      }),
+      shouldAllowQueuedProviderAccountRouting(
+        {
+          ...queued,
+          providerRoutingMode: "auto",
+          allowProviderAccountRouting: true,
+        },
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      shouldAllowQueuedProviderAccountRouting(
+        {
+          ...queued,
+          providerRoutingMode: "fixed",
+          allowProviderAccountRouting: true,
+        },
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      shouldAllowQueuedProviderAccountRouting(
+        {
+          ...queued,
+          providerRoutingMode: "auto",
+          allowProviderAccountRouting: true,
+        },
+        false,
+      ),
     ).toBe(false);
   });
 

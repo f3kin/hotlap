@@ -6,6 +6,7 @@ import {
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
+  type ProviderRoutingPolicy,
   ServerSettings,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -20,6 +21,16 @@ import * as Equal from "effect/Equal";
 import type { ResolvedSettingsScope } from "./settingsScope";
 
 export type ScopedSettingsPatch = ServerSettingsPatch & ClientSettingsPatch;
+
+export type ProviderRoutingPolicyPatch = Partial<
+  Pick<ProviderRoutingPolicy, "defaultMode" | "usageThresholdPercent">
+> & {
+  readonly instanceIdsByDriver?: ProviderRoutingPolicy["instanceIdsByDriver"];
+};
+
+export type ProviderRoutingPolicyPatchResolver =
+  | ProviderRoutingPolicyPatch
+  | ((settings: ServerSettings) => ProviderRoutingPolicyPatch | null);
 
 interface ScopedSettingsEnvironment {
   readonly environmentId: EnvironmentId;
@@ -204,7 +215,24 @@ export function planScopedSettingsPatch(
   const serverPatch = Object.fromEntries(
     Object.entries(patch).filter(([key]) => SERVER_KEYS.has(key)),
   ) as ServerSettingsPatch;
-  const serverKeys = Object.keys(serverPatch);
+  return planScopedSettingsServerPatch(
+    scope,
+    environments,
+    clientPatch,
+    Object.keys(serverPatch),
+    () => serverPatch,
+    Object.keys(patch).length,
+  );
+}
+
+function planScopedSettingsServerPatch(
+  scope: ResolvedSettingsScope,
+  environments: readonly ScopedSettingsEnvironment[],
+  clientPatch: ClientSettingsPatch,
+  serverKeys: readonly string[],
+  resolveServerPatch: (settings: ServerSettings) => ServerSettingsPatch,
+  inputKeyCount: number,
+) {
   const { connectedEnvironments } = selectScopedSettingsEnvironments(scope, environments, null);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   const unscopableKeys = isProjectScope
@@ -221,6 +249,7 @@ export function planScopedSettingsPatch(
               // rows send one field); an override entry stores the whole value,
               // so complete the patch from the target's effective value.
               const effective = resolveProjectSettings(settings, projectId).settings;
+              const serverPatch = resolveServerPatch(effective);
               const next: Record<string, unknown> = { ...current };
               for (const [key, value] of Object.entries(serverPatch)) {
                 const base = effective[key as keyof ServerSettings];
@@ -230,16 +259,22 @@ export function planScopedSettingsPatch(
               return next as ProjectSettingsOverrides;
             })
         : scope.kind === "all" || scope.kind === "environment"
-          ? connectedEnvironments.map((environment) => ({
-              environmentId: environment.environmentId,
-              label: environment.label,
-              patch: serverPatch,
-            }))
+          ? connectedEnvironments.flatMap((environment) =>
+              environment.serverConfig
+                ? [
+                    {
+                      environmentId: environment.environmentId,
+                      label: environment.label,
+                      patch: resolveServerPatch(environment.serverConfig.settings),
+                    },
+                  ]
+                : [],
+            )
           : [];
   const hasClientWrite = Object.keys(clientPatch).length > 0;
   const hasWrite = hasClientWrite || serverWrites.length > 0;
   const unavailableReason =
-    hasWrite || Object.keys(patch).length === 0
+    hasWrite || inputKeyCount === 0
       ? null
       : scope.kind === "unavailable"
         ? scope.message
@@ -249,6 +284,50 @@ export function planScopedSettingsPatch(
             ? "Connect the selected checkouts, or update their environments, to save a project override."
             : `Connect ${scope.kind === "environment" ? scope.label : "an environment"} to save this setting.`;
   return { clientPatch, hasClientWrite, serverWrites, unavailableReason };
+}
+
+/** Completes a routing-policy edit from each target's own effective policy. */
+export function planScopedProviderRoutingPolicyPatch(
+  scope: ResolvedSettingsScope,
+  environments: readonly ScopedSettingsEnvironment[],
+  policyPatch: ProviderRoutingPolicyPatchResolver,
+  patch: Omit<ScopedSettingsPatch, "providerRoutingPolicy"> = {},
+) {
+  const clientPatch = Object.fromEntries(
+    Object.entries(patch).filter(([key]) => CLIENT_KEYS.has(key)),
+  ) as ClientSettingsPatch;
+  const serverPatch = Object.fromEntries(
+    Object.entries(patch).filter(([key]) => SERVER_KEYS.has(key)),
+  ) as ServerSettingsPatch;
+  const staticPolicyPatch = typeof policyPatch === "function" ? null : policyPatch;
+  const serverKeys = [...new Set([...Object.keys(serverPatch), "providerRoutingPolicy"])];
+  return planScopedSettingsServerPatch(
+    scope,
+    environments,
+    clientPatch,
+    serverKeys,
+    (settings) => {
+      const targetPolicyPatch =
+        staticPolicyPatch ?? (typeof policyPatch === "function" ? policyPatch(settings) : null);
+      if (targetPolicyPatch === null) return serverPatch;
+      return {
+        ...serverPatch,
+        providerRoutingPolicy: {
+          ...settings.providerRoutingPolicy,
+          ...targetPolicyPatch,
+          instanceIdsByDriver:
+            targetPolicyPatch.instanceIdsByDriver === undefined
+              ? settings.providerRoutingPolicy.instanceIdsByDriver
+              : {
+                  ...settings.providerRoutingPolicy.instanceIdsByDriver,
+                  ...targetPolicyPatch.instanceIdsByDriver,
+                },
+        },
+      };
+    },
+    Object.keys(patch).length +
+      (staticPolicyPatch === null ? 1 : Object.keys(staticPolicyPatch).length),
+  );
 }
 
 /** Remove the keys' project overrides so each member inherits its environment value again. */

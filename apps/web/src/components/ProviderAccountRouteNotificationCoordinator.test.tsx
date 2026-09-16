@@ -8,6 +8,7 @@ const state = vi.hoisted(() => ({
   add: vi.fn(),
   visible: true,
   focused: true,
+  status: "live" as "live" | "synchronizing",
   documentListeners: new Map<string, Set<() => void>>(),
   windowListeners: new Map<string, Set<() => void>>(),
 }));
@@ -31,6 +32,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("../state/entities", () => ({
   useThreadDetail: () => ({ activities: state.activities }),
+  useThreadStatus: () => state.status,
 }));
 vi.mock("./ui/toast", () => ({
   stackedThreadToast: (value: unknown) => value,
@@ -69,6 +71,7 @@ beforeEach(() => {
   state.activities = [];
   state.visible = true;
   state.focused = true;
+  state.status = "live";
   state.documentListeners.clear();
   state.windowListeners.clear();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -129,5 +132,20 @@ describe("provider account route notification coordinator", () => {
     await render();
 
     expect(state.add).not.toHaveBeenCalled();
+  });
+
+  it("baselines history only after the thread detail finishes synchronizing", async () => {
+    state.status = "synchronizing";
+    await render();
+    state.activities = [routed("route-history")];
+    await render();
+    state.status = "live";
+    await render();
+
+    expect(state.add).not.toHaveBeenCalled();
+
+    state.activities = [...state.activities, routed("route-live")];
+    await render();
+    expect(state.add).toHaveBeenCalledTimes(1);
   });
 });

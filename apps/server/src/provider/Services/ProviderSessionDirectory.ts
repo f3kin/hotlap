@@ -1,6 +1,7 @@
 import type {
   AgentSessionImportSource,
   ProviderInstanceId,
+  MessageId,
   ProviderDriverKind,
   ProviderSessionRuntimeStatus,
   RuntimeMode,
@@ -70,6 +71,14 @@ export interface ProviderSessionDirectoryShape {
   readonly clearActiveTurnIfMatches?: (input: {
     readonly threadId: ThreadId;
     readonly providerInstanceId: ProviderInstanceId;
+    readonly turnId: TurnId;
+  }) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
+
+  /** Clear one exact orphaned admission without touching a newer provider turn. */
+  readonly clearTurnAdmissionIfMatches?: (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly messageId: MessageId;
     readonly turnId: TurnId;
   }) => Effect.Effect<boolean, ProviderSessionDirectoryPersistenceError>;
 

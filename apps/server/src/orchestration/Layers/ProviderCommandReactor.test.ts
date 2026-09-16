@@ -51,6 +51,7 @@ import {
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -545,6 +546,30 @@ describe("ProviderCommandReactor", () => {
             active: "activeTurnId" in payload && payload.activeTurnId === turnId,
           };
         }),
+      clearOrphanedTurnAdmissionIfMatches: (clearInput) =>
+        Effect.gen(function* () {
+          if (
+            runtimeSessions.some(
+              (session) =>
+                session.threadId === clearInput.threadId &&
+                session.activeTurnId === clearInput.turnId,
+            )
+          ) {
+            return false;
+          }
+          const directory = providerSessionDirectoryForTest;
+          if (directory === null || directory.clearTurnAdmissionIfMatches === undefined) {
+            return false;
+          }
+          const binding = yield* directory.getBinding(clearInput.threadId);
+          if (Option.isNone(binding) || binding.value.providerInstanceId === undefined) {
+            return false;
+          }
+          return yield* directory.clearTurnAdmissionIfMatches({
+            ...clearInput,
+            providerInstanceId: binding.value.providerInstanceId,
+          });
+        }),
       getCapabilities: (_provider) =>
         Effect.succeed({
           sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
@@ -652,6 +677,7 @@ describe("ProviderCommandReactor", () => {
       }),
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
+      Layer.provide(ProjectionTurnRepositoryLive),
       Layer.provideMerge(reactorOrchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -823,6 +849,29 @@ describe("ProviderCommandReactor", () => {
       reactor,
       snapshotQuery,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      admitTurn: (input?: {
+        readonly provider?: ProviderDriverKind;
+        readonly providerInstanceId?: ProviderInstanceId;
+        readonly turnId?: TurnId;
+      }) =>
+        runEffect(
+          engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`cmd-test-admit-${input?.turnId ?? "turn-1"}`),
+            threadId: ThreadId.make("thread-1"),
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: "running",
+              providerName: input?.provider ?? ProviderDriverKind.make("codex"),
+              providerInstanceId: input?.providerInstanceId ?? ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: input?.turnId ?? asTurnId("turn-1"),
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          }),
+        ),
       readPendingTurnStarts: () =>
         runtime!.runPromise(
           Effect.gen(function* () {
@@ -1118,6 +1167,153 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it("keeps an older pending recovery turn when a new prompt arrives", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const pendingMessageId = MessageId.make("message-pending-recovery");
+    const losingMessageId = MessageId.make("message-while-recovering");
+    const requestedAt = DateTime.formatIso(Effect.runSync(DateTime.now));
+    const harness = await createHarness({
+      beforeReactorStart: async ({ engine }) => {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-pending-recovery"),
+            threadId,
+            message: {
+              messageId: pendingMessageId,
+              role: "user",
+              text: "recover this message first",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: requestedAt,
+          }),
+        );
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-pending-recovery-starting"),
+            threadId,
+            session: {
+              threadId,
+              status: "starting",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: requestedAt,
+            },
+            createdAt: requestedAt,
+          }),
+        );
+      },
+    });
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-while-recovering"),
+        threadId,
+        message: {
+          messageId: losingMessageId,
+          role: "user",
+          text: "do not replace the pending recovery",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: requestedAt,
+      }),
+    );
+    await waitFor(async () => {
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.activities.some(
+          (activity) =>
+            activity.kind === "provider.turn.start.failed" &&
+            typeof activity.payload === "object" &&
+            activity.payload !== null &&
+            "requestId" in activity.payload &&
+            activity.payload.requestId === losingMessageId,
+        ) === true
+      );
+    });
+    await harness.drain();
+
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    const pending = await harness.runEffect(
+      harness.snapshotQuery.getPendingTurnStartByThreadId?.(threadId) ??
+        Effect.succeed(Option.none()),
+    );
+    expect(Option.getOrThrow(pending).messageId).toBe(pendingMessageId);
+    expect(harness.tryHandlePromptCommand).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: "do not replace the pending recovery" }),
+    );
+    expect(harness.startSession).not.toHaveBeenCalled();
+  });
+
+  it("durably claims a later prompt after the first pending prompt settles", async () => {
+    const releaseSignOut = await Effect.runPromise(Deferred.make<void>());
+    const firstMessageId = MessageId.make("message-sign-out-before-later-prompt");
+    const secondMessageId = MessageId.make("message-after-sign-out");
+    const harness = await createHarness({
+      tryHandlePromptCommandEffect: ({ text }) =>
+        text === "/logout"
+          ? Deferred.await(releaseSignOut).pipe(Effect.as(true))
+          : Effect.succeed(false),
+    });
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-sign-out-before-later-prompt"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: firstMessageId,
+          role: "user",
+          text: "/logout",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await waitFor(() => harness.tryHandlePromptCommand.mock.calls.length === 1);
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-after-sign-out"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: secondMessageId,
+          role: "user",
+          text: "continue after signing out",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+
+    await harness.runEffect(Deferred.succeed(releaseSignOut, undefined));
+    await harness.drain();
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ input: "continue after signing out" }),
+    );
+    const pending = await harness.runEffect(
+      harness.snapshotQuery.getPendingTurnStartByThreadId?.(ThreadId.make("thread-1")) ??
+        Effect.succeed(Option.none()),
+    );
+    expect(Option.getOrThrow(pending).messageId).toBe(secondMessageId);
+  });
+
   it("relaunches one pending turn after activation when an older terminal runtime turn is stale", async () => {
     const threadId = ThreadId.make("thread-1");
     const staleTurnId = TurnId.make("turn-completed-before-account-switch");
@@ -1276,7 +1472,7 @@ describe("ProviderCommandReactor", () => {
     );
     await Effect.runPromise(Deferred.succeed(activation, undefined));
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.drain();
+    await waitFor(async () => (await harness.readPendingTurnStarts()).length === 0);
 
     const repairedBinding = await harness.runEffect(harness.directory.getBinding(threadId));
     expect(Option.getOrThrow(repairedBinding).runtimePayload).toMatchObject({
@@ -1354,6 +1550,7 @@ describe("ProviderCommandReactor", () => {
             },
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             runtimeMode: "approval-required",
+            allowProviderAccountRouting: true,
             createdAt: "2025-12-31T23:59:00.000Z",
           }),
         );
@@ -1484,6 +1681,108 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("fails an ambiguously admitted turn after its provider session disappears", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const messageId = MessageId.make("message-ambiguous-admission");
+    const turnId = TurnId.make("turn-ambiguous-admission");
+    const harness = await createHarness({
+      deferReactorStart: true,
+      beforeReactorStart: async ({ engine, directory }) => {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-ambiguous-admission-pending"),
+            threadId,
+            message: {
+              messageId,
+              role: "user",
+              text: "report this uncertain send without replaying it",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: "2025-12-31T23:59:00.000Z",
+          }),
+        );
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("cmd-ambiguous-admission-starting"),
+            threadId,
+            session: {
+              threadId,
+              status: "starting",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: "2025-12-31T23:59:00.000Z",
+            },
+            createdAt: "2025-12-31T23:59:00.000Z",
+          }),
+        );
+        await Effect.runPromise(
+          directory.upsert({
+            threadId,
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            status: "running",
+            runtimeMode: "approval-required",
+            runtimePayload: {
+              activeTurnId: turnId,
+              lastAdmittedMessageId: messageId,
+              lastAdmittedTurnId: turnId,
+            },
+          }),
+        );
+      },
+    });
+
+    await harness.runEffect(harness.reactor.reconcilePendingTurns(threadId));
+    await harness.runEffect(harness.reactor.reconcilePendingTurns(threadId));
+    await harness.drain();
+
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(await harness.readPendingTurnStarts()).toEqual([]);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: null,
+    });
+    expect(thread?.activities).toContainEqual(
+      expect.objectContaining({
+        kind: "provider.turn.start.failed",
+        summary: "Message delivery could not be confirmed",
+        payload: expect.objectContaining({
+          requestId: messageId,
+          detail: expect.stringContaining("may have been sent"),
+        }),
+      }),
+    );
+    const binding = Option.getOrThrow(
+      await harness.runEffect(harness.directory.getBinding(threadId)),
+    );
+    expect(binding.runtimePayload).toMatchObject({ activeTurnId: null });
+    expect(binding.runtimePayload).not.toHaveProperty("lastAdmittedMessageId");
+    expect(binding.runtimePayload).not.toHaveProperty("lastAdmittedTurnId");
+
+    await harness.startReactor();
+    await harness.emitRuntimeEvent({
+      type: "session.started",
+      eventId: EventId.make("evt-ambiguous-admission-reconnect"),
+      provider: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      payload: {},
+    });
+    await harness.runEffect(harness.reactor.reconcilePendingTurns(threadId));
+    await harness.drain();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+  });
+
   it("routes an idle auto thread to the next configured account before sending", async () => {
     const current = routingCodexProvider({ instanceId: "codex-personal", usedPercent: 97 });
     const target = routingCodexProvider({ instanceId: "codex-work", usedPercent: 20 });
@@ -1516,6 +1815,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1587,6 +1887,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1634,6 +1935,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1669,6 +1971,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1717,6 +2020,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1763,6 +2067,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1776,23 +2081,23 @@ describe("ProviderCommandReactor", () => {
       label: "steering",
       messageId: "message-steer",
       sessionStatus: "running" as const,
-      skipProviderAccountRouting: false,
+      allowProviderAccountRouting: true,
     },
     {
       label: "an async input answer",
       messageId: "async-answer:request-1",
       sessionStatus: "ready" as const,
-      skipProviderAccountRouting: false,
+      allowProviderAccountRouting: true,
     },
     {
       label: "a queued prompt",
       messageId: "message-queued",
       sessionStatus: "ready" as const,
-      skipProviderAccountRouting: true,
+      allowProviderAccountRouting: false,
     },
   ])(
     "does not auto-route $label",
-    async ({ messageId, sessionStatus, skipProviderAccountRouting }) => {
+    async ({ messageId, sessionStatus, allowProviderAccountRouting }) => {
       const current = routingCodexProvider({ instanceId: "codex-personal", usedPercent: 97 });
       const target = routingCodexProvider({ instanceId: "codex-work", usedPercent: 20 });
       const harness = await createHarness({
@@ -1854,7 +2159,7 @@ describe("ProviderCommandReactor", () => {
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
-          ...(skipProviderAccountRouting ? { skipProviderAccountRouting: true as const } : {}),
+          ...(allowProviderAccountRouting ? { allowProviderAccountRouting: true as const } : {}),
           createdAt,
         }),
       );
@@ -1899,6 +2204,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -1983,6 +2289,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt,
       }),
     );
@@ -2044,6 +2351,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -2093,6 +2401,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -2152,6 +2461,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -2206,6 +2516,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -2269,6 +2580,7 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
         createdAt: ROUTING_NOW_ISO,
       }),
     );
@@ -4394,6 +4706,24 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-turn-start-unsupported-1-admitted"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -4448,6 +4778,22 @@ describe("ProviderCommandReactor", () => {
         });
 
         yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-turn-start-restricted-1-admitted"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
 
         yield* harness.engine.dispatch({
           type: "thread.turn.start",
@@ -4568,6 +4914,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.admitTurn();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -4617,6 +4964,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.admitTurn();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -4759,6 +5107,10 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.admitTurn({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+    });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -4827,6 +5179,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.admitTurn();
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -5015,6 +5368,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.admitTurn();
 
     await Effect.runPromise(
       harness.engine.dispatch({

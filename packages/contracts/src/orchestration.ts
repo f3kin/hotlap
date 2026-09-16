@@ -1337,7 +1337,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
-  skipProviderAccountRouting: Schema.optional(Schema.Literal(true)),
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1358,7 +1358,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
-  skipProviderAccountRouting: Schema.optional(Schema.Literal(true)),
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   createdAt: IsoDateTime,
 });
 
@@ -1983,7 +1983,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
-  skipProviderAccountRouting: Schema.optional(Schema.Literal(true)),
+  allowProviderAccountRouting: Schema.optional(Schema.Literal(true)),
   /** Exact first-turn provider input for a fork; the visible user message stays unchanged. */
   providerInput: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),

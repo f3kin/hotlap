@@ -81,28 +81,60 @@ function present(activity: OrchestrationThreadActivity): ProviderAccountRouteNot
 export function createProviderAccountRouteNotificationTracker(): ProviderAccountRouteNotificationTracker {
   const seenActivityIds = new Set<string>();
   let activeThreadKey: string | null = null;
+  let tailActivityId: string | null = null;
+  let rebaselineNextNonEmpty = false;
+
+  const baseline = (
+    threadKey: string | null,
+    activities: ReadonlyArray<OrchestrationThreadActivity>,
+  ) => {
+    activeThreadKey = threadKey;
+    tailActivityId = activities.at(-1)?.id ?? null;
+    rebaselineNextNonEmpty = false;
+    for (const activity of activities) {
+      if (ROUTE_KINDS.has(activity.kind)) seenActivityIds.add(activity.id);
+    }
+  };
 
   return {
     observe(threadKey, activities, foreground) {
-      const relevant = activities.filter((activity) => ROUTE_KINDS.has(activity.kind));
-      if (threadKey === null || !foreground) {
-        activeThreadKey = null;
-        for (const activity of relevant) seenActivityIds.add(activity.id);
+      if (threadKey === null) {
+        baseline(null, activities);
         return [];
       }
-      if (activeThreadKey !== threadKey) {
-        activeThreadKey = threadKey;
-        for (const activity of relevant) seenActivityIds.add(activity.id);
+      if (activeThreadKey !== threadKey || !foreground) {
+        baseline(threadKey, activities);
+        return [];
+      }
+
+      if (activities.length === 0) {
+        rebaselineNextNonEmpty = tailActivityId !== null;
+        tailActivityId = null;
+        return [];
+      }
+      if (rebaselineNextNonEmpty) {
+        baseline(threadKey, activities);
+        return [];
+      }
+
+      const tailIndex =
+        tailActivityId === null
+          ? -1
+          : activities.findIndex((activity) => activity.id === tailActivityId);
+      if (tailActivityId !== null && tailIndex === -1) {
+        baseline(threadKey, activities);
         return [];
       }
 
       const notifications: ProviderAccountRouteNotification[] = [];
-      for (const activity of relevant) {
+      for (const activity of activities.slice(tailIndex + 1)) {
+        if (!ROUTE_KINDS.has(activity.kind)) continue;
         if (seenActivityIds.has(activity.id)) continue;
         seenActivityIds.add(activity.id);
         const notification = present(activity);
         if (notification !== null) notifications.push(notification);
       }
+      tailActivityId = activities.at(-1)?.id ?? null;
       return notifications;
     },
   };

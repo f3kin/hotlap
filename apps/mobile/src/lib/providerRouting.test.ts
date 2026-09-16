@@ -6,8 +6,10 @@ import {
   eligibleProjectDefaultProviderRoutingMode,
   providerAccountRoutingConsentForSubmission,
   reconcileDraftModelSelectionAfterAutomaticRoute,
+  resolveProviderRoutingModeForSubmission,
   resolveNewTaskProviderRoutingMode,
   routingModeAfterManualModelSelection,
+  shouldClearAcknowledgedProviderRoutingIntent,
 } from "./providerRouting";
 
 const codexOne = ProviderInstanceId.make("codex-one");
@@ -41,6 +43,69 @@ describe("routingModeAfterManualModelSelection", () => {
 
   it("keeps fixed routing fixed", () => {
     expect(routingModeAfterManualModelSelection("fixed", codexOne, codexTwo)).toBe("fixed");
+  });
+});
+
+describe("resolveProviderRoutingModeForSubmission", () => {
+  it("uses the pending Fixed draft intent before the server projection catches up", () => {
+    expect(
+      resolveProviderRoutingModeForSubmission({
+        draftMode: "fixed",
+        authoritativeMode: "auto",
+        authoritativeInstanceId: codexOne,
+        selectedInstanceId: codexTwo,
+      }),
+    ).toBe("fixed");
+  });
+
+  it("uses the pending Auto draft intent before the server projection catches up", () => {
+    expect(
+      resolveProviderRoutingModeForSubmission({
+        draftMode: "auto",
+        authoritativeMode: "fixed",
+        authoritativeInstanceId: codexOne,
+        selectedInstanceId: codexOne,
+      }),
+    ).toBe("auto");
+  });
+
+  it("pins an account change when there is no pending routing intent", () => {
+    expect(
+      resolveProviderRoutingModeForSubmission({
+        authoritativeMode: "auto",
+        authoritativeInstanceId: codexOne,
+        selectedInstanceId: codexTwo,
+      }),
+    ).toBe("fixed");
+  });
+});
+
+describe("shouldClearAcknowledgedProviderRoutingIntent", () => {
+  it("clears the latest saved Fixed intent when Auto was coalesced before projection", () => {
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: true,
+        intendedMode: "fixed",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps an intent until its save is acknowledged and projected", () => {
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: false,
+        intendedMode: "fixed",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(false);
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: true,
+        intendedMode: "fixed",
+        authoritativeMode: "auto",
+      }),
+    ).toBe(false);
   });
 });
 
@@ -113,19 +178,51 @@ describe("legacy pending task routing", () => {
     expect(
       resolveNewTaskProviderRoutingMode({ editingMode: "auto", projectDefault: "fixed" }),
     ).toBe("auto");
-    expect(providerAccountRoutingConsentForSubmission(true)).toEqual({
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        editingConsent: true,
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({
       allowProviderAccountRouting: true,
     });
   });
 
   it("does not opt a legacy queued task into routing when it is edited", () => {
-    expect(providerAccountRoutingConsentForSubmission(false)).toEqual({});
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        editingConsent: false,
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({});
   });
 
-  it("adds routing consent for a new submission", () => {
-    expect(providerAccountRoutingConsentForSubmission(null)).toEqual({
+  it("adds routing consent only for a supported new Auto submission", () => {
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        editingConsent: null,
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({
       allowProviderAccountRouting: true,
     });
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        editingConsent: null,
+        providerRoutingMode: "fixed",
+        supported: true,
+      }),
+    ).toEqual({});
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        editingConsent: null,
+        providerRoutingMode: "auto",
+        supported: false,
+      }),
+    ).toEqual({});
   });
 });
 

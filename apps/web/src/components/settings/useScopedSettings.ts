@@ -18,11 +18,13 @@ import { useOptionalSettingsScope, useSettingsScope } from "./SettingsScopeConte
 import {
   persistScopedSettingsPatch,
   planProjectOverridesClear,
+  planScopedProviderRoutingPolicyPatch,
   planScopedSettingsClear,
   planScopedSettingsPatch,
   scopedSettingsAreMixed,
   scopedSettingsSource,
   type ProjectOverrideEntry,
+  type ProviderRoutingPolicyPatchResolver,
   type ScopedSettingsPatch,
 } from "./scopedSettings";
 
@@ -86,6 +88,18 @@ export function useUpdateScopedSettings() {
   const run = useRunScopedPlan();
   return useCallback(
     (patch: ScopedSettingsPatch) => run(planScopedSettingsPatch(scope, environments, patch)),
+    [environments, run, scope],
+  );
+}
+
+export function useUpdateScopedProviderRoutingPolicy() {
+  const { scope, environments } = useSettingsScope();
+  const run = useRunScopedPlan();
+  return useCallback(
+    (
+      policyPatch: ProviderRoutingPolicyPatchResolver,
+      patch: Omit<ScopedSettingsPatch, "providerRoutingPolicy"> = {},
+    ) => run(planScopedProviderRoutingPolicyPatch(scope, environments, policyPatch, patch)),
     [environments, run, scope],
   );
 }

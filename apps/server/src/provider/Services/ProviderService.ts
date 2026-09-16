@@ -155,6 +155,13 @@ export interface ProviderServiceShape {
     ProviderServiceError
   >;
 
+  /** Clear one exact admitted turn only after its live provider session disappeared. */
+  readonly clearOrphanedTurnAdmissionIfMatches?: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+    readonly turnId: TurnId;
+  }) => Effect.Effect<boolean, ProviderServiceError>;
+
   /**
    * Read capabilities for the adapter bound to a configured provider instance.
    */

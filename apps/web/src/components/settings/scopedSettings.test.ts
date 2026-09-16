@@ -1,6 +1,8 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ProjectId,
   type ServerSettings,
 } from "@t3tools/contracts";
@@ -11,6 +13,7 @@ import {
   listProjectOverrides,
   persistScopedSettingsPatch,
   planProjectOverridesClear,
+  planScopedProviderRoutingPolicyPatch,
   planScopedSettingsClear,
   planScopedSettingsPatch,
   resolveScopedSettingsTargets,
@@ -399,6 +402,194 @@ describe("project overrides at environment scope", () => {
 });
 
 describe("partial object patches at project scope", () => {
+  it("preserves each project's routing mode and account pools when changing the threshold", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const codexPersonal = ProviderInstanceId.make("codex-personal");
+    const codexWork = ProviderInstanceId.make("codex-work");
+    const claudePersonal = ProviderInstanceId.make("claude-personal");
+    const withPolicies = [
+      environment("Server", {
+        settings: {
+          providerRoutingPolicy: {
+            defaultMode: "auto",
+            usageThresholdPercent: 90,
+            instanceIdsByDriver: { [codex]: [codexPersonal, codexWork] },
+          },
+        },
+      }),
+      environment("Laptop", {
+        settings: {
+          providerRoutingPolicy: {
+            defaultMode: "fixed",
+            usageThresholdPercent: 75,
+            instanceIdsByDriver: { [claude]: [claudePersonal] },
+          },
+        },
+      }),
+    ];
+
+    const plan = planScopedProviderRoutingPolicyPatch(project, withPolicies, {
+      usageThresholdPercent: 80,
+    });
+
+    expect(plan.serverWrites.map((write) => write.patch)).toEqual([
+      {
+        projectSettingsOverrides: {
+          [projectId]: {
+            providerRoutingPolicy: {
+              defaultMode: "auto",
+              usageThresholdPercent: 80,
+              instanceIdsByDriver: { codex: [codexPersonal, codexWork] },
+            },
+          },
+        },
+      },
+      {
+        projectSettingsOverrides: {
+          [laptopProjectId]: {
+            providerRoutingPolicy: {
+              defaultMode: "fixed",
+              usageThresholdPercent: 80,
+              instanceIdsByDriver: { claudeAgent: [claudePersonal] },
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("changes one provider pool without replacing a checkout's other routing fields", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const codexPersonal = ProviderInstanceId.make("codex-personal");
+    const codexWork = ProviderInstanceId.make("codex-work");
+    const claudePersonal = ProviderInstanceId.make("claude-personal");
+    const selected = environment("Server", {
+      settings: {
+        projectSettingsOverrides: {
+          [projectId]: {
+            providerRoutingPolicy: {
+              defaultMode: "auto",
+              usageThresholdPercent: 88,
+              instanceIdsByDriver: { [claude]: [claudePersonal] },
+            },
+          },
+        },
+      },
+    });
+
+    const plan = planScopedProviderRoutingPolicyPatch(checkout, [laptop, selected], {
+      instanceIdsByDriver: { [codex]: [codexPersonal, codexWork] },
+    });
+
+    expect(plan.serverWrites).toEqual([
+      {
+        environmentId: server.environmentId,
+        label: server.label,
+        patch: {
+          projectSettingsOverrides: {
+            [projectId]: {
+              providerRoutingPolicy: {
+                defaultMode: "auto",
+                usageThresholdPercent: 88,
+                instanceIdsByDriver: {
+                  codex: [codexPersonal, codexWork],
+                  claudeAgent: [claudePersonal],
+                },
+              },
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("saves a model and routing-mode correction together without replacing policy fields", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const codexPersonal = ProviderInstanceId.make("codex-personal");
+    const selected = environment("Server", {
+      settings: {
+        providerRoutingPolicy: {
+          defaultMode: "auto",
+          usageThresholdPercent: 92,
+          instanceIdsByDriver: { [codex]: [codexPersonal] },
+        },
+      },
+    });
+
+    const plan = planScopedProviderRoutingPolicyPatch(
+      checkout,
+      [selected],
+      { defaultMode: "fixed" },
+      { defaultModelSelection: null },
+    );
+
+    expect(plan.serverWrites[0]?.patch).toEqual({
+      projectSettingsOverrides: {
+        [projectId]: {
+          defaultModelSelection: null,
+          providerRoutingPolicy: {
+            defaultMode: "fixed",
+            usageThresholdPercent: 92,
+            instanceIdsByDriver: { codex: [codexPersonal] },
+          },
+        },
+      },
+    });
+  });
+
+  it("applies routing-mode corrections only to targets that need them", () => {
+    const withPolicies = [
+      environment("Server", {
+        settings: {
+          providerRoutingPolicy: {
+            defaultMode: "auto",
+            usageThresholdPercent: 90,
+            instanceIdsByDriver: {},
+          },
+        },
+      }),
+      environment("Laptop", {
+        settings: {
+          providerRoutingPolicy: {
+            defaultMode: "fixed",
+            usageThresholdPercent: 75,
+            instanceIdsByDriver: {},
+          },
+        },
+      }),
+    ];
+
+    const plan = planScopedProviderRoutingPolicyPatch(
+      project,
+      withPolicies,
+      (settings) =>
+        settings.providerRoutingPolicy.defaultMode === "auto" ? { defaultMode: "fixed" } : null,
+      { defaultModelSelection: null },
+    );
+
+    expect(plan.serverWrites.map((write) => write.patch)).toEqual([
+      {
+        projectSettingsOverrides: {
+          [projectId]: {
+            defaultModelSelection: null,
+            providerRoutingPolicy: {
+              defaultMode: "fixed",
+              usageThresholdPercent: 90,
+              instanceIdsByDriver: {},
+            },
+          },
+        },
+      },
+      {
+        projectSettingsOverrides: {
+          [laptopProjectId]: { defaultModelSelection: null },
+        },
+      },
+    ]);
+  });
+
   it("completes a writing style field patch from the target's effective value", () => {
     const environmentId = EnvironmentId.make("laptop");
     const projectId = ProjectId.make("fleet");

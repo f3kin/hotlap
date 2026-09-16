@@ -51,7 +51,7 @@ import {
   resolveThreadOutboxFailureAction,
   resolveQueuedThreadMetadataUpdate,
   resolveQueuedThreadSettings,
-  shouldSkipQueuedProviderAccountRouting,
+  shouldAllowQueuedProviderAccountRouting,
   shouldRetryThreadOutboxDelivery,
   threadOutboxRetryDelayMs,
   type QueuedThreadCreation,
@@ -320,6 +320,9 @@ export async function recoverEditedCreationAfterDelivery(
       ...(kept.modelSelection !== undefined ? { modelSelection: kept.modelSelection } : {}),
       ...(kept.runtimeMode !== undefined ? { runtimeMode: kept.runtimeMode } : {}),
       ...(kept.interactionMode !== undefined ? { interactionMode: kept.interactionMode } : {}),
+      ...(kept.providerRoutingMode !== undefined
+        ? { providerRoutingMode: kept.providerRoutingMode }
+        : {}),
     });
     // The append only schedules a debounced write; the queue entry is the
     // only durable copy until the draft lands, so flush before removing.
@@ -412,6 +415,9 @@ export async function restoreRejectedQueuedMessage(
       ...(queuedMessage.modelSelection ? { modelSelection: queuedMessage.modelSelection } : {}),
       ...(queuedMessage.runtimeMode ? { runtimeMode: queuedMessage.runtimeMode } : {}),
       ...(queuedMessage.interactionMode ? { interactionMode: queuedMessage.interactionMode } : {}),
+      ...(queuedMessage.providerRoutingMode
+        ? { providerRoutingMode: queuedMessage.providerRoutingMode }
+        : {}),
       ...(queuedMessage.creation
         ? {
             workspaceSelection: {
@@ -830,8 +836,12 @@ export function useThreadOutboxDrain(): void {
           modelSelection: sendSettings.modelSelection,
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
-          ...(shouldSkipQueuedProviderAccountRouting(queuedMessage)
-            ? { skipProviderAccountRouting: true as const }
+          ...(shouldAllowQueuedProviderAccountRouting(
+            queuedMessage,
+            "providerAccountRouting" in currentConfig.environment.capabilities &&
+              currentConfig.environment.capabilities.providerAccountRouting === true,
+          )
+            ? { allowProviderAccountRouting: true as const }
             : {}),
           createdAt: queuedMessage.createdAt,
         },
@@ -962,8 +972,12 @@ export function useThreadOutboxDrain(): void {
           runtimeMode: sendSettings.runtimeMode,
           interactionMode: sendSettings.interactionMode,
           providerRoutingMode: queuedMessage.providerRoutingMode ?? "fixed",
-          ...(shouldSkipQueuedProviderAccountRouting(queuedMessage)
-            ? { skipProviderAccountRouting: true as const }
+          ...(shouldAllowQueuedProviderAccountRouting(
+            queuedMessage,
+            "providerAccountRouting" in currentConfig.environment.capabilities &&
+              currentConfig.environment.capabilities.providerAccountRouting === true,
+          )
+            ? { allowProviderAccountRouting: true as const }
             : {}),
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,

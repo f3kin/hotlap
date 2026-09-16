@@ -2,6 +2,7 @@ import {
   createProviderAccountRouteNotificationTracker,
   type ProviderAccountRouteNotification,
 } from "@t3tools/client-runtime/provider-account-route-notifications";
+import type { OrchestrationThreadActivity } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { useCallback, useEffect, useState } from "react";
 import { AppState, Pressable, View } from "react-native";
@@ -13,6 +14,7 @@ import { useEnvironmentThread } from "../state/threads";
 import { AppText as Text } from "./AppText";
 
 const ROUTE_BANNER_VISIBLE_MS = 5_000;
+const EMPTY_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = Object.freeze([]);
 
 export function ProviderAccountRouteBanner(props: {
   readonly notification: ProviderAccountRouteNotification;
@@ -104,6 +106,9 @@ export function ProviderAccountRouteNotificationCoordinator(props: { readonly pa
   const [pending, setPending] = useState<ReadonlyArray<ProviderAccountRouteNotification>>([]);
   const threadKey =
     target === null ? null : `${String(target.environmentId)}:${String(target.threadId)}`;
+  const activities = thread?.activities ?? EMPTY_ACTIVITIES;
+  const resolvedThreadId = thread?.id ?? null;
+  const detailResolved = threadState.status === "live" && resolvedThreadId === target?.threadId;
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
@@ -115,16 +120,15 @@ export function ProviderAccountRouteNotificationCoordinator(props: { readonly pa
   }, []);
 
   useEffect(() => {
-    const observedThreadKey =
-      threadKey !== null && thread !== null && thread.id === target?.threadId ? threadKey : null;
+    const observedThreadKey = threadKey !== null && detailResolved ? threadKey : null;
     const notifications = tracker.observe(
       observedThreadKey,
-      observedThreadKey === null ? [] : (thread?.activities ?? []),
+      observedThreadKey === null ? EMPTY_ACTIVITIES : activities,
       foreground,
     );
     // oxlint-disable-next-line react/set-state-in-effect -- Durable external activities enqueue transient native presentation.
     if (notifications.length > 0) setPending((current) => [...current, ...notifications]);
-  }, [foreground, target?.threadId, thread, threadKey, tracker]);
+  }, [activities, detailResolved, foreground, threadKey, tracker]);
 
   const dismissCurrent = useCallback(() => setPending((items) => items.slice(1)), []);
 

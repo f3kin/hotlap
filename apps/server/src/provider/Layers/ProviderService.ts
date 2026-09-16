@@ -2443,6 +2443,28 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const clearOrphanedTurnAdmissionIfMatches: NonNullable<
+    ProviderService.ProviderServiceShape["clearOrphanedTurnAdmissionIfMatches"]
+  > = Effect.fn("clearOrphanedTurnAdmissionIfMatches")(function* (input) {
+    const exactTurnIsLive = (yield* listSessions()).some(
+      (session) => session.threadId === input.threadId && session.activeTurnId === input.turnId,
+    );
+    if (exactTurnIsLive) return false;
+
+    const binding = yield* directory.getBinding(input.threadId);
+    if (
+      Option.isNone(binding) ||
+      binding.value.providerInstanceId === undefined ||
+      directory.clearTurnAdmissionIfMatches === undefined
+    ) {
+      return false;
+    }
+    return yield* directory.clearTurnAdmissionIfMatches({
+      ...input,
+      providerInstanceId: binding.value.providerInstanceId,
+    });
+  });
+
   const isSessionEventAuthoritative: ProviderServiceMethod<"isSessionEventAuthoritative"> = (
     threadId,
     providerInstanceId,
@@ -2689,6 +2711,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     clearActiveTurnIfMatches,
     reconcilePersistedActiveTurn,
     getPersistedTurnAdmission,
+    clearOrphanedTurnAdmissionIfMatches,
     getCapabilities,
     getInstanceInfo,
     assertConversationRollbackSupported,

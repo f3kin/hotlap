@@ -38,7 +38,7 @@ export interface ProjectThreadStartTurnSpec {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly providerRoutingMode?: ProviderRoutingMode;
-  readonly skipProviderAccountRouting?: true;
+  readonly allowProviderAccountRouting?: true;
   readonly workspaceMode: "local" | "worktree";
   readonly branch: string | null;
   readonly worktreePath: string | null;
@@ -69,7 +69,7 @@ export function buildProjectThreadStartTurnInput(spec: ProjectThreadStartTurnSpe
     titleSeed: title,
     runtimeMode: spec.runtimeMode,
     interactionMode: spec.interactionMode,
-    ...(spec.skipProviderAccountRouting ? { skipProviderAccountRouting: true as const } : {}),
+    ...(spec.allowProviderAccountRouting ? { allowProviderAccountRouting: true as const } : {}),
     bootstrap: {
       createThread: {
         projectId: spec.projectId,

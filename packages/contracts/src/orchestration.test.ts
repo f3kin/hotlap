@@ -319,32 +319,32 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
     assert.strictEqual(parsed.modelSelection, undefined);
     assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
     assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
-    assert.strictEqual(parsed.skipProviderAccountRouting, undefined);
+    assert.strictEqual(parsed.allowProviderAccountRouting, undefined);
   }),
 );
 
-it.effect("preserves a one-turn provider account routing suppression marker", () =>
+it.effect("preserves explicit one-turn provider account routing consent", () =>
   Effect.gen(function* () {
     const command = yield* decodeClientOrchestrationCommand({
       type: "thread.turn.start",
-      commandId: "cmd-turn-skip-routing",
+      commandId: "cmd-turn-allow-routing",
       threadId: "thread-1",
       message: {
-        messageId: "msg-skip-routing",
+        messageId: "msg-allow-routing",
         role: "user",
-        text: "queued while offline",
+        text: "route this foreground turn",
         attachments: [],
       },
       runtimeMode: "approval-required",
       interactionMode: "default",
-      skipProviderAccountRouting: true,
+      allowProviderAccountRouting: true,
       createdAt: "2026-01-01T00:00:00.000Z",
     });
 
     if (command.type !== "thread.turn.start") {
       assert.fail(`Expected thread.turn.start, received ${command.type}.`);
     }
-    assert.strictEqual(command.skipProviderAccountRouting, true);
+    assert.strictEqual(command.allowProviderAccountRouting, true);
   }),
 );
 
@@ -1449,19 +1449,19 @@ it.effect(
       assert.strictEqual(parsed.runtimeMode, DEFAULT_RUNTIME_MODE);
       assert.strictEqual(parsed.interactionMode, DEFAULT_PROVIDER_INTERACTION_MODE);
       assert.strictEqual(parsed.sourceProposedPlan, undefined);
-      assert.strictEqual(parsed.skipProviderAccountRouting, undefined);
+      assert.strictEqual(parsed.allowProviderAccountRouting, undefined);
     }),
 );
 
-it.effect("decodes a turn-start-requested routing suppression marker", () =>
+it.effect("decodes turn-start-requested routing consent", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartRequestedPayload({
       threadId: "thread-1",
-      messageId: "msg-skip-routing",
-      skipProviderAccountRouting: true,
+      messageId: "msg-allow-routing",
+      allowProviderAccountRouting: true,
       createdAt: "2026-01-01T00:00:00.000Z",
     });
-    assert.strictEqual(parsed.skipProviderAccountRouting, true);
+    assert.strictEqual(parsed.allowProviderAccountRouting, true);
   }),
 );
 

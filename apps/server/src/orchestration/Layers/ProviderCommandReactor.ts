@@ -50,6 +50,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { canStopThreadSessionIfIdle } from "../SessionStopPolicy.ts";
 import { threadHasQueuedTurnStart } from "../ThreadSettlementPolicy.ts";
 import {
@@ -224,6 +225,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerAuthService = yield* ProviderAuthService;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
@@ -856,12 +858,12 @@ const make = Effect.gen(function* () {
     readonly messageId: string;
     readonly createdAt: string;
     readonly resumed: boolean;
-    readonly skip: boolean;
+    readonly allow: boolean;
   }) {
     const currentSelection = input.requestedModelSelection ?? input.thread.modelSelection;
     if (
       input.resumed ||
-      input.skip ||
+      !input.allow ||
       input.messageId.startsWith("async-answer:") ||
       input.thread.providerRoutingMode !== "auto" ||
       input.thread.backgroundLiveness != null ||
@@ -1568,6 +1570,7 @@ const make = Effect.gen(function* () {
       return;
     }
     const { message, hasOtherUserMessages } = turnStart.value;
+    const isCompactCommand = isCompactCommandMessage(message);
     const appendTurnStartFailure = (summary: string, detail: string) =>
       appendProviderFailureActivity({
         threadId: event.payload.threadId,
@@ -1582,6 +1585,45 @@ const make = Effect.gen(function* () {
       return yield* appendTurnStartFailure(
         "Queued message was not sent",
         "The queued message was canceled before it could resume. Send it again to continue.",
+      );
+    }
+    const queuedDuringCompaction =
+      resumed === undefined &&
+      (compactingThreadIds.has(event.payload.threadId) ||
+        turnsAfterCompaction.has(event.payload.threadId));
+    const getPendingTurnStart = projectionSnapshotQuery.getPendingTurnStartByThreadId;
+    let pendingTurnStart =
+      getPendingTurnStart === undefined
+        ? Option.none()
+        : yield* getPendingTurnStart(event.payload.threadId);
+    if (!queuedDuringCompaction && Option.isNone(pendingTurnStart)) {
+      const claimed = yield* projectionTurnRepository.insertPendingTurnStartIfAbsent({
+        threadId: event.payload.threadId,
+        messageId: event.payload.messageId,
+        sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
+        sourceProposedPlanId: event.payload.sourceProposedPlan?.planId ?? null,
+        requestedAt: event.payload.createdAt,
+      });
+      if (claimed) {
+        pendingTurnStart = Option.some({
+          threadId: event.payload.threadId,
+          messageId: event.payload.messageId,
+          sourceProposedPlanThreadId: event.payload.sourceProposedPlan?.threadId ?? null,
+          sourceProposedPlanId: event.payload.sourceProposedPlan?.planId ?? null,
+          requestedAt: event.payload.createdAt,
+        });
+      } else if (getPendingTurnStart !== undefined) {
+        pendingTurnStart = yield* getPendingTurnStart(event.payload.threadId);
+      }
+    }
+    if (
+      !queuedDuringCompaction &&
+      (Option.isNone(pendingTurnStart) ||
+        pendingTurnStart.value.messageId !== event.payload.messageId)
+    ) {
+      return yield* appendTurnStartFailure(
+        "Message was not sent",
+        "Another message is still waiting to start. Retry after it connects.",
       );
     }
 
@@ -1668,7 +1710,6 @@ const make = Effect.gen(function* () {
 
     yield* ensureThreadWorktree(thread);
 
-    const isCompactCommand = isCompactCommandMessage(message);
     if (!hasOtherUserMessages && !isCompactCommand) {
       const project = yield* resolveProject(thread.projectId);
       const generationCwd =
@@ -1804,11 +1845,7 @@ const make = Effect.gen(function* () {
       );
       return;
     }
-    if (
-      !resumed &&
-      (compactingThreadIds.has(event.payload.threadId) ||
-        turnsAfterCompaction.has(event.payload.threadId))
-    ) {
+    if (queuedDuringCompaction) {
       const queued = turnsAfterCompaction.get(event.payload.threadId) ?? [];
       queued.push(event);
       turnsAfterCompaction.set(event.payload.threadId, queued);
@@ -1822,7 +1859,7 @@ const make = Effect.gen(function* () {
       messageId: event.payload.messageId,
       createdAt: event.payload.createdAt,
       resumed: resumed !== undefined,
-      skip: event.payload.skipProviderAccountRouting === true,
+      allow: event.payload.allowProviderAccountRouting === true,
     });
     if (routedModelSelection === PROVIDER_ACCOUNT_ROUTING_BLOCKED) {
       return;
@@ -1949,10 +1986,54 @@ const make = Effect.gen(function* () {
         providerService.getPersistedTurnAdmission?.(threadId) ?? Effect.succeed(null)
       );
       if (persistedAdmission?.messageId === pending.value.messageId) {
-        const providerStillRunsAdmission = (yield* providerService.listSessions()).some(
+        const liveSessions = yield* providerService.listSessions();
+        const providerStillRunsAdmission = liveSessions.some(
           (session) =>
             session.threadId === threadId && session.activeTurnId === persistedAdmission.turnId,
         );
+        if (persistedAdmission.active && !providerStillRunsAdmission) {
+          if (
+            liveSessions.some(
+              (session) => session.threadId === threadId && session.activeTurnId != null,
+            )
+          ) {
+            return;
+          }
+          const cleared = yield* (
+            providerService.clearOrphanedTurnAdmissionIfMatches?.({
+              threadId,
+              messageId: pending.value.messageId,
+              turnId: persistedAdmission.turnId,
+            }) ?? Effect.succeed(false)
+          );
+          if (!cleared) return;
+
+          const failedAt = DateTime.formatIso(yield* DateTime.now);
+          const latestThread = yield* resolveThreadShell(threadId);
+          if (!latestThread?.session) return;
+          yield* setThreadSession({
+            threadId,
+            session: {
+              ...latestThread.session,
+              status: "ready",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: failedAt,
+            },
+            createdAt: failedAt,
+          });
+          yield* appendProviderFailureActivity({
+            threadId,
+            kind: "provider.turn.start.failed",
+            summary: "Message delivery could not be confirmed",
+            detail:
+              "The provider session ended after accepting this message. It may have been sent, so T3 did not send it again. Retry the message if no response appears.",
+            turnId: null,
+            createdAt: failedAt,
+            requestId: pending.value.messageId,
+          });
+          return;
+        }
         yield* associatePendingTurnAdmission({
           threadId,
           messageId: pending.value.messageId,
@@ -2015,19 +2096,22 @@ const make = Effect.gen(function* () {
       ) {
         return;
       }
-      const recoveredEvent =
+      let recoveredEvent = originalEvent.value;
+      if (
         originalEvent.value.payload.modelSelection !== undefined &&
         originalEvent.value.payload.modelSelection.instanceId !==
           latestThread.modelSelection.instanceId
-          ? {
-              ...originalEvent.value,
-              payload: {
-                ...originalEvent.value.payload,
-                modelSelection: latestThread.modelSelection,
-                skipProviderAccountRouting: true as const,
-              },
-            }
-          : originalEvent.value;
+      ) {
+        const { allowProviderAccountRouting: _, ...payloadWithoutRoutingConsent } =
+          originalEvent.value.payload;
+        recoveredEvent = {
+          ...originalEvent.value,
+          payload: {
+            ...payloadWithoutRoutingConsent,
+            modelSelection: latestThread.modelSelection,
+          },
+        };
+      }
       yield* processTurnStartRequested(recoveredEvent, { recovery: true });
     }).pipe(
       Effect.catchCause((cause) =>

@@ -145,4 +145,76 @@ describe("provider account route notifications", () => {
     expect(tracker.observe(null, [], true)).toEqual([]);
     expect(tracker.observe("env:thread-a", [routed], true)).toEqual([]);
   });
+
+  it("does not present older route history when pagination prepends it", () => {
+    const tracker = createProviderAccountRouteNotificationTracker();
+    const oldRoute = activity("route-old", "provider.account.routed", {
+      previousProviderInstanceLabel: "First",
+      providerInstanceLabel: "Second",
+    });
+    const latestActivity = activity("message-latest", "message.completed", {});
+
+    expect(tracker.observe("env:thread", [latestActivity], true)).toEqual([]);
+    expect(tracker.observe("env:thread", [oldRoute, latestActivity], true)).toEqual([]);
+  });
+
+  it("presents only the live append when pagination and a route arrive together", () => {
+    const tracker = createProviderAccountRouteNotificationTracker();
+    const oldRoute = activity("route-old", "provider.account.routed", {
+      previousProviderInstanceLabel: "First",
+      providerInstanceLabel: "Second",
+    });
+    const anchor = activity("message-anchor", "message.completed", {});
+    const liveRoute = activity("route-live", "provider.account.routed", {
+      previousProviderInstanceLabel: "Second",
+      providerInstanceLabel: "Third",
+    });
+
+    tracker.observe("env:thread", [anchor], true);
+    expect(tracker.observe("env:thread", [oldRoute, anchor, liveRoute], true)).toEqual([
+      {
+        activityId: "route-live",
+        kind: "success",
+        title: "Switched Second → Third",
+        description: "Continuing this thread.",
+      },
+    ]);
+  });
+
+  it("re-baselines when a capped snapshot replaces the previous tail", () => {
+    const tracker = createProviderAccountRouteNotificationTracker();
+    const originalTail = activity("message-old-tail", "message.completed", {});
+    const replacementRoute = activity("route-replacement", "provider.account.routed", {
+      previousProviderInstanceLabel: "First",
+      providerInstanceLabel: "Second",
+    });
+
+    tracker.observe("env:thread", [originalTail], true);
+    expect(tracker.observe("env:thread", [replacementRoute], true)).toEqual([]);
+  });
+
+  it("re-baselines after the activity window temporarily disappears", () => {
+    const tracker = createProviderAccountRouteNotificationTracker();
+    const originalTail = activity("message-tail", "message.completed", {});
+    const restoredRoute = activity("route-restored", "provider.account.routed", {
+      previousProviderInstanceLabel: "First",
+      providerInstanceLabel: "Second",
+    });
+
+    tracker.observe("env:thread", [originalTail], true);
+    tracker.observe("env:thread", [], true);
+    expect(tracker.observe("env:thread", [originalTail, restoredRoute], true)).toEqual([]);
+  });
+
+  it("presents a duplicated appended route id at most once", () => {
+    const tracker = createProviderAccountRouteNotificationTracker();
+    const anchor = activity("message-anchor", "message.completed", {});
+    const route = activity("route-duplicate", "provider.account.routed", {
+      previousProviderInstanceLabel: "First",
+      providerInstanceLabel: "Second",
+    });
+
+    tracker.observe("env:thread", [anchor], true);
+    expect(tracker.observe("env:thread", [anchor, route, route], true)).toHaveLength(1);
+  });
 });

@@ -60,6 +60,30 @@ export function routingModeAfterManualModelSelection(
   return currentMode === "auto" && currentInstanceId !== nextInstanceId ? "fixed" : currentMode;
 }
 
+export function resolveProviderRoutingModeForSubmission(input: {
+  readonly draftMode?: ProviderRoutingMode;
+  readonly authoritativeMode: ProviderRoutingMode;
+  readonly authoritativeInstanceId: ProviderInstanceId;
+  readonly selectedInstanceId: ProviderInstanceId;
+}): ProviderRoutingMode {
+  return (
+    input.draftMode ??
+    routingModeAfterManualModelSelection(
+      input.authoritativeMode,
+      input.authoritativeInstanceId,
+      input.selectedInstanceId,
+    )
+  );
+}
+
+export function shouldClearAcknowledgedProviderRoutingIntent(input: {
+  readonly acknowledged: boolean;
+  readonly intendedMode: ProviderRoutingMode;
+  readonly authoritativeMode: ProviderRoutingMode;
+}): boolean {
+  return input.acknowledged && input.intendedMode === input.authoritativeMode;
+}
+
 export function eligibleProjectDefaultProviderRoutingMode(
   configuredMode: ProviderRoutingMode,
   canEnableAuto: boolean,
@@ -75,10 +99,16 @@ export function resolveNewTaskProviderRoutingMode(input: {
   return input.editingMode === null ? input.projectDefault : (input.editingMode ?? "fixed");
 }
 
-export function providerAccountRoutingConsentForSubmission(editingConsent: boolean | null): {
+export function providerAccountRoutingConsentForSubmission(input: {
+  readonly editingConsent: boolean | null;
+  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly supported: boolean;
+}): {
   readonly allowProviderAccountRouting?: true;
 } {
-  return editingConsent === false ? {} : { allowProviderAccountRouting: true };
+  return input.supported && input.providerRoutingMode === "auto" && input.editingConsent !== false
+    ? { allowProviderAccountRouting: true }
+    : {};
 }
 
 export function modelSelectionsMatch(left: ModelSelection, right: ModelSelection): boolean {

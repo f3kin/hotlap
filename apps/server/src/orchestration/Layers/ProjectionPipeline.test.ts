@@ -4032,6 +4032,86 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
 it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-"))(
   "OrchestrationProjectionPipeline pending turn cleanup",
   (it) => {
+    it.effect("keeps the first pending turn admission until it is settled", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-first-pending-owner");
+
+        for (const [index, messageId] of [
+          "message-first",
+          "message-first",
+          "message-losing",
+        ].entries()) {
+          const createdAt = `2026-02-26T13:00:0${index}.000Z`;
+          yield* eventStore.append({
+            type: "thread.turn-start-requested",
+            eventId: EventId.make(`evt-first-pending-owner-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.make(`cmd-first-pending-owner-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-first-pending-owner-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make(messageId),
+              runtimeMode: "approval-required",
+              createdAt,
+            },
+          });
+        }
+
+        yield* projectionPipeline.bootstrap;
+
+        const pendingRows = yield* sql<{
+          readonly messageId: string;
+          readonly requestedAt: string;
+        }>`
+          SELECT
+            pending_message_id AS "messageId",
+            requested_at AS "requestedAt"
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+            AND turn_id IS NULL
+            AND state = 'pending'
+        `;
+        assert.deepEqual(pendingRows, [
+          {
+            messageId: "message-first",
+            requestedAt: "2026-02-26T13:00:00.000Z",
+          },
+        ]);
+
+        yield* eventStore.append({
+          type: "thread.session-set",
+          eventId: EventId.make("evt-first-pending-owner-settled"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T13:00:03.000Z",
+          commandId: CommandId.make("cmd-first-pending-owner-settled"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-first-pending-owner-settled"),
+          metadata: {},
+          payload: {
+            threadId,
+            session: {
+              threadId,
+              status: "error",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: "test cleanup",
+              updatedAt: "2026-02-26T13:00:03.000Z",
+            },
+          },
+        });
+        yield* projectionPipeline.bootstrap;
+      }),
+    );
+
     it.effect("clears pending turn starts when startup reaches a terminal session state", () =>
       Effect.gen(function* () {
         const projectionPipeline = yield* OrchestrationProjectionPipeline;
@@ -4210,6 +4290,23 @@ it.layer(makeProjectionPipelinePrefixedTestLayer("t3-pending-turn-terminal-test-
               turnId: null,
               createdAt: "2026-02-26T15:00:02.000Z",
             },
+          },
+        });
+        yield* eventStore.append({
+          type: "thread.turn-start-requested",
+          eventId: EventId.make("evt-compaction-replayed-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-02-26T15:00:03.000Z",
+          commandId: CommandId.make("cmd-compaction-replayed-message"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-compaction-replayed-message"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("new-message"),
+            runtimeMode: "full-access",
+            createdAt: "2026-02-26T15:00:03.000Z",
           },
         });
         yield* projectionPipeline.bootstrap;

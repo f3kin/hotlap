@@ -73,9 +73,9 @@ import {
   resolveComposerSelectionAfterProviderRouting,
   resolveProviderRoutingAccountInstanceId,
   resolveProviderRoutingModeAfterSelection,
+  providerAccountRoutingConsentForSubmission,
   resolveNewThreadProviderRoutingMode,
   resolveSendEnvMode,
-  shouldSkipProviderAccountRouting,
   threadShellHasStarted,
   resolveDraftHeroState,
   isPaintOnlyThreadTimeline,
@@ -91,6 +91,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
+  shouldClearAcknowledgedProviderRoutingIntent,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
   shouldOpenProactiveTurnDiff,
@@ -1204,6 +1205,17 @@ describe("resolveThreadMetadataUpdateForNextTurn", () => {
       providerRoutingMode: "fixed",
     });
   });
+
+  it("persists a pending Auto choice before starting the turn", () => {
+    expect(
+      resolveThreadMetadataUpdateForNextTurn({
+        currentModelSelection: modelSelection,
+        currentProviderRoutingMode: "fixed",
+        nextProviderRoutingMode: "auto",
+        currentBranch: "main",
+      }),
+    ).toEqual({ providerRoutingMode: "auto" });
+  });
 });
 
 describe("resolveProviderRoutingModeAfterSelection", () => {
@@ -1225,6 +1237,35 @@ describe("resolveProviderRoutingModeAfterSelection", () => {
         true,
       ),
     ).toBe("auto");
+  });
+});
+
+describe("shouldClearAcknowledgedProviderRoutingIntent", () => {
+  it("clears the latest saved Fixed intent when Auto was coalesced before projection", () => {
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: true,
+        intendedMode: "fixed",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps an intent until its save is acknowledged and projected", () => {
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: false,
+        intendedMode: "fixed",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(false);
+    expect(
+      shouldClearAcknowledgedProviderRoutingIntent({
+        acknowledged: true,
+        intendedMode: "fixed",
+        authoritativeMode: "auto",
+      }),
+    ).toBe(false);
   });
 });
 
@@ -1365,10 +1406,36 @@ describe("resolveProviderRoutingAccountInstanceId", () => {
   });
 });
 
-describe("shouldSkipProviderAccountRouting", () => {
-  it("excludes only background submissions from automatic account routing", () => {
-    expect(shouldSkipProviderAccountRouting("background")).toBe(true);
-    expect(shouldSkipProviderAccountRouting("foreground")).toBe(false);
+describe("providerAccountRoutingConsentForSubmission", () => {
+  it("opts in only supported foreground Auto turns", () => {
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({ allowProviderAccountRouting: true });
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "background",
+        providerRoutingMode: "auto",
+        supported: true,
+      }),
+    ).toEqual({});
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: "fixed",
+        supported: true,
+      }),
+    ).toEqual({});
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: "auto",
+        supported: false,
+      }),
+    ).toEqual({});
   });
 });
 

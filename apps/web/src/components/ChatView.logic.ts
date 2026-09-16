@@ -520,6 +520,14 @@ export function resolveProviderRoutingModeAfterSelection(
     : currentMode;
 }
 
+export function shouldClearAcknowledgedProviderRoutingIntent(input: {
+  readonly acknowledged: boolean;
+  readonly intendedMode: ProviderRoutingMode;
+  readonly authoritativeMode: ProviderRoutingMode;
+}): boolean {
+  return input.acknowledged && input.intendedMode === input.authoritativeMode;
+}
+
 export function resolveNewThreadProviderRoutingMode(input: {
   readonly routingSupported: boolean;
   readonly usesProjectPolicy: boolean;
@@ -561,15 +569,22 @@ export function resolveProviderRoutingAccountInstanceId(input: {
     : (input.composerInstanceId ?? input.routedInstanceId);
 }
 
-export function shouldSkipProviderAccountRouting(
-  submissionIntent: ComposerSubmissionIntent,
-): boolean {
-  return submissionIntent === "background";
+export function providerAccountRoutingConsentForSubmission(input: {
+  readonly submissionIntent: ComposerSubmissionIntent;
+  readonly providerRoutingMode: ProviderRoutingMode;
+  readonly supported: boolean;
+}): { readonly allowProviderAccountRouting?: true } {
+  return input.supported &&
+    input.submissionIntent === "foreground" &&
+    input.providerRoutingMode === "auto"
+    ? { allowProviderAccountRouting: true }
+    : {};
 }
 
 export function resolveThreadMetadataUpdateForNextTurn(input: {
   currentModelSelection: ModelSelection;
   currentProviderRoutingMode?: ProviderRoutingMode;
+  nextProviderRoutingMode?: ProviderRoutingMode;
   nextModelSelection?: ModelSelection;
   currentBranch: string | null;
   nextBranch?: string;
@@ -595,12 +610,17 @@ export function resolveThreadMetadataUpdateForNextTurn(input: {
       input.currentModelSelection.instanceId,
       nextModelSelection.instanceId,
     ) === "fixed";
-  if (!modelSelectionChanged && !branchChanged && !accountChanged) {
+  const nextProviderRoutingMode =
+    input.nextProviderRoutingMode ?? (accountChanged ? "fixed" : undefined);
+  const providerRoutingModeChanged =
+    nextProviderRoutingMode !== undefined &&
+    nextProviderRoutingMode !== (input.currentProviderRoutingMode ?? "fixed");
+  if (!modelSelectionChanged && !branchChanged && !providerRoutingModeChanged) {
     return null;
   }
   return {
     ...(modelSelectionChanged ? { modelSelection: nextModelSelection } : {}),
-    ...(accountChanged ? { providerRoutingMode: "fixed" as const } : {}),
+    ...(providerRoutingModeChanged ? { providerRoutingMode: nextProviderRoutingMode } : {}),
     ...(branchChanged ? { branch: input.nextBranch, worktreePath: null } : {}),
   };
 }

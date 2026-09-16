@@ -114,15 +114,13 @@ export interface ProjectionTurnRepositoryShape {
     row: ProjectionTurnById,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 
-  /**
-   * Replaces any existing pending-start placeholder rows for a thread with exactly one latest pending-start row.
-   */
-  readonly replacePendingTurnStart: (
+  /** Atomically claims an empty pending-start slot; existing ownership is unchanged. */
+  readonly insertPendingTurnStartIfAbsent: (
     row: ProjectionPendingTurnStart,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
+  ) => Effect.Effect<boolean, ProjectionRepositoryError>;
 
   /**
-   * Returns the newest pending-start placeholder for a thread; this is expected to be at most one row after replacement writes.
+   * Returns the pending-start placeholder for a thread.
    */
   readonly getPendingTurnStartByThreadId: (
     input: GetProjectionPendingTurnStartInput,

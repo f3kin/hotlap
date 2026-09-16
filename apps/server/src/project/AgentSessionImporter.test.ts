@@ -33,6 +33,8 @@ import { GitWorkflowService } from "../git/GitWorkflowService.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
+import { ProjectionTurnRepository } from "../persistence/Services/ProjectionTurns.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import { OrchestrationEngineLive } from "../orchestration/Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "../orchestration/Layers/ProjectionPipeline.ts";
@@ -892,6 +894,7 @@ const integrationLayer = Layer.mergeAll(
     Layer.provide(OrchestrationProjectionPipelineLive),
   ),
   OrchestrationProjectionSnapshotQueryLive,
+  ProjectionTurnRepositoryLive,
   integrationRuntimeRepository,
   ProviderSessionDirectoryLive.pipe(Layer.provide(integrationRuntimeRepository)),
   Layer.succeed(AgentSessionScanner.AgentSessionScanner, integrationScanner),
@@ -1191,6 +1194,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         const engine = yield* OrchestrationEngine.OrchestrationEngineService;
         const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
         const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const projectionTurns = yield* ProjectionTurnRepository;
         const fileSystem = yield* FileSystem.FileSystem;
         const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped();
         const projectId = ProjectId.make(`project-import-resume-${source}`);
@@ -1231,6 +1235,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           Layer.provide(AnalyticsService.layerTest),
         );
         const reactorLayer = ProviderCommandReactorLive.pipe(
+          Layer.provide(Layer.succeed(ProjectionTurnRepository, projectionTurns)),
           Layer.provideMerge(providerLayer),
           Layer.provide(
             Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {

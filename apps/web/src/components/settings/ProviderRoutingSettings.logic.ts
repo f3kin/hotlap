@@ -2,6 +2,7 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderRoutingMode,
+  ProviderRoutingPolicy,
   ServerProvider,
 } from "@t3tools/contracts";
 
@@ -119,6 +120,46 @@ export function canEnableProviderRoutingAuto(
     selectedIds.includes(selectedOption.instanceId) &&
     new Set(selectedIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
   );
+}
+
+export function canEnableProviderRoutingAutoForEveryPolicy(
+  options: ReadonlyArray<ProviderRoutingOption>,
+  policies: ReadonlyArray<ProviderRoutingPolicy>,
+  selectedAccount: { readonly instanceId: ProviderInstanceId } | null | undefined,
+): boolean {
+  return (
+    policies.length > 0 &&
+    policies.every((policy) =>
+      canEnableProviderRoutingAuto(
+        options,
+        policy.instanceIdsByDriver,
+        policy.usageThresholdPercent,
+        selectedAccount,
+      ),
+    )
+  );
+}
+
+export function providerRoutingPoolPatch(
+  policy: ProviderRoutingPolicy,
+  driver: ProviderDriverKind,
+  instanceIds: ReadonlyArray<ProviderInstanceId>,
+  options: ReadonlyArray<ProviderRoutingOption>,
+  selectedAccount: { readonly instanceId: ProviderInstanceId } | null | undefined,
+) {
+  const instanceIdsByDriver = { ...policy.instanceIdsByDriver, [driver]: instanceIds };
+  const shouldDisableAuto =
+    policy.defaultMode === "auto" &&
+    !canEnableProviderRoutingAuto(
+      options,
+      instanceIdsByDriver,
+      policy.usageThresholdPercent,
+      selectedAccount,
+    );
+  return {
+    ...(shouldDisableAuto ? { defaultMode: "fixed" as const } : {}),
+    instanceIdsByDriver: { [driver]: instanceIds },
+  };
 }
 
 export function resolveProviderRoutingDefaultMode(

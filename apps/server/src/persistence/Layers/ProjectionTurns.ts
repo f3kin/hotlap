@@ -108,8 +108,9 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       `,
   });
 
-  const insertPendingProjectionTurn = SqlSchema.void({
+  const insertPendingProjectionTurn = SqlSchema.findOneOption({
     Request: ProjectionPendingTurnStart,
+    Result: Schema.Struct({ claimed: Schema.Number }),
     execute: (row) =>
       sql`
         INSERT INTO projection_turns (
@@ -128,7 +129,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           checkpoint_status,
           checkpoint_files_json
         )
-        VALUES (
+        SELECT
           ${row.threadId},
           NULL,
           ${row.messageId},
@@ -143,7 +144,15 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           NULL,
           NULL,
           '[]'
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM projection_turns
+          WHERE thread_id = ${row.threadId}
+            AND turn_id IS NULL
+            AND state = 'pending'
+            AND checkpoint_turn_count IS NULL
         )
+        RETURNING 1 AS claimed
       `,
   });
 
@@ -264,18 +273,14 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
       ),
     );
 
-  const replacePendingTurnStart: ProjectionTurnRepositoryShape["replacePendingTurnStart"] = (row) =>
-    sql
-      .withTransaction(
-        clearPendingProjectionTurnsByThread({ threadId: row.threadId }).pipe(
-          Effect.flatMap(() => insertPendingProjectionTurn(row)),
-        ),
-      )
-      .pipe(
+  const insertPendingTurnStartIfAbsent: ProjectionTurnRepositoryShape["insertPendingTurnStartIfAbsent"] =
+    (row) =>
+      insertPendingProjectionTurn(row).pipe(
+        Effect.map(Option.isSome),
         Effect.mapError(
           toPersistenceSqlOrDecodeError(
-            "ProjectionTurnRepository.replacePendingTurnStart:query",
-            "ProjectionTurnRepository.replacePendingTurnStart:encodeRequest",
+            "ProjectionTurnRepository.insertPendingTurnStartIfAbsent:query",
+            "ProjectionTurnRepository.insertPendingTurnStartIfAbsent:encodeRequest",
           ),
         ),
       );
@@ -339,7 +344,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
 
   return {
     upsertByTurnId,
-    replacePendingTurnStart,
+    insertPendingTurnStartIfAbsent,
     getPendingTurnStartByThreadId,
     deletePendingTurnStartByThreadId,
     listByThreadId,

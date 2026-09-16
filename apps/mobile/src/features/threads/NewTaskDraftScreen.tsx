@@ -1299,15 +1299,18 @@ export function NewTaskDraftScreen(props: {
     if (!builtMessage) {
       return;
     }
-    // New submissions carry consent even when queued. Editing a historical
-    // row preserves its missing consent so it remains pinned.
+    // Supported Auto submissions carry consent even when queued. Editing a
+    // historical row preserves its missing consent so it remains pinned.
     const message = {
       ...builtMessage,
-      ...providerAccountRoutingConsentForSubmission(
-        editingPendingTask === null
-          ? null
-          : editingPendingTask.allowProviderAccountRouting === true,
-      ),
+      ...providerAccountRoutingConsentForSubmission({
+        editingConsent:
+          editingPendingTask === null
+            ? null
+            : editingPendingTask.allowProviderAccountRouting === true,
+        providerRoutingMode: builtMessage.providerRoutingMode ?? "fixed",
+        supported: flow.providerRoutingSupported,
+      }),
     };
     if (!queuesInsteadOfStarting) {
       // Arm the lock-screen card before the async thread creation: backgrounding

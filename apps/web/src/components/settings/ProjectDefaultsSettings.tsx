@@ -43,6 +43,7 @@ import {
   useScopedSettings,
   useScopedSettingsMixed,
   useScopedSettingSource,
+  useUpdateScopedProviderRoutingPolicy,
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 
@@ -55,6 +56,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const { scope, target, targets, connectedEnvironments } = useSettingsScope();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
+  const updateRoutingPolicy = useUpdateScopedProviderRoutingPolicy();
   const navigate = useNavigate();
   const { environments } = useEnvironments();
   const representative = target
@@ -142,24 +144,24 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
       return;
     }
     const nextSelection = resolveDefaultProviderModelSelection(providers, value);
-    const nextProviderRoutingMode = resolveProviderRoutingDefaultMode(
-      settings.providerRoutingPolicy.defaultMode,
-      providerRoutingOptions,
-      settings.providerRoutingPolicy.instanceIdsByDriver,
-      settings.providerRoutingPolicy.usageThresholdPercent,
-      nextSelection,
-    );
-    updateSettings({
-      defaultModelSelection: value,
-      ...(isProjectScope && nextProviderRoutingMode !== settings.providerRoutingPolicy.defaultMode
-        ? {
-            providerRoutingPolicy: {
-              ...settings.providerRoutingPolicy,
-              defaultMode: nextProviderRoutingMode,
-            },
-          }
-        : {}),
-    });
+    if (isProjectScope) {
+      updateRoutingPolicy(
+        (targetSettings) => {
+          const policy = targetSettings.providerRoutingPolicy;
+          const nextMode = resolveProviderRoutingDefaultMode(
+            policy.defaultMode,
+            providerRoutingOptions,
+            policy.instanceIdsByDriver,
+            policy.usageThresholdPercent,
+            nextSelection,
+          );
+          return nextMode === policy.defaultMode ? null : { defaultMode: nextMode };
+        },
+        { defaultModelSelection: value },
+      );
+      return;
+    }
+    updateSettings({ defaultModelSelection: value });
   };
 
   return (

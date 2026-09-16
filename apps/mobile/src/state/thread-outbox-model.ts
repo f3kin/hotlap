@@ -150,8 +150,15 @@ export function modelSelectionsEqual(left: ModelSelectionType, right: ModelSelec
   );
 }
 
-export function shouldSkipQueuedProviderAccountRouting(message: QueuedThreadMessage): boolean {
-  return message.allowProviderAccountRouting !== true;
+export function shouldAllowQueuedProviderAccountRouting(
+  message: QueuedThreadMessage,
+  supported: boolean,
+): boolean {
+  return (
+    supported &&
+    message.providerRoutingMode === "auto" &&
+    message.allowProviderAccountRouting === true
+  );
 }
 
 export function resolveQueuedThreadMetadataUpdate(

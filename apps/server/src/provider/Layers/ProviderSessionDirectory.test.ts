@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -188,6 +189,61 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
           activeTurnId: null,
         },
       );
+    }),
+  );
+
+  it.effect("clears only the exact orphaned turn admission", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-orphaned-admission");
+      const instanceId = ProviderInstanceId.make("codex-work");
+      const messageId = "message-new";
+      const turnId = "turn-new";
+      yield* directory.upsert({
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        status: "running",
+        runtimePayload: {
+          activeTurnId: turnId,
+          lastAdmittedMessageId: messageId,
+          lastAdmittedTurnId: turnId,
+          preserved: "value",
+        },
+      });
+      const clearTurnAdmissionIfMatches = directory.clearTurnAdmissionIfMatches;
+      if (clearTurnAdmissionIfMatches === undefined) {
+        return yield* Effect.die("clearTurnAdmissionIfMatches is unavailable");
+      }
+
+      expect(
+        yield* clearTurnAdmissionIfMatches({
+          threadId,
+          providerInstanceId: instanceId,
+          messageId: MessageId.make("message-old"),
+          turnId: TurnId.make(turnId),
+        }),
+      ).toBe(false);
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload).toMatchObject(
+        {
+          activeTurnId: turnId,
+          lastAdmittedMessageId: messageId,
+          lastAdmittedTurnId: turnId,
+        },
+      );
+
+      expect(
+        yield* clearTurnAdmissionIfMatches({
+          threadId,
+          providerInstanceId: instanceId,
+          messageId: MessageId.make(messageId),
+          turnId: TurnId.make(turnId),
+        }),
+      ).toBe(true);
+      const payload = Option.getOrThrow(yield* directory.getBinding(threadId)).runtimePayload;
+      expect(payload).toMatchObject({ activeTurnId: null, preserved: "value" });
+      expect(payload).not.toHaveProperty("lastAdmittedMessageId");
+      expect(payload).not.toHaveProperty("lastAdmittedTurnId");
     }),
   );
 
