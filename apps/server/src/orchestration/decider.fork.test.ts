@@ -118,6 +118,95 @@ it.layer(NodeServices.layer)("thread fork", (it) => {
     }),
   );
 
+  it.effect("atomically applies a complete model selection for the same provider instance", () =>
+    Effect.gen(function* () {
+      const readModel = yield* withProject();
+      const modelSelection = {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.6-sol",
+        options: [{ id: "effort", value: "high" }],
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.fork",
+          commandId: CommandId.make("command-fork-selected-model"),
+          threadId: ThreadId.make("thread-fork-selected-model"),
+          sourceThreadId,
+          sourceMessageId,
+          modelSelection,
+          createdAt: at,
+        },
+        readModel,
+        forkSource,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events[0]).toMatchObject({
+        type: "thread.created",
+        payload: {
+          modelSelection,
+          providerRoutingMode: "auto",
+        },
+      });
+    }),
+  );
+
+  it.effect("pins a fork routed to a different provider account", () =>
+    Effect.gen(function* () {
+      const readModel = yield* withProject();
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.fork",
+          commandId: CommandId.make("command-fork-other-account"),
+          threadId: ThreadId.make("thread-fork-other-account"),
+          sourceThreadId,
+          sourceMessageId,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex-work"),
+            model: "gpt-5.6-sol",
+          },
+          createdAt: at,
+        },
+        readModel,
+        forkSource,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events[0]).toMatchObject({
+        type: "thread.created",
+        payload: {
+          modelSelection: { instanceId: "codex-work", model: "gpt-5.6-sol" },
+          providerRoutingMode: "fixed",
+        },
+      });
+    }),
+  );
+
+  it.effect("treats a missing source routing mode as fixed", () =>
+    Effect.gen(function* () {
+      const readModel = yield* withProject();
+      const { providerRoutingMode: _providerRoutingMode, ...legacyForkSource } = forkSource;
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.fork",
+          commandId: CommandId.make("command-fork-legacy-routing"),
+          threadId: ThreadId.make("thread-fork-legacy-routing"),
+          sourceThreadId,
+          sourceMessageId,
+          createdAt: at,
+        },
+        readModel,
+        forkSource: legacyForkSource,
+      });
+      const events = Array.isArray(result) ? result : [result];
+
+      expect(events[0]).toMatchObject({
+        type: "thread.created",
+        payload: { providerRoutingMode: "fixed" },
+      });
+    }),
+  );
+
   it.effect("forks readable terminal output from interrupted and failed turns", () =>
     Effect.gen(function* () {
       const readModel = yield* withProject();

@@ -53,6 +53,7 @@ import { isPasteAsTextShortcut } from "@t3tools/client-runtime/text-paste";
 import { type CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
 import { effectiveSnoozed, threadWokeAt } from "@t3tools/client-runtime/state/thread-settled";
 import {
+  deriveForkableAssistantMessageIds,
   isForkProviderSelectionUnlocked,
   parseCodexFeedbackCommand,
   submitCodexFeedback,
@@ -267,7 +268,10 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useRemoveClonedProject } from "../hooks/useRemoveClonedProject";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { useThreadActions } from "../hooks/useThreadActions";
-import { resolveAppModelSelectionForInstance } from "../modelSelection";
+import {
+  getAppModelOptionsForInstance,
+  resolveAppModelSelectionForInstance,
+} from "../modelSelection";
 import { confirmTerminalClose, isTerminalCloseConfirmPending } from "../lib/terminalCloseConfirm";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
@@ -360,6 +364,10 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import {
+  ForkConversationDialog,
+  type ForkConversationSnapshot,
+} from "./chat/ForkConversationDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd, worktreeSetupAgentStarted } from "./chat/MessagesTimeline.logic";
 import { resolveComposerTimelineInset, resolveScrollToEndClearance } from "./composerFooterLayout";
@@ -430,6 +438,7 @@ import {
   shouldRetargetThreadPullRequestPanel,
   shouldOpenProactiveTurnDiff,
   shouldRenderPreviewMiniPlayer,
+  shouldChooseForkModelBeforeCreate,
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
   LastInvokedScriptByProjectSchema,
@@ -1472,6 +1481,9 @@ export default function ChatView(props: ChatViewProps) {
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
   const forkNavigationAbortControllerRef = useRef<AbortController | null>(null);
   const [forkPending, setForkPending] = useState(false);
+  const [forkConversationSnapshot, setForkConversationSnapshot] =
+    useState<ForkConversationSnapshot | null>(null);
+  const forkConversationRestoreFocusRef = useRef<HTMLElement | null>(null);
   const currentRouteThreadKeyRef = useRef<string | null>(routeThreadKey);
   useLayoutEffect(() => {
     const pendingFork = forkNavigationAbortControllerRef.current;
@@ -1486,6 +1498,14 @@ export default function ChatView(props: ChatViewProps) {
       forkNavigationAbortControllerRef.current?.abort();
     };
   }, [routeThreadKey]);
+  const closeForkConversationDialog = useCallback(() => {
+    setForkConversationSnapshot(null);
+    const restoreFocusTo = forkConversationRestoreFocusRef.current;
+    forkConversationRestoreFocusRef.current = null;
+    if (restoreFocusTo?.isConnected) {
+      requestAnimationFrame(() => restoreFocusTo.focus());
+    }
+  }, []);
   const updateProjectScriptSettings = useAtomCommand(serverEnvironment.updateSettings, {
     reportFailure: false,
   });
@@ -2119,6 +2139,24 @@ export default function ChatView(props: ChatViewProps) {
     return openTerminalThreadKeys.filter((nextThreadKey) => existingThreadKeys.has(nextThreadKey));
   }, [draftThreadKeys, openTerminalThreadKeys, serverThreadKeys]);
   const activeLatestTurn = activeThread?.latestTurn ?? null;
+  const forkSourceMessageAvailable = useMemo(() => {
+    if (forkConversationSnapshot === null || !activeThread) return false;
+    if (
+      !deriveForkableAssistantMessageIds(activeThread.checkpoints, activeLatestTurn).has(
+        forkConversationSnapshot.sourceMessageId,
+      )
+    ) {
+      return false;
+    }
+    const sourceMessage = activeThread.messages.find(
+      (message) => message.id === forkConversationSnapshot.sourceMessageId,
+    );
+    return (
+      sourceMessage?.role === "assistant" &&
+      !sourceMessage.streaming &&
+      sourceMessage.text.trim().length > 0
+    );
+  }, [activeLatestTurn, activeThread, forkConversationSnapshot]);
   const activeRunningTurnId =
     (activeThread?.session?.status === "running" ? activeThread.session.activeTurnId : null) ??
     (activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null);
@@ -2374,6 +2412,18 @@ export default function ChatView(props: ChatViewProps) {
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const activeForkConversationSnapshot =
+    forkConversationSnapshot !== null &&
+    forkConversationSnapshot.environmentId === routeThreadRef.environmentId &&
+    forkConversationSnapshot.sourceThreadId === routeThreadRef.threadId &&
+    forkSourceMessageAvailable &&
+    !activeEnvironmentUnavailable
+      ? forkConversationSnapshot
+      : null;
+  useEffect(() => {
+    if (forkConversationSnapshot === null || activeForkConversationSnapshot !== null) return;
+    queueMicrotask(closeForkConversationDialog);
+  }, [activeForkConversationSnapshot, closeForkConversationDialog, forkConversationSnapshot]);
   const activeReconnectingEnvironmentId =
     activeEnvironmentConnectionPhase === "connecting" ||
     activeEnvironmentConnectionPhase === "reconnecting"
@@ -2769,6 +2819,9 @@ export default function ChatView(props: ChatViewProps) {
   ]);
   const supportsThreadForking =
     attachmentEnvironmentConfig?.environment.capabilities.threadForking === true;
+  const supportsThreadForkModelSelection = shouldChooseForkModelBeforeCreate(
+    attachmentEnvironmentConfig?.environment.capabilities ?? {},
+  );
   const supportsThreadTranscriptExport =
     serverConfig?.environment.capabilities.threadTranscriptExport === true;
   const copyThreadTranscript = useCopyThreadTranscript();
@@ -3027,6 +3080,22 @@ export default function ChatView(props: ChatViewProps) {
         applyProviderInstanceSettings(deriveProviderInstanceEntries(providerStatuses), settings),
       ),
     [providerStatuses, settings],
+  );
+  const forkModelOptionsByInstance = useMemo(
+    () =>
+      new Map(
+        providerInstanceEntries.map((entry) => [
+          entry.instanceId,
+          getAppModelOptionsForInstance(
+            settings,
+            entry,
+            entry.instanceId === activeForkConversationSnapshot?.modelSelection.instanceId
+              ? activeForkConversationSnapshot.modelSelection.model
+              : null,
+          ),
+        ]),
+      ),
+    [activeForkConversationSnapshot, providerInstanceEntries, settings],
   );
   const { selectedProviderEntry, requestedDriverKind } = useMemo(
     () =>
@@ -3727,33 +3796,35 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell?.hasPendingApprovals !== true &&
     activeThreadShell?.hasPendingUserInput !== true &&
     activeThreadShell?.backgroundLiveness == null;
-  const handleForkAssistantMessage = useCallback(
-    async (sourceMessageId: MessageId) => {
-      if (
-        !canForkConversation ||
-        activeThreadRef === null ||
-        forkNavigationAbortControllerRef.current !== null
-      ) {
-        return;
-      }
-      const sourceThreadKey = scopedThreadKey(activeThreadRef);
+  const performForkAssistantMessage = useCallback(
+    async (
+      snapshot: ForkConversationSnapshot,
+      options: { readonly includeModelSelection: boolean; readonly throwOnFailure: boolean },
+    ) => {
+      if (forkNavigationAbortControllerRef.current !== null) return;
+      const sourceThreadRef = scopeThreadRef(snapshot.environmentId, snapshot.sourceThreadId);
+      const sourceThreadKey = scopedThreadKey(sourceThreadRef);
       const abortController = new AbortController();
       forkNavigationAbortControllerRef.current = abortController;
       setForkPending(true);
       const destinationThreadId = newThreadId();
       try {
         const result = await forkThread({
-          environmentId: activeThreadRef.environmentId,
+          environmentId: snapshot.environmentId,
           input: {
             threadId: destinationThreadId,
-            sourceThreadId: activeThreadRef.threadId,
-            sourceMessageId,
+            sourceThreadId: snapshot.sourceThreadId,
+            sourceMessageId: snapshot.sourceMessageId,
+            ...(options.includeModelSelection ? { modelSelection: snapshot.modelSelection } : {}),
             createdAt: new Date().toISOString(),
           },
         });
         if (result._tag === "Failure") {
           if (!isAtomCommandInterrupted(result) && !abortController.signal.aborted) {
             const error = squashAtomCommandFailure(result);
+            if (options.throwOnFailure) {
+              throw new Error(chatActionErrorMessage(error));
+            }
             toastManager.add(
               stackedThreadToast({
                 type: "error",
@@ -3764,10 +3835,7 @@ export default function ChatView(props: ChatViewProps) {
           }
           return;
         }
-        const destinationThreadRef = scopeThreadRef(
-          activeThreadRef.environmentId,
-          destinationThreadId,
-        );
+        const destinationThreadRef = scopeThreadRef(snapshot.environmentId, destinationThreadId);
         const forkSynced = await waitForStartedServerThread(destinationThreadRef, {
           signal: abortController.signal,
         });
@@ -3778,11 +3846,15 @@ export default function ChatView(props: ChatViewProps) {
           return;
         }
         if (!forkSynced) {
+          const description = "The destination was deleted before it could be opened.";
+          if (options.throwOnFailure) {
+            throw new Error(description);
+          }
           toastManager.add(
             stackedThreadToast({
               type: "error",
               title: "Fork is no longer available",
-              description: "The destination was deleted before it could be opened.",
+              description,
             }),
           );
           return;
@@ -3800,7 +3872,71 @@ export default function ChatView(props: ChatViewProps) {
         }
       }
     },
-    [activeThreadRef, canForkConversation, forkThread, navigate],
+    [forkThread, navigate],
+  );
+  const handleConfirmForkConversation = useCallback(
+    async (snapshot: ForkConversationSnapshot) => {
+      if (
+        !supportsThreadForkModelSelection ||
+        !canForkConversation ||
+        activeEnvironmentUnavailable ||
+        !forkSourceMessageAvailable ||
+        currentRouteThreadKeyRef.current !==
+          scopedThreadKey(scopeThreadRef(snapshot.environmentId, snapshot.sourceThreadId))
+      ) {
+        throw new Error("The source conversation is no longer available to fork.");
+      }
+      await performForkAssistantMessage(snapshot, {
+        includeModelSelection: true,
+        throwOnFailure: true,
+      });
+    },
+    [
+      activeEnvironmentUnavailable,
+      canForkConversation,
+      forkSourceMessageAvailable,
+      performForkAssistantMessage,
+      supportsThreadForkModelSelection,
+    ],
+  );
+  const handleForkAssistantMessage = useCallback(
+    async (sourceMessageId: MessageId) => {
+      if (
+        !canForkConversation ||
+        activeThreadRef === null ||
+        !activeThread ||
+        forkNavigationAbortControllerRef.current !== null
+      ) {
+        return;
+      }
+      const snapshot: ForkConversationSnapshot = {
+        environmentId: activeThreadRef.environmentId,
+        sourceThreadId: activeThreadRef.threadId,
+        sourceMessageId,
+        modelSelection: createModelSelection(
+          activeThread.modelSelection.instanceId,
+          activeThread.modelSelection.model,
+          activeThread.modelSelection.options,
+        ),
+      };
+      if (supportsThreadForkModelSelection) {
+        forkConversationRestoreFocusRef.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        setForkConversationSnapshot(snapshot);
+        return;
+      }
+      await performForkAssistantMessage(snapshot, {
+        includeModelSelection: false,
+        throwOnFailure: false,
+      });
+    },
+    [
+      activeThread,
+      activeThreadRef,
+      canForkConversation,
+      performForkAssistantMessage,
+      supportsThreadForkModelSelection,
+    ],
   );
   const handleOpenForkSourceThread = useCallback(
     (sourceThreadId: ThreadId) => {
@@ -9734,6 +9870,18 @@ export default function ChatView(props: ChatViewProps) {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+      <ForkConversationDialog
+        key={
+          activeForkConversationSnapshot
+            ? `${activeForkConversationSnapshot.environmentId}:${activeForkConversationSnapshot.sourceThreadId}:${activeForkConversationSnapshot.sourceMessageId}`
+            : "fork-conversation-closed"
+        }
+        snapshot={activeForkConversationSnapshot}
+        instanceEntries={providerInstanceEntries}
+        modelOptionsByInstance={forkModelOptionsByInstance}
+        onCancel={closeForkConversationDialog}
+        onConfirm={handleConfirmForkConversation}
+      />
       <Dialog
         open={
           deviceSetupThread !== null &&

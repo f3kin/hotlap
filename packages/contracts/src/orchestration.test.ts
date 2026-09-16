@@ -682,9 +682,33 @@ it.effect("decodes a capability-gated thread fork command and durable lineage", 
       threadId: "thread-fork",
       sourceThreadId: "thread-source",
       sourceMessageId: "message-answer",
+      modelSelection: {
+        instanceId: "claude-work",
+        model: "claude-sonnet",
+        options: [{ id: "effort", value: "high" }],
+      },
       createdAt: "2026-09-12T00:00:00.000Z",
     });
     assert.strictEqual(command.type, "thread.fork");
+    if (command.type === "thread.fork") {
+      assert.deepStrictEqual(command.modelSelection, {
+        instanceId: ProviderInstanceId.make("claude-work"),
+        model: "claude-sonnet",
+        options: [{ id: "effort", value: "high" }],
+      });
+    }
+    const legacyCommand = yield* decodeClientOrchestrationCommand({
+      type: "thread.fork",
+      commandId: "command-fork-legacy",
+      threadId: "thread-fork-legacy",
+      sourceThreadId: "thread-source",
+      sourceMessageId: "message-answer",
+      createdAt: "2026-09-12T00:00:00.000Z",
+    });
+    assert.strictEqual(
+      legacyCommand.type === "thread.fork" ? legacyCommand.modelSelection : null,
+      undefined,
+    );
 
     const created = yield* decodeThreadCreatedPayload({
       threadId: "thread-fork",

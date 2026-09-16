@@ -131,6 +131,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadTranscriptExport: Schema.optionalKey(Schema.Boolean),
   /** Server can fork a completed assistant response into a new thread. */
   threadForking: Schema.optionalKey(Schema.Boolean),
+  /** Server applies a complete provider/model selection atomically while forking. */
+  threadForkModelSelection: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pin / thread.unpin commands. Same
       version-skew contract as threadSettlement. */
   threadPinning: Schema.optionalKey(Schema.Boolean),
