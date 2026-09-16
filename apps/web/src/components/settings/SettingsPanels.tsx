@@ -573,6 +573,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
         ? ["Proactive panels"]
         : []),
+      ...(settings.masterStatusBoardEnabled !== DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled
+        ? ["Master status board"]
+        : []),
       ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
         ? ["Show skills in slash menu"]
         : []),
@@ -647,6 +650,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffFilesCollapsed,
       settings.diffIgnoreWhitespace,
       settings.diffLayout,
+      settings.masterStatusBoardEnabled,
       settings.proactivePanelsEnabled,
       settings.environmentIdentificationMode,
       settings.contextWindowMeterEnabled,
@@ -751,6 +755,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
+      masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
@@ -2303,6 +2308,32 @@ export function GeneralSettingsPanel() {
       ) : null}
 
       <SettingsSection id="behavior" title="Behavior">
+        <SettingsRow
+          {...searchableSetting("master-status-board")}
+          description="Show owned Card threads and other Masters above Master chats."
+          resetAction={
+            settings.masterStatusBoardEnabled !==
+            DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled ? (
+              <SettingResetButton
+                label="Master status board"
+                onClick={() =>
+                  updateSettings({
+                    masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.masterStatusBoardEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ masterStatusBoardEnabled: Boolean(checked) })
+              }
+              aria-label="Master status board"
+            />
+          }
+        />
         <NotificationSettings />
         <SettingsRow
           {...searchableSetting("in-app-notifications")}

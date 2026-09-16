@@ -141,4 +141,33 @@ describe("clientPersistenceStorage", () => {
     writeBrowserClientSettings({ ...DEFAULT_CLIENT_SETTINGS, diffLayout: "split" });
     expect(readBrowserClientSettings()?.diffLayout).toBe("split");
   });
+
+  it("keeps the Master board preference across reloads without changing the legacy sidebar", async () => {
+    const testWindow = getTestWindow();
+    const { readBrowserClientSettings, writeBrowserClientSettings } =
+      await import("./clientPersistenceStorage");
+
+    testWindow.localStorage.setItem("t3code:client-settings:v1", JSON.stringify({}));
+    expect(readBrowserClientSettings()?.masterStatusBoardEnabled).toBe(false);
+
+    writeBrowserClientSettings({
+      ...DEFAULT_CLIENT_SETTINGS,
+      masterStatusBoardEnabled: true,
+      legacySidebarEnabled: false,
+    });
+    expect(readBrowserClientSettings()).toMatchObject({
+      masterStatusBoardEnabled: true,
+      legacySidebarEnabled: false,
+    });
+
+    writeBrowserClientSettings({
+      ...DEFAULT_CLIENT_SETTINGS,
+      masterStatusBoardEnabled: false,
+      legacySidebarEnabled: true,
+    });
+    expect(readBrowserClientSettings()).toMatchObject({
+      masterStatusBoardEnabled: false,
+      legacySidebarEnabled: true,
+    });
+  });
 });
