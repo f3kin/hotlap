@@ -16,17 +16,25 @@ const exec = NodeUtil.promisify(NodeChildProcess.execFile);
 const repo = NodeURL.fileURLToPath(new URL("..", import.meta.url));
 
 const Step = Schema.Struct({
+  env: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   name: Schema.optional(Schema.String),
   run: Schema.optional(Schema.String),
+  uses: Schema.optional(Schema.String),
   with: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 });
 const Workflow = fromYaml(
   Schema.Struct({
+    concurrency: Schema.optional(
+      Schema.Struct({
+        group: Schema.String,
+      }),
+    ),
     jobs: Schema.Record(
       Schema.String,
       Schema.Struct({
         if: Schema.optional(Schema.String),
         needs: Schema.optional(Schema.Array(Schema.String)),
+        outputs: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
         uses: Schema.optional(Schema.String),
         "runs-on": Schema.optional(Schema.String),
         with: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
@@ -58,6 +66,35 @@ it("keeps release outputs on Hotlap and gates npm on every native target", async
     await NodeFSP.readFile(NodePath.join(repo, ".github/workflows/release-desktop.yml"), "utf8"),
   );
   const publish = release.jobs.publish_cli!;
+  const resolveCommit = release.jobs.resolve_commit!;
+  const preflight = release.jobs.preflight!;
+  const resolveVersion = preflight.steps?.find((step) => step.name === "Resolve release version");
+  const resolveCommitScript = resolveCommit.steps?.find(
+    (step) => step.name === "Resolve release commit",
+  )?.with?.script;
+  NodeAssert.equal(
+    release.concurrency?.group,
+    "release-${{ inputs.channel == 'preview' && 'preview' || 'published' }}",
+  );
+  NodeAssert.equal(
+    resolveCommit.outputs?.next_nightly_version,
+    "${{ steps.resolve.outputs.next_nightly_version }}",
+  );
+  NodeAssert.equal(
+    resolveVersion?.env?.NIGHTLY_BASE_VERSION,
+    "${{ needs.resolve_commit.outputs.next_nightly_version }}",
+  );
+  NodeAssert.ok(
+    resolveVersion?.run?.includes('nightly_base_args=(--base-version "$NIGHTLY_BASE_VERSION")'),
+  );
+  NodeAssert.ok(resolveVersion?.run?.includes('"${nightly_base_args[@]}"'));
+  NodeAssert.ok(!resolveVersion?.run?.includes("DISPATCH_VERSION"));
+  NodeAssert.ok(resolveVersion?.run?.includes("^[0-9]+\\.[0-9]+\\.[0-9]+$"));
+  NodeAssert.ok(String(resolveCommitScript).includes("assertReleaseVersionIsCurrent"));
+  NodeAssert.ok(
+    String(resolveCommitScript).includes("releaseChannel: 'stable', version"),
+    "stable dispatch must reject an obsolete nightly before building",
+  );
   const targets = Object.entries(release.jobs).filter(
     ([, job]) => job.uses === "./.github/workflows/release-desktop.yml",
   );
@@ -68,6 +105,13 @@ it("keeps release outputs on Hotlap and gates npm on every native target", async
     NodeAssert.ok(!String(job.with?.runner).includes("blacksmith"));
   }
   const steps = publish.steps ?? [];
+  const revalidateIndex = steps.findIndex((step) => step.name === "Revalidate release version");
+  const publishIndex = steps.findIndex((step) => step.name === "Publish CLI package");
+  NodeAssert.ok(revalidateIndex >= 0 && revalidateIndex < publishIndex);
+  NodeAssert.equal(steps[revalidateIndex]?.uses, "actions/github-script@v8");
+  NodeAssert.ok(
+    String(steps[revalidateIndex]?.with?.script).includes("assertReleaseVersionIsCurrent"),
+  );
   NodeAssert.equal(
     steps.find((step) => step.name === "Download JS bundle")?.with?.name,
     "js-bundle",

@@ -20,19 +20,13 @@ on:
           - preview
           - stable
           - nightly
-      version:
-        description: "Stable version override (for example 1.2.3). Defaults to the version the latest nightly previewed."
-        required: false
-        type: string
-
-# Serialize nightlies (scheduled and manual) so overlapping runs cannot build
-# the same commit twice or publish out of order. Stable tag releases get their
-# own group so a nightly never blocks them. Running publishers are never
-# canceled, and queue: max keeps every pending run instead of the default
-# newest-wins single slot, so a queued stable tag can never be silently
-# dropped. Automatic nightlies recheck the release gap after leaving the queue.
+# Serialize stable and nightly releases so stable cannot publish after a
+# nightly has already resolved its version. Preview is isolated because it
+# never reaches an updater feed. Running publishers are never canceled, and
+# queue: max keeps every pending run instead of the default newest-wins single
+# slot. Automatic nightlies recheck release state after leaving the queue.
 concurrency:
-  group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly' || inputs.channel == 'preview') && 'nightly' || 'stable' }}
+  group: release-${{ inputs.channel == 'preview' && 'preview' || 'published' }}
   cancel-in-progress: false
   queue: max
 
@@ -52,6 +46,7 @@ jobs:
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
       nightly_version: ${{ steps.resolve.outputs.nightly_version }}
+      next_nightly_version: ${{ steps.resolve.outputs.next_nightly_version }}
       has_changes: ${{ steps.resolve.outputs.has_changes }}
     steps:
       - name: Checkout
@@ -69,6 +64,8 @@ jobs:
             const {
               assertCommitOnDefaultBranch,
               assertReleaseSource,
+              assertReleaseVersionIsCurrent,
+              resolveNextNightlyVersion,
               shouldReleaseNightly,
               resolveLatestNightlyCommit,
             } = require('./.github/scripts/check-nightly-release.cjs');
@@ -83,16 +80,29 @@ jobs:
             await assertReleaseSource({ github, context, releaseChannel });
 
             if (context.eventName === 'schedule') {
-              core.setOutput('has_changes', await shouldReleaseNightly({ github, context, core }));
+              const hasChanges = await shouldReleaseNightly({ github, context, core });
+              core.setOutput('has_changes', hasChanges);
               core.setOutput('ref', context.sha);
+              if (hasChanges) {
+                const nextNightlyVersion = await resolveNextNightlyVersion({ github, context });
+                if (nextNightlyVersion) core.setOutput('next_nightly_version', nextNightlyVersion);
+              }
             } else if (context.eventName === 'workflow_dispatch' && dispatchChannel === 'stable') {
               const { tag, sha, version } = await resolveLatestNightlyCommit({ github, context, core });
+              await assertReleaseVersionIsCurrent({ github, context, releaseChannel: 'stable', version });
               await assertCommitOnDefaultBranch({ github, context, sha });
               core.notice(`Stable release builds ${sha}, the commit shipped by ${tag}.`);
               core.setOutput('ref', sha);
               core.setOutput('nightly_version', version);
             } else {
               core.setOutput('ref', context.sha);
+              if (context.eventName === 'workflow_dispatch' && dispatchChannel === 'nightly') {
+                const nextNightlyVersion = await resolveNextNightlyVersion({ github, context });
+                if (nextNightlyVersion) core.setOutput('next_nightly_version', nextNightlyVersion);
+              } else if (context.eventName === 'push') {
+                const version = context.ref.replace(/^refs\/tags\/v/, '');
+                await assertReleaseVersionIsCurrent({ github, context, releaseChannel: 'stable', version });
+              }
             }
 
   preflight:
@@ -139,16 +149,21 @@ jobs:
         shell: bash
         env:
           DISPATCH_CHANNEL: ${{ github.event.inputs.channel }}
-          DISPATCH_VERSION: ${{ github.event.inputs.version }}
           NIGHTLY_VERSION: ${{ needs.resolve_commit.outputs.nightly_version }}
+          NIGHTLY_BASE_VERSION: ${{ needs.resolve_commit.outputs.next_nightly_version }}
           NIGHTLY_DATE: ${{ github.run_started_at }}
           NIGHTLY_SHA: ${{ needs.resolve_commit.outputs.ref }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "schedule" || ( "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-preview}" == "nightly" ) ]]; then
             nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
+            nightly_base_args=()
+            if [[ -n "$NIGHTLY_BASE_VERSION" ]]; then
+              nightly_base_args=(--base-version "$NIGHTLY_BASE_VERSION")
+            fi
 
             node scripts/resolve-nightly-release.ts \
+              "${nightly_base_args[@]}" \
               --date "$nightly_date" \
               --run-number "$NIGHTLY_RUN_NUMBER" \
               --sha "$NIGHTLY_SHA" \
@@ -182,9 +197,9 @@ jobs:
             echo "make_latest=false" >> "$GITHUB_OUTPUT"
           else
             if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-              raw="${DISPATCH_VERSION:-$NIGHTLY_VERSION}"
+              raw="$NIGHTLY_VERSION"
               if [[ -z "$raw" ]]; then
-                echo "workflow_dispatch stable releases need a version input or a published nightly." >&2
+                echo "workflow_dispatch stable releases need a published nightly." >&2
                 exit 1
               fi
             else
@@ -192,7 +207,7 @@ jobs:
             fi
 
             version="${raw#v}"
-            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "Invalid release version: $raw" >&2
               exit 1
             fi
@@ -202,13 +217,8 @@ jobs:
             echo "tag=v$version" >> "$GITHUB_OUTPUT"
             echo "name=Hotlap v$version" >> "$GITHUB_OUTPUT"
             echo "cli_dist_tag=latest" >> "$GITHUB_OUTPUT"
-            if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-              echo "make_latest=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-              echo "make_latest=false" >> "$GITHUB_OUTPUT"
-            fi
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "make_latest=true" >> "$GITHUB_OUTPUT"
           fi
 
       - id: previous_tag
@@ -646,6 +656,24 @@ jobs:
 
       - name: Check Hotlap package (dry run)
         run: node apps/server/scripts/cli.ts publish --tag "${{ needs.preflight.outputs.cli_dist_tag }}" --app-version "${{ needs.preflight.outputs.version }}" --dry-run --verbose
+
+      # Build jobs can run for long enough that an out-of-band publication may
+      # change the stable floor. Refuse to publish a stale version.
+      - name: Revalidate release version
+        uses: actions/github-script@v8
+        env:
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        with:
+          script: |
+            const { assertReleaseVersionIsCurrent } = require('./.github/scripts/check-nightly-release.cjs');
+            await assertReleaseVersionIsCurrent({
+              github,
+              context,
+              fetch: globalThis.fetch,
+              releaseChannel: process.env.RELEASE_CHANNEL,
+              version: process.env.RELEASE_VERSION,
+            });
 
       - name: Publish CLI package
         run: node apps/server/scripts/cli.ts publish --tag "${{ needs.preflight.outputs.cli_dist_tag }}" --app-version "${{ needs.preflight.outputs.version }}" --verbose
