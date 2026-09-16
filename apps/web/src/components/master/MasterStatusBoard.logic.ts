@@ -25,7 +25,11 @@ export function isCardThreadTitle(title: string): boolean {
 }
 
 function newestFirst<T extends MasterBoardThread>(left: T, right: T): number {
-  return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  const leftTime = Date.parse(left.updatedAt);
+  const rightTime = Date.parse(right.updatedAt);
+  const difference =
+    (Number.isNaN(rightTime) ? 0 : rightTime) - (Number.isNaN(leftTime) ? 0 : leftTime);
+  return difference === 0 ? left.id.localeCompare(right.id) : difference;
 }
 
 function belongsToMaster<T extends MasterBoardThread>(
@@ -59,14 +63,11 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   );
   const masters = projectThreads.filter((thread) => isMasterThreadTitle(thread.title));
   const threadById = new Map(projectThreads.map((thread) => [thread.id, thread]));
-  const hasSingleMaster = masters.length === 1;
-
   const cards = projectThreads
-    .filter((thread) => {
-      if (!isCardThreadTitle(thread.title)) return false;
-      if (belongsToMaster(thread, activeThread.id, threadById)) return true;
-      return hasSingleMaster && thread.forkedFrom === undefined;
-    })
+    .filter(
+      (thread) =>
+        isCardThreadTitle(thread.title) && belongsToMaster(thread, activeThread.id, threadById),
+    )
     .sort(newestFirst);
 
   return {
