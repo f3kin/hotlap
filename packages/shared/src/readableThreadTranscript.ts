@@ -144,31 +144,76 @@ export function serializeReadableThreadTranscript(
   return { markdown: sections.join("\n\n"), messageCount: sections.length };
 }
 
+function groupForkHistory(messages: ReadonlyArray<ReadableThreadMessage>) {
+  const encoder = new TextEncoder();
+  const groups: Array<{
+    readonly start: number;
+    readonly messages: ReadableThreadMessage[];
+    bytes: number;
+  }> = [];
+
+  for (const [index, message] of messages.entries()) {
+    const bytes = encoder.encode(message.text).byteLength + 128;
+    const previous = groups.at(-1);
+    if (message.role === "user" || previous === undefined) {
+      groups.push({ start: index, messages: [message], bytes });
+    } else {
+      previous.messages.push(message);
+      previous.bytes += bytes;
+    }
+  }
+  return groups;
+}
+
+export function selectBoundedForkHistory(input: {
+  readonly messages: ReadonlyArray<ReadableThreadMessage>;
+  readonly maxMessages: number;
+  readonly maxBytes: number;
+}): {
+  readonly messages: ReadonlyArray<ReadableThreadMessage>;
+  readonly omittedMessageCount: number;
+} | null {
+  const groups = groupForkHistory(input.messages);
+  let selectedStart = input.messages.length;
+  let selectedMessageCount = 0;
+  let selectedBytes = 0;
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index]!;
+    if (
+      selectedMessageCount + group.messages.length > input.maxMessages ||
+      selectedBytes + group.bytes > input.maxBytes
+    ) {
+      break;
+    }
+    selectedStart = group.start;
+    selectedMessageCount += group.messages.length;
+    selectedBytes += group.bytes;
+  }
+
+  if (selectedMessageCount === 0) return null;
+  return {
+    messages: input.messages.slice(selectedStart),
+    omittedMessageCount: selectedStart,
+  };
+}
+
 export function buildForkProviderInput(input: {
   readonly messages: ReadonlyArray<ReadableThreadMessage>;
   readonly continuation: string;
   readonly maxChars: number;
 }): { readonly text: string; readonly omittedMessageCount: number } | null {
   const intro =
-    "This conversation was forked. Continue from the inherited transcript below using the newest workspace state.\n\n";
+    "This conversation was forked. Continue from the inherited transcript below, which may omit older messages, using the newest workspace state.\n\n";
   const continuation = `\n\n## New user message\n\n${input.continuation}`;
   const omission = "[Older inherited messages omitted to fit the provider context.]\n\n";
-  const groups: Array<{ readonly sections: string[]; readonly messageCount: number }> = [];
-  for (const message of input.messages) {
-    const section = `## ${message.role === "user" ? "User" : "Assistant"}\n\n${message.text}`;
-    const previous = groups.at(-1);
-    if (message.role === "user" || previous === undefined) {
-      groups.push({ sections: [section], messageCount: 1 });
-    } else {
-      groups[groups.length - 1] = {
-        sections: [...previous.sections, section],
-        messageCount: previous.messageCount + 1,
-      };
-    }
-  }
+  const groups = groupForkHistory(input.messages);
   if (groups.length === 0) return null;
 
-  const groupTexts = groups.map((group) => group.sections.join("\n\n"));
+  const groupTexts = groups.map((group) =>
+    group.messages
+      .map((message) => `## ${message.role === "user" ? "User" : "Assistant"}\n\n${message.text}`)
+      .join("\n\n"),
+  );
   const suffixLengths = Array.from({ length: groups.length }, () => 0);
   let suffixLength = 0;
   for (let index = groups.length - 1; index >= 0; index -= 1) {
@@ -187,7 +232,7 @@ export function buildForkProviderInput(input: {
         omittedMessageCount,
       };
     }
-    omittedMessageCount += groups[start]!.messageCount;
+    omittedMessageCount += groups[start]!.messages.length;
   }
   return null;
 }

@@ -137,8 +137,8 @@ function OpenForkConversationDialog(props: {
             </p>
           ) : null}
           <p className="mt-3 text-sm text-muted-foreground">
-            History will include messages through the selected response. Files stay in the current
-            workspace.
+            Recent history through the selected response is included. Older history stays in the
+            source thread. Files stay in the current workspace.
           </p>
           {error ? (
             <p role="alert" className="mt-3 text-sm text-destructive">

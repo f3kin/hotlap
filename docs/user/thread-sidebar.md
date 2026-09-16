@@ -119,12 +119,11 @@ link when available, otherwise its thread ID. See [keybindings](./keybindings.md
 for custom configuration.
 
 To reuse part of a conversation in a separate direction, choose the fork action beneath a finished
-agent response. The new thread inherits the readable conversation through that response,
+agent response. The new thread inherits the newest readable context through that response,
 the current workspace, and the provider and model selection. You can change to another supported
 provider or model before sending the first continuation. Forked threads share the source workspace,
-so file changes made by either thread are visible to both. If the inherited conversation is too
-large for the target provider, T3 Code keeps the newest complete turns and shows when older context
-was omitted.
+so file changes made by either thread are visible to both. Older context remains available from the
+source thread when the full conversation is too large to inherit safely.
 
 Choose **Copy transcript** from the thread header menu to copy the complete readable chat as
 Markdown. Tool output, hidden instructions, reasoning, and other internal activity are omitted.

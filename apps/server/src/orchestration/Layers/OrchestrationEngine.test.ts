@@ -12,6 +12,7 @@ import {
   MessageId,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  THREAD_FORK_MAX_MESSAGES,
   ThreadId,
   TurnId,
   type OrchestrationCommand,
@@ -878,8 +879,10 @@ describe("OrchestrationEngine", () => {
   });
 
   it("persists inherited provider input only for a fork's first continuation", async () => {
-    const system = await createOrchestrationSystem();
-    const { engine } = system;
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-large-fork-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(databasePath);
+    let engine = system.engine;
     const projectId = asProjectId("project-fork-handoff");
     const sourceThreadId = ThreadId.make("thread-fork-source");
     const destinationThreadId = ThreadId.make("thread-fork-destination");
@@ -925,20 +928,15 @@ describe("OrchestrationEngine", () => {
           type: "thread.history.import",
           commandId: CommandId.make("cmd-fork-handoff-old-history"),
           threadId: sourceThreadId,
-          messages: [
-            {
-              messageId: asMessageId("message-fork-old-question"),
-              role: "user",
-              text: "Old question",
-              createdAt,
-            },
-            {
-              messageId: asMessageId("message-fork-old-answer"),
-              role: "assistant",
-              text: "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
-              createdAt,
-            },
-          ],
+          messages: Array.from({ length: 5_000 }, (_, index) => ({
+            messageId: asMessageId(`message-fork-old-${index.toString().padStart(4, "0")}`),
+            role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+            text:
+              index === 4_999
+                ? `Old answer ${"x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)}`
+                : `Old history ${index}`,
+            createdAt,
+          })),
         }),
       );
       await system.run(
@@ -1036,18 +1034,30 @@ describe("OrchestrationEngine", () => {
         }),
       );
 
-      const forkEvents = Array.from(await system.run(Stream.runCollect(engine.readEvents(0))));
+      const forkEvents = Array.from(
+        await system.run(Stream.runCollect(engine.readEvents(0, 10_000))),
+      );
       expect(
         forkEvents.some(
           (event) =>
             event.commandId === forkCommandId && event.type === "thread.turn-start-requested",
         ),
       ).toBe(false);
-      expect(Option.getOrThrow(await system.readThread(destinationThreadId))).toMatchObject({
+      const forkedThread = Option.getOrThrow(await system.readThread(destinationThreadId));
+      expect(forkedThread).toMatchObject({
         modelSelection: selectedModel,
         latestTurn: null,
         session: null,
       });
+      expect(forkedThread.messages.length).toBeLessThanOrEqual(THREAD_FORK_MAX_MESSAGES);
+      expect(forkedThread.messages.at(-1)).toMatchObject({
+        role: "assistant",
+        text: "Use the inherited value.",
+      });
+
+      await system.dispose();
+      system = await createOrchestrationSystem(databasePath);
+      engine = system.engine;
 
       const firstTurnCommandId = CommandId.make("cmd-fork-handoff-first-turn");
       await system.run(
@@ -1134,7 +1144,7 @@ describe("OrchestrationEngine", () => {
         }),
       );
 
-      const events = Array.from(await system.run(Stream.runCollect(engine.readEvents(0))));
+      const events = Array.from(await system.run(Stream.runCollect(engine.readEvents(0, 10_000))));
       const firstTurnEvent = events.find(
         (event) =>
           event.commandId === firstTurnCommandId && event.type === "thread.turn-start-requested",
@@ -1188,6 +1198,7 @@ describe("OrchestrationEngine", () => {
       ).toBe("Continue with that choice.");
     } finally {
       await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
 
