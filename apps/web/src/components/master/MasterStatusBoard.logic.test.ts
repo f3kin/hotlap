@@ -42,11 +42,11 @@ describe("MasterStatusBoard logic", () => {
     expect(deriveMasterBoard(master, [master, direct, nested])?.cards).toEqual([direct, nested]);
   });
 
-  it("includes legacy unlinked cards when the project has one Master", () => {
+  it("keeps unowned cards out of a board, even when there is one Master", () => {
     const master = thread("master", "Master: Fleet");
-    const legacy = thread("legacy", "Card: Existing work");
+    const unowned = thread("unowned", "Card: Existing work");
 
-    expect(deriveMasterBoard(master, [master, legacy])?.cards).toEqual([legacy]);
+    expect(deriveMasterBoard(master, [master, unowned])?.cards).toEqual([]);
   });
 
   it("does not guess ownership when a project has multiple Masters", () => {
@@ -74,6 +74,45 @@ describe("MasterStatusBoard logic", () => {
 
     expect(deriveMasterBoard(fleet, [fleet, migration, card])?.cards).toEqual([]);
     expect(deriveMasterBoard(migration, [fleet, migration, card])?.cards).toEqual([card]);
+  });
+
+  it("keeps completed and stale cards with their owning Master", () => {
+    const master = thread("master", "Master: Fleet");
+    const completed = thread("completed", "Card: Completed", {
+      forkedFrom: { threadId: master.id },
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    });
+    const stale = thread("stale", "Card: Stale", {
+      forkedFrom: { threadId: master.id },
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    });
+
+    expect(deriveMasterBoard(master, [master, stale, completed])?.cards).toEqual([
+      completed,
+      stale,
+    ]);
+  });
+
+  it("ignores broken lineage and cycles, and sorts equal or malformed timestamps consistently", () => {
+    const master = thread("master", "Master: Fleet");
+    const broken = thread("broken", "Card: Missing parent", {
+      forkedFrom: { threadId: "missing" },
+    });
+    const cycleA = thread("cycle-a", "Card: Cycle A", { forkedFrom: { threadId: "cycle-b" } });
+    const cycleB = thread("cycle-b", "Card: Cycle B", { forkedFrom: { threadId: "cycle-a" } });
+    const alpha = thread("alpha", "Card: Alpha", {
+      forkedFrom: { threadId: master.id },
+      updatedAt: "not-a-date",
+    });
+    const zulu = thread("zulu", "Card: Zulu", {
+      forkedFrom: { threadId: master.id },
+      updatedAt: "not-a-date",
+    });
+
+    expect(deriveMasterBoard(master, [master, broken, cycleA, cycleB, zulu, alpha])?.cards).toEqual([
+      alpha,
+      zulu,
+    ]);
   });
 
   it("isolates projects and environments", () => {
