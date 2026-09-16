@@ -68,7 +68,7 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   const cards = projectThreads
     .filter(
       (thread) =>
-        thread.archivedAt !== null &&
+        thread.archivedAt == null &&
         isCardThreadTitle(thread.title) &&
         belongsToMaster(thread, activeThread.id, threadById),
     )
