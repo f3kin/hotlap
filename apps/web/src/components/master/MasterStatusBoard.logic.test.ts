@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   deriveMasterBoard,
+  deriveMasterWorkspace,
   isCardThreadTitle,
   isMasterThreadTitle,
   type MasterBoardThread,
@@ -23,6 +24,76 @@ function thread(
 }
 
 describe("MasterStatusBoard logic", () => {
+  it("projects only active work and keeps settled-only projects in the settled shelf", () => {
+    const master = thread("master", "Master: Fleet", { projectId: "infra" });
+    const card = thread("card", "Card: Verify", {
+      projectId: "separate-worktree",
+      forkedFrom: { threadId: master.id },
+    });
+    const chat = thread("chat", "One-off chat", { projectId: "infra" });
+    const settledMaster = thread("settled-master", "Master: Done", {
+      projectId: "settled-only",
+      settledOverride: "settled",
+    });
+    const settledCard = thread("settled-card", "Card: Done", {
+      projectId: "settled-only",
+      settledOverride: "settled",
+      forkedFrom: { threadId: settledMaster.id },
+    });
+
+    const workspace = deriveMasterWorkspace([master, card, chat, settledMaster, settledCard]);
+
+    expect(workspace.activeProjects).toHaveLength(1);
+    expect(workspace.activeProjects[0]).toMatchObject({ projectId: "infra", oneOffs: [chat] });
+    expect(workspace.activeProjects[0]?.masters[0]?.cards).toEqual([card]);
+    expect(workspace.settledProjects).toHaveLength(1);
+    expect(workspace.settledProjects[0]?.projectId).toBe("settled-only");
+    expect(workspace.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
+  });
+
+  it("keeps genuinely unknown Cards in an explicit orphan fallback", () => {
+    const master = thread("master", "Master: Fleet");
+    const orphan = thread("orphan", "Card: Imported without lineage", {
+      projectId: "imports",
+    });
+    const workspace = deriveMasterWorkspace([master, orphan]);
+
+    expect(
+      workspace.activeProjects.find((project) => project.projectId === "imports")?.orphanCards,
+    ).toEqual([orphan]);
+  });
+
+  it("retains archived lineage and a structural owner across lifecycle shelves", () => {
+    const archivedMaster = thread("master", "Master: Archived", {
+      archivedAt: "2026-09-10T00:00:00.000Z",
+      projectId: "infra",
+    });
+    const archivedParent = thread("parent", "Card: Old parent", {
+      archivedAt: "2026-09-10T00:00:00.000Z",
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const activeCard = thread("active", "Card: Imported continuation", {
+      projectId: "separate-worktree",
+      forkedFrom: { threadId: archivedParent.id },
+    });
+    const settledCard = thread("settled", "Card: Settled continuation", {
+      projectId: "separate-worktree",
+      settledOverride: "settled",
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+
+    const workspace = deriveMasterWorkspace([
+      archivedMaster,
+      archivedParent,
+      activeCard,
+      settledCard,
+    ]);
+
+    expect(workspace.activeProjects[0]?.masters[0]?.cards).toEqual([activeCard]);
+    expect(workspace.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
+    expect(workspace.activeProjects[0]?.orphanCards).toEqual([]);
+    expect(workspace.settledProjects[0]?.orphanCards).toEqual([]);
+  });
   it("recognises Master and Card prefixes without depending on casing or spacing", () => {
     expect(isMasterThreadTitle(" Master: Fleet")).toBe(true);
     expect(isMasterThreadTitle("master : Brain")).toBe(true);

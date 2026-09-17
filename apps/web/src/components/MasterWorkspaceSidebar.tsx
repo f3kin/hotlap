@@ -15,7 +15,13 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsi
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
-import { deriveMasterBoard, isMasterThreadTitle } from "./master/MasterStatusBoard.logic";
+import { deriveMasterWorkspace, isMasterThreadTitle } from "./master/MasterStatusBoard.logic";
+import { ProjectFavicon } from "./ProjectFavicon";
+import {
+  ThreadRowLeadingStatus,
+  ThreadRowTrailingStatus,
+  ThreadWorktreeIndicator,
+} from "./ThreadStatusIndicators";
 
 export const SHORTCUTS_STORAGE_KEY = "t3code:master-workspace-shortcuts";
 
@@ -46,7 +52,15 @@ function matchesSearch(title: string, query: string) {
   return title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
 }
 
-type ThreadRow = { id: string; environmentId: string; title: string; projectId: string | null };
+function projectWorkSummary(
+  group: ReturnType<typeof deriveMasterWorkspace>["activeProjects"][number],
+) {
+  if (group.masters.length) return `${group.masters.length} Masters`;
+  if (group.oneOffs.length) return `${group.oneOffs.length} Chats`;
+  return `${group.orphanCards.length} Orphan Cards`;
+}
+
+type ThreadRow = ReturnType<typeof useThreadShells>[number];
 
 function ThreadButton({
   thread,
@@ -75,7 +89,10 @@ function ThreadButton({
       onClick={onClick}
     >
       {pin ? <PinIcon className="size-3 shrink-0 text-muted-foreground" /> : null}
+      <ThreadRowLeadingStatus thread={thread} />
       <span className="min-w-0 flex-1 truncate text-left">{shortTitle(thread.title)}</span>
+      <ThreadWorktreeIndicator thread={thread} />
+      <ThreadRowTrailingStatus thread={thread} />
     </Button>
   );
 }
@@ -93,6 +110,7 @@ export default function MasterWorkspaceSidebar() {
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [openProjectKeys, setOpenProjectKeys] = useState<ReadonlySet<string>>(new Set());
+  const [settledExpanded, setSettledExpanded] = useState(false);
 
   useEffect(() => {
     setShortcutIds(
@@ -108,6 +126,7 @@ export default function MasterWorkspaceSidebar() {
     () => visibleThreads.filter((thread) => isMasterThreadTitle(thread.title)),
     [visibleThreads],
   );
+  const workspace = useMemo(() => deriveMasterWorkspace(threads), [threads]);
   const shortcutMasters = masters.filter((thread) =>
     shortcutIds.includes(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );
@@ -244,39 +263,23 @@ export default function MasterWorkspaceSidebar() {
               <p className="px-[var(--sidebar-row-content-inset)] pb-1 text-[11px] font-medium text-muted-foreground">
                 Projects
               </p>
-              {projects.map((project) => {
-                const projectKey = `${project.environmentId}:${project.id}`;
-                const projectThreads = threads.filter(
-                  (thread) =>
-                    thread.environmentId === project.environmentId &&
-                    thread.projectId === project.id,
+              {workspace.activeProjects.map((group) => {
+                const projectKey = `${group.environmentId}:${group.projectId}`;
+                const project = projects.find(
+                  (item) =>
+                    item.environmentId === group.environmentId && item.id === group.projectId,
                 );
-                const projectMasters = projectThreads.filter(
-                  (thread) => thread.archivedAt == null && isMasterThreadTitle(thread.title),
-                );
-                const oneOffs = projectThreads.filter(
-                  (thread) =>
-                    thread.archivedAt == null &&
-                    !isMasterThreadTitle(thread.title) &&
-                    !/^card\s*:/i.test(thread.title),
-                );
-                const ownedCardIds = new Set(
-                  projectMasters.flatMap(
-                    (master) =>
-                      deriveMasterBoard(master, projectThreads)?.cards.map((card) => card.id) ?? [],
-                  ),
-                );
-                const orphanCards = projectThreads.filter(
-                  (thread) =>
-                    thread.archivedAt == null &&
-                    /^card\s*:/i.test(thread.title) &&
-                    !ownedCardIds.has(thread.id),
-                );
+                if (!project) return null;
                 const hasActiveThread = activeRef
-                  ? projectThreads.some(
+                  ? threads.some(
                       (thread) =>
+                        thread.environmentId === group.environmentId &&
+                        (thread.projectId === group.projectId ||
+                          group.masters.some((board) =>
+                            board.cards.some((card) => card.id === thread.id),
+                          )) &&
                         scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
-                        scopedThreadKey(activeRef),
+                          scopedThreadKey(activeRef),
                     )
                   : false;
                 const open = hasActiveThread || openProjectKeys.has(projectKey);
@@ -300,14 +303,15 @@ export default function MasterWorkspaceSidebar() {
                           !open && "-rotate-90",
                         )}
                       />
+                      <ProjectFavicon project={project} className="size-4 shrink-0" />
                       <span className="min-w-0 flex-1 truncate">{project.title}</span>
                       <span className="text-[10px] text-muted-foreground">
-                        {projectMasters.length} Masters
+                        {projectWorkSummary(group)}
                       </span>
                     </CollapsibleTrigger>
                     <CollapsiblePanel className="pl-3">
-                      {projectMasters.map((master) => {
-                        const board = deriveMasterBoard(master, projectThreads);
+                      {group.masters.map((board) => {
+                        const master = board.master;
                         const key = scopedThreadKey(
                           scopeThreadRef(master.environmentId, master.id),
                         );
@@ -335,7 +339,7 @@ export default function MasterWorkspaceSidebar() {
                                 />
                               </Button>
                             </div>
-                            {board?.cards.map((card) => (
+                            {board.cards.map((card) => (
                               <ThreadButton
                                 key={scopedThreadKey(scopeThreadRef(card.environmentId, card.id))}
                                 thread={card}
@@ -352,26 +356,32 @@ export default function MasterWorkspaceSidebar() {
                           </div>
                         );
                       })}
-                      {oneOffs.map((thread) => (
-                        <ThreadButton
-                          key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
-                          thread={thread}
-                          active={
-                            activeRef
-                              ? scopedThreadKey(activeRef) ===
-                                scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-                              : false
-                          }
-                          nested
-                          onClick={() => openThread(thread)}
-                        />
-                      ))}
-                      {orphanCards.length ? (
+                      {group.oneOffs.length ? (
                         <div className="mt-1 border-t border-sidebar-border pt-1">
                           <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                            Other work
+                            Chats
                           </p>
-                          {orphanCards.map((thread) => (
+                          {group.oneOffs.map((thread) => (
+                            <ThreadButton
+                              key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
+                              thread={thread}
+                              active={
+                                activeRef
+                                  ? scopedThreadKey(activeRef) ===
+                                    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
+                                  : false
+                              }
+                              onClick={() => openThread(thread)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                      {group.orphanCards.length ? (
+                        <div className="mt-1 border-t border-sidebar-border pt-1">
+                          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                            Orphan Cards
+                          </p>
+                          {group.orphanCards.map((thread) => (
                             <ThreadButton
                               key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
                               thread={thread}
@@ -392,6 +402,87 @@ export default function MasterWorkspaceSidebar() {
                 );
               })}
             </SidebarGroup>
+            {workspace.settledProjects.length ? (
+              <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
+                <Collapsible open={settledExpanded} onOpenChange={setSettledExpanded}>
+                  <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 rounded-md px-[var(--sidebar-row-content-inset)] text-left text-xs hover:bg-sidebar-accent">
+                    <ChevronDownIcon
+                      className={cn(
+                        "size-3 shrink-0 transition-transform",
+                        !settledExpanded && "-rotate-90",
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      Settled (
+                      {workspace.settledProjects.reduce(
+                        (count, group) => count + group.visibleCount,
+                        0,
+                      )}
+                      )
+                    </span>
+                  </CollapsibleTrigger>
+                  <CollapsiblePanel className="pl-3">
+                    {workspace.settledProjects.map((group) => {
+                      const project = projects.find(
+                        (item) =>
+                          item.environmentId === group.environmentId && item.id === group.projectId,
+                      );
+                      if (!project) return null;
+                      return (
+                        <div key={`${group.environmentId}:${group.projectId}`} className="py-1">
+                          <div className="flex items-center gap-2 px-2 text-[11px] text-muted-foreground">
+                            <ProjectFavicon project={project} className="size-3.5" />
+                            {project.title}
+                          </div>
+                          {group.masters.map((board) => (
+                            <div key={board.master.id}>
+                              <ThreadButton
+                                thread={board.master}
+                                active={false}
+                                onClick={() => openThread(board.master)}
+                              />
+                              {board.cards.map((card) => (
+                                <ThreadButton
+                                  key={card.id}
+                                  thread={card}
+                                  active={false}
+                                  nested
+                                  onClick={() => openThread(card)}
+                                />
+                              ))}
+                            </div>
+                          ))}
+                          {group.oneOffs.length ? (
+                            <div className="mt-1 border-t border-sidebar-border pt-1">
+                              <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                                Chats
+                              </p>
+                              {group.oneOffs.map((thread) => (
+                                <ThreadButton
+                                  key={thread.id}
+                                  thread={thread}
+                                  active={false}
+                                  onClick={() => openThread(thread)}
+                                />
+                              ))}
+                            </div>
+                          ) : null}
+                          {group.orphanCards.map((thread) => (
+                            <ThreadButton
+                              key={thread.id}
+                              thread={thread}
+                              active={false}
+                              nested
+                              onClick={() => openThread(thread)}
+                            />
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </CollapsiblePanel>
+                </Collapsible>
+              </SidebarGroup>
+            ) : null}
           </>
         )}
       </SidebarContent>
