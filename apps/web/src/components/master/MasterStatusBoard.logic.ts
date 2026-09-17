@@ -90,6 +90,10 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   return {
     master,
     cards,
-    peerMasters: masters.filter((thread) => thread.id !== master.id).sort(newestFirst),
+    // Archived Masters may be needed to resolve the owner of an active Card,
+    // but they must not reappear as navigable peer work.
+    peerMasters: masters
+      .filter((thread) => thread.id !== master.id && thread.archivedAt == null)
+      .sort(newestFirst),
   };
 }

@@ -123,6 +123,29 @@ describe("MasterStatusBoard logic", () => {
     });
   });
 
+  it("keeps archived peer Masters hidden while resolving an archived owner", () => {
+    const archivedOwner = thread("archived-owner", "Master: Archived owner", {
+      archivedAt: "2026-09-10T00:00:00.000Z",
+    });
+    const archivedPeer = thread("archived-peer", "Master: Archived peer", {
+      archivedAt: "2026-09-11T00:00:00.000Z",
+    });
+    const livePeer = thread("live-peer", "Master: Live peer");
+    const activeCard = thread("active-card", "Card: Continue", {
+      forkedFrom: { threadId: archivedOwner.id },
+    });
+
+    const board = deriveMasterBoard(activeCard, [
+      archivedOwner,
+      archivedPeer,
+      livePeer,
+      activeCard,
+    ]);
+    expect(board?.master).toBe(archivedOwner);
+    expect(board?.cards).toEqual([activeCard]);
+    expect(board?.peerMasters).toEqual([livePeer]);
+  });
+
   it("omits cards whose missing live-shell ancestor prevents ownership resolution", () => {
     const master = thread("master", "Master: Fleet");
     const child = thread("child", "Card: Child", { forkedFrom: { threadId: "missing-parent" } });
