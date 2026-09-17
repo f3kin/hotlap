@@ -244,6 +244,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["notification sound alert completion input approval desktop"],
   },
   {
+    id: "master-workspace",
+    title: "Master workspace",
+    to: "/settings/general",
+    searchTerms: ["master pinned projects cards one-off sidebar personal"],
+  },
+  {
     id: "master-status-board",
     title: "Master status board",
     to: "/settings/general",

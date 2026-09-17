@@ -108,15 +108,19 @@ export default function MasterWorkspaceSidebar() {
             Projects
           </p>
           {projects.map((project) => {
-            const projectThreads = visibleThreads.filter(
+            // Ownership must see archived ancestors, while render lists below only expose live work.
+            const projectThreads = threads.filter(
               (thread) =>
                 thread.environmentId === project.environmentId && thread.projectId === project.id,
             );
-            const projectMasters = projectThreads.filter((thread) =>
-              isMasterThreadTitle(thread.title),
+            const projectMasters = projectThreads.filter(
+              (thread) => thread.archivedAt == null && isMasterThreadTitle(thread.title),
             );
             const oneOffs = projectThreads.filter(
-              (thread) => !isMasterThreadTitle(thread.title) && !/^card\s*:/i.test(thread.title),
+              (thread) =>
+                thread.archivedAt == null &&
+                !isMasterThreadTitle(thread.title) &&
+                !/^card\s*:/i.test(thread.title),
             );
             const ownedCardIds = new Set(
               projectMasters.flatMap(
@@ -125,7 +129,10 @@ export default function MasterWorkspaceSidebar() {
               ),
             );
             const orphanCards = projectThreads.filter(
-              (thread) => /^card\s*:/i.test(thread.title) && !ownedCardIds.has(thread.id),
+              (thread) =>
+                thread.archivedAt == null &&
+                /^card\s*:/i.test(thread.title) &&
+                !ownedCardIds.has(thread.id),
             );
             return (
               <Collapsible key={`${project.environmentId}:${project.id}`} defaultOpen>
