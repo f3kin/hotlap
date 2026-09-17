@@ -109,6 +109,20 @@ describe("MasterStatusBoard logic", () => {
     ]);
   });
 
+  it("resolves an active Card back through an archived Master", () => {
+    const archivedMaster = thread("archived-master", "Master: Fleet", {
+      archivedAt: "2026-09-10T00:00:00.000Z",
+    });
+    const activeCard = thread("active-card", "Card: Continue", {
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+
+    expect(deriveMasterBoard(activeCard, [archivedMaster, activeCard])).toMatchObject({
+      master: archivedMaster,
+      cards: [activeCard],
+    });
+  });
+
   it("omits cards whose missing live-shell ancestor prevents ownership resolution", () => {
     const master = thread("master", "Master: Fleet");
     const child = thread("child", "Card: Child", { forkedFrom: { threadId: "missing-parent" } });

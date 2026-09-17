@@ -6,6 +6,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { cn } from "~/lib/utils";
 import { useThreadShellsForProjectRefs } from "~/state/entities";
+import { useArchivedThreadSnapshots } from "~/lib/archivedThreadsState";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import type { Thread } from "~/types";
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "../Sidebar.logic";
@@ -70,6 +71,23 @@ export function MasterStatusBoard(props: { readonly activeThread: Thread }) {
     [props.activeThread.environmentId, props.activeThread.projectId],
   );
   const threads = useThreadShellsForProjectRefs(projectRefs);
+  // The live shell stream deliberately excludes archived threads. Master
+  // ownership is lineage-based, however, so an archived Master still needs to
+  // be available while resolving its active Cards.
+  const { snapshots: archivedSnapshots } = useArchivedThreadSnapshots([
+    props.activeThread.environmentId,
+  ]);
+  const threadsWithArchivedLineage = useMemo(() => {
+    const byKey = new Map(
+      threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread] as const),
+    );
+    for (const { environmentId, snapshot } of archivedSnapshots) {
+      for (const thread of snapshot.threads) {
+        byKey.set(`${environmentId}:${thread.id}`, { ...thread, environmentId });
+      }
+    }
+    return [...byKey.values()];
+  }, [archivedSnapshots, threads]);
   const navigate = useNavigate();
   const [open, setOpen] = useState(true);
   const board = useMemo(() => {
@@ -78,8 +96,10 @@ export function MasterStatusBoard(props: { readonly activeThread: Thread }) {
         thread.environmentId === props.activeThread.environmentId &&
         thread.id === props.activeThread.id,
     );
-    return activeThreadShell ? deriveMasterBoard(activeThreadShell, threads) : null;
-  }, [props.activeThread.environmentId, props.activeThread.id, threads]);
+    return activeThreadShell
+      ? deriveMasterBoard(activeThreadShell, threadsWithArchivedLineage)
+      : null;
+  }, [props.activeThread.environmentId, props.activeThread.id, threadsWithArchivedLineage]);
 
   if (board === null) return null;
 
