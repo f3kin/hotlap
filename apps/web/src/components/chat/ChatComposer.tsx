@@ -89,6 +89,7 @@ import { listContinuationForEnter, listIndentForTab } from "../../composer-list-
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
+  isProviderRoutingPinnedToFixed,
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
@@ -1978,14 +1979,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerRoutingSupported &&
     (routedAccountEntry?.driverKind === "codex" ||
       routedAccountEntry?.driverKind === "claudeAgent");
-  const providerRoutingAutoEnabled =
-    providerRoutingPolicy !== null &&
-    canEnableProviderRoutingAuto(
-      deriveProviderRoutingOptions([providerStatuses]),
-      providerRoutingPolicy.instanceIdsByDriver,
-      providerRoutingPolicy.usageThresholdPercent,
-      routedAccountEntry,
-    );
+  // Claude cannot move a conversation with a turn to another account; the server pins it to Fixed.
+  const providerRoutingAutoDisabledReason = isProviderRoutingPinnedToFixed({
+    thread: props.activeThreadShell,
+    providers: providerStatuses,
+  })
+    ? "Claude threads keep their account once started."
+    : providerRoutingPolicy !== null &&
+        canEnableProviderRoutingAuto(
+          deriveProviderRoutingOptions([providerStatuses]),
+          providerRoutingPolicy.instanceIdsByDriver,
+          providerRoutingPolicy.usageThresholdPercent,
+          routedAccountEntry,
+        )
+      ? null
+      : "Add at least two project accounts for this provider.";
   const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
   const selectedProviderSkills = selectedProviderStatus
     ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
@@ -5162,7 +5170,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           <ProviderRoutingModeControl
             mode={providerRoutingMode}
             accountLabel={routedAccountEntry.displayName}
-            autoEnabled={providerRoutingAutoEnabled}
+            autoDisabledReason={providerRoutingAutoDisabledReason}
             size={composerControlsInStrip ? "xs" : "sm"}
             disabled={providerCatalogPending}
             onChange={onProviderRoutingModeChange}

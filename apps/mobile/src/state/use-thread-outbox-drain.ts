@@ -799,7 +799,7 @@ export function useThreadOutboxDrain(): void {
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
 
       const metadataUpdate = resolveQueuedThreadMetadataUpdate(
-        { ...queuedMessage, modelSelection: settings.modelSelection },
+        { modelSelection: settings.modelSelection },
         thread,
       );
       if (metadataUpdate) {

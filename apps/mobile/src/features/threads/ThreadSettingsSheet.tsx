@@ -213,6 +213,8 @@ function SwitchRow(props: {
   readonly onValueChange: (value: boolean) => void;
   readonly isLast?: boolean;
   readonly disabled?: boolean;
+  /** Short muted line under the label, e.g. why the switch is disabled. */
+  readonly hint?: string | null;
 }) {
   return (
     <View
@@ -221,7 +223,10 @@ function SwitchRow(props: {
         !props.isLast && "border-b border-border-subtle",
       )}
     >
-      <Text className="text-sm font-t3-medium text-foreground">{props.label}</Text>
+      <View className="shrink gap-0.5 pr-3">
+        <Text className="text-sm font-t3-medium text-foreground">{props.label}</Text>
+        {props.hint ? <Text className="text-xs text-foreground-muted">{props.hint}</Text> : null}
+      </View>
       <ThemedSwitch
         accessibilityLabel={props.label}
         disabled={props.disabled}
@@ -249,6 +254,8 @@ type ThreadSettingsSessionProps = {
   readonly providerRoutingMode: ProviderRoutingMode;
   readonly providerRoutingSupported: boolean;
   readonly providerRoutingCanEnableAuto: boolean;
+  /** Why Auto cannot be turned on for this thread, shown under the switch. */
+  readonly providerRoutingAutoDisabledReason?: string | null;
   readonly providerAccountLabel: string;
   readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
 };
@@ -306,6 +313,8 @@ type ThreadSettingsSessionValue = {
   readonly providerRoutingMode: ProviderRoutingMode;
   readonly providerRoutingSupported: boolean;
   readonly providerRoutingCanEnableAuto: boolean;
+  /** Why Auto cannot be turned on for this thread, shown under the switch. */
+  readonly providerRoutingAutoDisabledReason?: string | null;
   readonly providerAccountLabel: string;
   readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
@@ -467,6 +476,7 @@ function ThreadSettingsSessionProvider(
       providerRoutingMode: props.providerRoutingMode,
       providerRoutingSupported: props.providerRoutingSupported,
       providerRoutingCanEnableAuto: props.providerRoutingCanEnableAuto,
+      providerRoutingAutoDisabledReason: props.providerRoutingAutoDisabledReason ?? null,
       providerAccountLabel: props.providerAccountLabel,
       onUpdateProviderRoutingMode: props.onUpdateProviderRoutingMode,
       displayedDescriptors,
@@ -511,6 +521,7 @@ function ThreadSettingsSessionProvider(
       props.providerRoutingMode,
       props.providerRoutingSupported,
       props.providerRoutingCanEnableAuto,
+      props.providerRoutingAutoDisabledReason,
       props.runtimeMode,
       searchQuery,
       showLegacyToggle,
@@ -732,6 +743,11 @@ function ThreadSettingsOptionsItem(props: {
               value={session.providerRoutingMode === "auto"}
               disabled={
                 session.providerRoutingMode === "fixed" && !session.providerRoutingCanEnableAuto
+              }
+              hint={
+                session.providerRoutingMode === "fixed"
+                  ? session.providerRoutingAutoDisabledReason
+                  : null
               }
               onValueChange={(enabled) =>
                 session.onUpdateProviderRoutingMode(enabled ? "auto" : "fixed")
