@@ -1,4 +1,4 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { ChevronDownIcon, PinIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -28,17 +28,30 @@ export default function MasterWorkspaceSidebar() {
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(SHORTCUTS_STORAGE_KEY);
-      if (stored) setShortcutIds(JSON.parse(stored) as readonly string[]);
+      if (stored) {
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          setShortcutIds([
+            ...new Set(parsed.filter((value): value is string => typeof value === "string")),
+          ]);
+        }
+      }
     } catch {
       // Local shortcuts are an enhancement. A blocked storage backend leaves the tree usable.
     }
   }, []);
 
-  const masters = useMemo(
-    () => threads.filter((thread) => isMasterThreadTitle(thread.title)),
+  const visibleThreads = useMemo(
+    () => threads.filter((thread) => thread.archivedAt == null),
     [threads],
   );
-  const shortcutMasters = masters.filter((thread) => shortcutIds.includes(thread.id));
+  const masters = useMemo(
+    () => visibleThreads.filter((thread) => isMasterThreadTitle(thread.title)),
+    [visibleThreads],
+  );
+  const shortcutMasters = masters.filter((thread) =>
+    shortcutIds.includes(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+  );
   const openThread = (thread: (typeof threads)[number]) => {
     void navigate({
       to: "/$environmentId/$threadId",
@@ -95,7 +108,7 @@ export default function MasterWorkspaceSidebar() {
             Projects
           </p>
           {projects.map((project) => {
-            const projectThreads = threads.filter(
+            const projectThreads = visibleThreads.filter(
               (thread) =>
                 thread.environmentId === project.environmentId && thread.projectId === project.id,
             );
@@ -104,6 +117,15 @@ export default function MasterWorkspaceSidebar() {
             );
             const oneOffs = projectThreads.filter(
               (thread) => !isMasterThreadTitle(thread.title) && !/^card\s*:/i.test(thread.title),
+            );
+            const ownedCardIds = new Set(
+              projectMasters.flatMap(
+                (master) =>
+                  deriveMasterBoard(master, projectThreads)?.cards.map((card) => card.id) ?? [],
+              ),
+            );
+            const orphanCards = projectThreads.filter(
+              (thread) => /^card\s*:/i.test(thread.title) && !ownedCardIds.has(thread.id),
             );
             return (
               <Collapsible key={`${project.environmentId}:${project.id}`} defaultOpen>
@@ -128,7 +150,9 @@ export default function MasterWorkspaceSidebar() {
                             <span className="min-w-0 flex-1 truncate text-left">
                               {shortTitle(master.title)}
                             </span>
-                            {shortcutIds.includes(master.id) ? (
+                            {shortcutIds.includes(
+                              scopedThreadKey(scopeThreadRef(master.environmentId, master.id)),
+                            ) ? (
                               <PinIcon className="size-3" />
                             ) : null}
                           </Button>
@@ -136,14 +160,24 @@ export default function MasterWorkspaceSidebar() {
                             variant="ghost"
                             size="icon-xs"
                             aria-label={
-                              shortcutIds.includes(master.id) ? "Unpin Master" : "Pin Master"
+                              shortcutIds.includes(
+                                scopedThreadKey(scopeThreadRef(master.environmentId, master.id)),
+                              )
+                                ? "Unpin Master"
+                                : "Pin Master"
                             }
-                            onClick={() => toggleShortcut(master.id)}
+                            onClick={() =>
+                              toggleShortcut(
+                                scopedThreadKey(scopeThreadRef(master.environmentId, master.id)),
+                              )
+                            }
                           >
                             <PinIcon
                               className={cn(
                                 "size-3",
-                                shortcutIds.includes(master.id) && "fill-current",
+                                shortcutIds.includes(
+                                  scopedThreadKey(scopeThreadRef(master.environmentId, master.id)),
+                                ) && "fill-current",
                               )}
                             />
                           </Button>
@@ -171,6 +205,23 @@ export default function MasterWorkspaceSidebar() {
                       <span className="min-w-0 truncate">{thread.title}</span>
                     </Button>
                   ))}
+                  {orphanCards.length > 0 ? (
+                    <div className="mt-1 border-t border-sidebar-border pt-1">
+                      <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                        Other work
+                      </p>
+                      {orphanCards.map((thread) => (
+                        <Button
+                          key={thread.id}
+                          variant="ghost"
+                          className="h-7 w-full justify-start px-2 text-xs font-normal text-muted-foreground"
+                          onClick={() => openThread(thread)}
+                        >
+                          <span className="min-w-0 truncate">{shortTitle(thread.title)}</span>
+                        </Button>
+                      ))}
+                    </div>
+                  ) : null}
                 </CollapsiblePanel>
               </Collapsible>
             );
