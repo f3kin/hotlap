@@ -2874,6 +2874,19 @@ export function GeneralSettingsPanel() {
 
       <SettingsSection id="projects-and-threads" title="Projects & threads">
         <SettingsRow
+          title="Master workspace"
+          description="Use Pinned Masters and compact project trees in this client. Existing sidebar preferences stay saved."
+          control={
+            <Switch
+              checked={settings.masterWorkspaceEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({ masterWorkspaceEnabled: Boolean(checked) })
+              }
+              aria-label="Master workspace"
+            />
+          }
+        />
+        <SettingsRow
           {...searchableSetting("master-status-board")}
           description="Show owned Card threads and other Masters above Master chats."
           resetAction={
