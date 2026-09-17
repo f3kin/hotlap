@@ -577,6 +577,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.masterStatusBoardEnabled !== DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled
         ? ["Master status board"]
         : []),
+      ...(settings.masterWorkspaceEnabled !== DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled
+        ? ["Master workspace"]
+        : []),
       ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
         ? ["Show skills in slash menu"]
         : []),
@@ -759,6 +762,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
       masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
+      masterWorkspaceEnabled: DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
