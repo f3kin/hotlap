@@ -56,8 +56,6 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   activeThread: T,
   allThreads: readonly T[],
 ): MasterBoardModel<T> | null {
-  if (!isMasterThreadTitle(activeThread.title)) return null;
-
   const projectThreads = allThreads.filter(
     (thread) =>
       thread.environmentId === activeThread.environmentId &&
@@ -65,18 +63,33 @@ export function deriveMasterBoard<T extends MasterBoardThread>(
   );
   const masters = projectThreads.filter((thread) => isMasterThreadTitle(thread.title));
   const threadById = new Map(projectThreads.map((thread) => [thread.id, thread]));
+  let master = isMasterThreadTitle(activeThread.title) ? activeThread : null;
+  if (master === null && isCardThreadTitle(activeThread.title)) {
+    const visited = new Set<string>();
+    let parentId = activeThread.forkedFrom?.threadId;
+    while (parentId !== undefined && !visited.has(parentId)) {
+      visited.add(parentId);
+      const parent = threadById.get(parentId);
+      if (parent !== undefined && isMasterThreadTitle(parent.title)) {
+        master = parent;
+        break;
+      }
+      parentId = parent?.forkedFrom?.threadId;
+    }
+  }
+  if (master === null) return null;
   const cards = projectThreads
     .filter(
       (thread) =>
         thread.archivedAt == null &&
         isCardThreadTitle(thread.title) &&
-        belongsToMaster(thread, activeThread.id, threadById),
+        belongsToMaster(thread, master.id, threadById),
     )
     .sort(newestFirst);
 
   return {
-    master: activeThread,
+    master,
     cards,
-    peerMasters: masters.filter((thread) => thread.id !== activeThread.id).sort(newestFirst),
+    peerMasters: masters.filter((thread) => thread.id !== master.id).sort(newestFirst),
   };
 }
