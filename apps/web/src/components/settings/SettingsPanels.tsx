@@ -657,6 +657,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffIgnoreWhitespace,
       settings.diffLayout,
       settings.masterStatusBoardEnabled,
+      settings.masterWorkspaceEnabled,
       settings.proactivePanelsEnabled,
       settings.environmentIdentificationMode,
       settings.contextWindowMeterEnabled,
@@ -2878,8 +2879,21 @@ export function GeneralSettingsPanel() {
 
       <SettingsSection id="projects-and-threads" title="Projects & threads">
         <SettingsRow
+          {...searchableSetting("master-workspace")}
           title="Master workspace"
           description="Use Pinned Masters and compact project trees in this client. Existing sidebar preferences stay saved."
+          resetAction={
+            settings.masterWorkspaceEnabled !== DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled ? (
+              <SettingResetButton
+                label="Master workspace"
+                onClick={() =>
+                  updateSettings({
+                    masterWorkspaceEnabled: DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled,
+                  })
+                }
+              />
+            ) : null
+          }
           control={
             <Switch
               checked={settings.masterWorkspaceEnabled}

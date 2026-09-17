@@ -170,4 +170,21 @@ describe("clientPersistenceStorage", () => {
       legacySidebarEnabled: true,
     });
   });
+
+  it("keeps the Master workspace preference across reloads independently", async () => {
+    getTestWindow();
+    const { readBrowserClientSettings, writeBrowserClientSettings } =
+      await import("./clientPersistenceStorage");
+    writeBrowserClientSettings({
+      ...DEFAULT_CLIENT_SETTINGS,
+      masterWorkspaceEnabled: true,
+      masterStatusBoardEnabled: false,
+      legacySidebarEnabled: true,
+    });
+    expect(readBrowserClientSettings()).toMatchObject({
+      masterWorkspaceEnabled: true,
+      masterStatusBoardEnabled: false,
+      legacySidebarEnabled: true,
+    });
+  });
 });

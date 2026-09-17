@@ -104,6 +104,10 @@ describe("searchSettings", () => {
       id: "master-status-board",
       to: "/settings/general",
     });
+    expect(searchSettings("personal master sidebar")[0]).toMatchObject({
+      id: "master-workspace",
+      to: "/settings/general",
+    });
   });
 
   it("lists thread confirmations in panel order", () => {
@@ -337,6 +341,10 @@ describe("settings search targets", () => {
     expect(getSettingsSearchTargetScope("appearance")).toMatchObject({ scope: null });
     expect(getSettingsSearchTargetScope("master-status-board")).toEqual({
       title: "Master status board",
+      scope: null,
+    });
+    expect(getSettingsSearchTargetScope("master-workspace")).toEqual({
+      title: "Master workspace",
       scope: null,
     });
     expect(getSettingsSearchTargetScope("missing-setting")).toBeNull();

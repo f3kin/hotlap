@@ -54,7 +54,7 @@ function CardRow(props: {
   return (
     <Button
       variant="ghost"
-      className="h-7 w-full justify-start gap-2 rounded-md px-2 text-xs font-normal"
+      className="h-7 min-h-11 w-full justify-start gap-2 rounded-md px-2 text-xs font-normal"
       onClick={() => props.onOpen(props.thread)}
     >
       <span className={cn("size-1.5 shrink-0 rounded-full", status.dot)} />
@@ -101,7 +101,7 @@ export function MasterStatusBoard(props: { readonly activeThread: Thread }) {
       className="mx-3 mt-2 shrink-0 rounded-lg border border-border/70 bg-muted/25"
       data-master-status-board=""
     >
-      <CollapsibleTrigger className="flex h-9 w-full min-w-0 items-center gap-2 px-3 text-left text-xs">
+      <CollapsibleTrigger className="flex h-9 min-h-11 w-full min-w-0 items-center gap-2 px-3 text-left text-xs">
         <NetworkIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <span className="shrink-0 whitespace-nowrap font-medium">Master board</span>
         <span className="min-w-0 truncate text-muted-foreground">
@@ -134,7 +134,7 @@ export function MasterStatusBoard(props: { readonly activeThread: Thread }) {
                 key={thread.id}
                 variant="ghost"
                 size="xs"
-                className="h-6 min-w-0 max-w-40 px-2 text-[11px]"
+                className="h-6 min-h-11 min-w-11 max-w-40 px-2 text-[11px]"
                 onClick={() => openThread(thread)}
               >
                 <span className="min-w-0 truncate">{shortTitle(thread.title)}</span>

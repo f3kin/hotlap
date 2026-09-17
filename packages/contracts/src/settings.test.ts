@@ -601,7 +601,7 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings sidebar", () => {
-  it("defaults the Master board off and keeps it independent from the legacy sidebar", () => {
+  it("defaults Master preferences off and keeps them independent from the legacy sidebar", () => {
     expect(decodeClientSettings({}).masterStatusBoardEnabled).toBe(false);
     expect(
       decodeClientSettings({ masterStatusBoardEnabled: true, legacySidebarEnabled: false })
@@ -615,6 +615,19 @@ describe("ClientSettings sidebar", () => {
       masterStatusBoardEnabled: true,
     });
     expect(() => decodeClientSettingsPatch({ masterStatusBoardEnabled: "yes" })).toThrow();
+    expect(decodeClientSettings({}).masterWorkspaceEnabled).toBe(false);
+    expect(
+      decodeClientSettings({ masterWorkspaceEnabled: true, masterStatusBoardEnabled: false })
+        .masterWorkspaceEnabled,
+    ).toBe(true);
+    expect(
+      decodeClientSettings({ masterWorkspaceEnabled: true, masterStatusBoardEnabled: false })
+        .masterStatusBoardEnabled,
+    ).toBe(false);
+    expect(decodeClientSettingsPatch({ masterWorkspaceEnabled: true })).toEqual({
+      masterWorkspaceEnabled: true,
+    });
+    expect(() => decodeClientSettingsPatch({ masterWorkspaceEnabled: "yes" })).toThrow();
   });
 
   it("defaults to the current sidebar", () => {
