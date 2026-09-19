@@ -14,7 +14,9 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { cn } from "~/lib/utils";
 import { isElectron } from "~/env";
 import { openCommandPalette } from "~/commandPaletteBus";
-import { useProjects, useThreadShells } from "~/state/entities";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import type { EnvironmentId } from "@t3tools/contracts";
+import { useProjects } from "~/state/entities";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "~/threadRoutes";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
 import { startNewThreadFromContext } from "~/lib/chatThreadActions";
@@ -25,6 +27,7 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChro
 import { SidebarThreadHeader } from "../sidebar/SidebarThreadHeader";
 import { deriveMasterWorkspace, isMasterThreadTitle } from "./MasterStatusBoard.logic";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { useMasterLineageThreads } from "./useMasterLineageThreads";
 import { useMasterWorkspaceEnabled } from "./useMasterSettings";
 import {
   ThreadRowLeadingStatus,
@@ -69,7 +72,7 @@ function projectWorkSummary(
   return `${group.orphanCards.length} Orphan Cards`;
 }
 
-type ThreadRow = ReturnType<typeof useThreadShells>[number];
+type ThreadRow = EnvironmentThreadShell;
 
 function ThreadButton({
   thread,
@@ -116,7 +119,11 @@ export function MasterWorkspaceSidebarSlot(props: { readonly fallback: ReactNode
 
 function MasterWorkspaceSidebar() {
   const projects = useProjects();
-  const threads = useThreadShells();
+  const environmentIds = useMemo(
+    () => [...new Set(projects.map((project) => project.environmentId))] as EnvironmentId[],
+    [projects],
+  );
+  const threads = useMasterLineageThreads(environmentIds);
   const navigate = useNavigate();
   const params = useParams({ strict: false });
   const activeRef = resolveThreadRouteRef(params);
@@ -143,7 +150,15 @@ function MasterWorkspaceSidebar() {
     () => visibleThreads.filter((thread) => isMasterThreadTitle(thread.title)),
     [visibleThreads],
   );
-  const workspace = useMemo(() => deriveMasterWorkspace(threads), [threads]);
+  const workspace = useMemo(
+    () =>
+      deriveMasterWorkspace({
+        threads,
+        projects: [],
+        shelfOf: (thread) => (thread.settledOverride === "settled" ? "settled" : "active"),
+      }),
+    [threads],
+  );
   const shortcutMasters = masters.filter((thread) =>
     shortcutIds.includes(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );

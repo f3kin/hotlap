@@ -6,7 +6,6 @@ export interface MasterBoardThread {
   readonly updatedAt: string;
   readonly forkedFrom?: { readonly threadId: string } | undefined;
   readonly archivedAt?: string | null | undefined;
-  readonly settledOverride?: "settled" | "active" | null | undefined;
 }
 
 export interface MasterBoardModel<T extends MasterBoardThread> {
@@ -14,6 +13,9 @@ export interface MasterBoardModel<T extends MasterBoardThread> {
   readonly cards: readonly T[];
   readonly peerMasters: readonly T[];
 }
+
+/** Which sidebar shelf a live thread sits on. */
+export type MasterShelf = "active" | "snoozed" | "settled";
 
 export interface MasterWorkspaceProject<T extends MasterBoardThread> {
   readonly environmentId: string;
@@ -26,6 +28,7 @@ export interface MasterWorkspaceProject<T extends MasterBoardThread> {
 
 export interface MasterWorkspaceModel<T extends MasterBoardThread> {
   readonly activeProjects: readonly MasterWorkspaceProject<T>[];
+  readonly snoozedProjects: readonly MasterWorkspaceProject<T>[];
   readonly settledProjects: readonly MasterWorkspaceProject<T>[];
 }
 
@@ -40,6 +43,10 @@ export function isCardThreadTitle(title: string): boolean {
   return CARD_TITLE.test(title.trim());
 }
 
+function threadKey(thread: { readonly environmentId: string; readonly id: string }): string {
+  return `${thread.environmentId}:${thread.id}`;
+}
+
 function newestFirst<T extends MasterBoardThread>(left: T, right: T): number {
   const leftTime = Date.parse(left.updatedAt);
   const rightTime = Date.parse(right.updatedAt);
@@ -48,28 +55,35 @@ function newestFirst<T extends MasterBoardThread>(left: T, right: T): number {
   return difference === 0 ? left.id.localeCompare(right.id) : difference;
 }
 
-function belongsToMaster<T extends MasterBoardThread>(
-  thread: T,
-  ancestorId: string,
-  threadById: ReadonlyMap<string, T>,
-): boolean {
-  const visited = new Set<string>();
-  let parentId = thread.forkedFrom?.threadId;
-
-  while (parentId !== undefined && !visited.has(parentId)) {
-    visited.add(parentId);
-    const parent = threadById.get(parentId);
-    if (parent !== undefined && isMasterThreadTitle(parent.title)) return parent.id === ancestorId;
-    parentId = parent?.forkedFrom?.threadId;
+/**
+ * Live shells plus archived records, one row per thread. The live stream is
+ * authoritative: an archived snapshot can be stale (a thread unarchived on
+ * another device), so it only fills in threads the live stream lacks.
+ */
+export function mergeLiveAndArchivedThreads<T extends MasterBoardThread>(
+  live: readonly T[],
+  archived: readonly T[],
+): readonly T[] {
+  if (archived.length === 0) return live;
+  const liveKeys = new Set(live.map(threadKey));
+  const merged = [...live];
+  for (const thread of archived) {
+    if (!liveKeys.has(threadKey(thread))) merged.push(thread);
   }
-
-  return false;
+  return merged;
 }
 
-function ownerByCardId<T extends MasterBoardThread>(threads: readonly T[]): ReadonlyMap<string, T> {
-  const byScopedId = new Map(
-    threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread]),
-  );
+/**
+ * Card -> owning Master, keyed by scoped thread key. The nearest Master in a
+ * Card's fork chain owns it. Lineage is resolved across the whole environment
+ * (a Card often lives in another project/worktree than its Master) and walks
+ * archived records too, since lineage is durable data, not a visibility
+ * concern. Both the sidebar and the board read ownership from here.
+ */
+export function resolveCardOwners<T extends MasterBoardThread>(
+  threads: readonly T[],
+): ReadonlyMap<string, T> {
+  const byKey = new Map(threads.map((thread) => [threadKey(thread), thread]));
   const owners = new Map<string, T>();
   for (const card of threads) {
     if (!isCardThreadTitle(card.title)) continue;
@@ -77,9 +91,9 @@ function ownerByCardId<T extends MasterBoardThread>(threads: readonly T[]): Read
     let parentId = card.forkedFrom?.threadId;
     while (parentId !== undefined && !visited.has(parentId)) {
       visited.add(parentId);
-      const parent = byScopedId.get(`${card.environmentId}:${parentId}`);
+      const parent = byKey.get(`${card.environmentId}:${parentId}`);
       if (parent !== undefined && isMasterThreadTitle(parent.title)) {
-        owners.set(`${card.environmentId}:${card.id}`, parent);
+        owners.set(threadKey(card), parent);
         break;
       }
       parentId = parent?.forkedFrom?.threadId;
@@ -89,143 +103,136 @@ function ownerByCardId<T extends MasterBoardThread>(threads: readonly T[]): Read
 }
 
 /**
- * Projects the sidebar from persisted fork lineage. A Card can live in a
- * different worktree/project from its Master, so ownership is resolved across
- * an environment before rows are assigned to a project bucket.
+ * Projects the sidebar. Every known project gets an active row, even with no
+ * threads yet. Snoozed and settled threads move to their own shelves; a Master
+ * still owning Cards on a shelf (or archived) appears there as a header.
  */
-export function deriveMasterWorkspace<T extends MasterBoardThread>(
-  threads: readonly T[],
-): MasterWorkspaceModel<T> {
-  const visible = threads.filter((thread) => thread.archivedAt == null);
-  // Retain archived records here: an active imported Card can have an
-  // archived intermediate parent or owner, and lineage is durable data rather
-  // than a visibility concern.
-  const owners = ownerByCardId(threads);
-  const build = (settled: boolean): readonly MasterWorkspaceProject<T>[] => {
-    const selected = visible.filter((thread) => (thread.settledOverride === "settled") === settled);
-    const projectRows = new Map<
+export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
+  readonly threads: readonly T[];
+  readonly projects: ReadonlyArray<{ readonly environmentId: string; readonly id: string }>;
+  readonly shelfOf: (thread: T) => MasterShelf;
+}): MasterWorkspaceModel<T> {
+  const owners = resolveCardOwners(input.threads);
+  const live = input.threads.filter((thread) => thread.archivedAt == null);
+  const shelfByKey = new Map(live.map((thread) => [threadKey(thread), input.shelfOf(thread)]));
+  const projectOrder = new Map(
+    input.projects.map((project, index) => [`${project.environmentId}:${project.id}`, index]),
+  );
+  const orderOf = (row: { environmentId: string; projectId: string }) =>
+    projectOrder.get(`${row.environmentId}:${row.projectId}`) ?? Number.MAX_SAFE_INTEGER;
+
+  const build = (
+    shelf: MasterShelf,
+    seedProjects: boolean,
+  ): readonly MasterWorkspaceProject<T>[] => {
+    const rows = new Map<
       string,
       { environmentId: string; projectId: string; masters: T[]; oneOffs: T[]; orphanCards: T[] }
     >();
     const bucket = (environmentId: string, projectId: string) => {
       const key = `${environmentId}:${projectId}`;
-      let entry = projectRows.get(key);
+      let entry = rows.get(key);
       if (!entry) {
         entry = { environmentId, projectId, masters: [], oneOffs: [], orphanCards: [] };
-        projectRows.set(key, entry);
+        rows.set(key, entry);
       }
       return entry;
     };
+    if (seedProjects) {
+      for (const project of input.projects) bucket(project.environmentId, project.id);
+    }
+    const members = live.filter((thread) => shelfByKey.get(threadKey(thread)) === shelf);
+    const memberKeys = new Set(members.map(threadKey));
     const cardsByOwner = new Map<string, T[]>();
-    const ownerByKey = new Map<string, T>();
-    for (const thread of selected) {
-      if (isMasterThreadTitle(thread.title)) continue;
-      if (isCardThreadTitle(thread.title)) {
-        const owner = owners.get(`${thread.environmentId}:${thread.id}`);
+    const mastersByKey = new Map<string, T>();
+    for (const thread of members) {
+      if (isMasterThreadTitle(thread.title)) {
+        mastersByKey.set(threadKey(thread), thread);
+      } else if (isCardThreadTitle(thread.title)) {
+        const owner = owners.get(threadKey(thread));
         if (!owner) {
           bucket(thread.environmentId, thread.projectId).orphanCards.push(thread);
           continue;
         }
-        const ownerKey = `${owner.environmentId}:${owner.id}`;
-        ownerByKey.set(ownerKey, owner);
-        const cards = cardsByOwner.get(ownerKey) ?? [];
+        mastersByKey.set(threadKey(owner), owner);
+        const cards = cardsByOwner.get(threadKey(owner)) ?? [];
         cards.push(thread);
-        cardsByOwner.set(ownerKey, cards);
+        cardsByOwner.set(threadKey(owner), cards);
       } else {
         bucket(thread.environmentId, thread.projectId).oneOffs.push(thread);
       }
     }
-    // Masters in this shelf plus structural Masters that own Cards in this
-    // shelf. The latter prevents mixed-lifecycle work from losing ownership;
-    // visibleCount below keeps structural headers out of the shelf count.
-    for (const master of selected.filter((thread) => isMasterThreadTitle(thread.title))) {
-      ownerByKey.set(`${master.environmentId}:${master.id}`, master);
-    }
-    for (const [, master] of ownerByKey) {
-      if (!isMasterThreadTitle(master.title)) continue;
+    for (const master of mastersByKey.values()) {
       bucket(master.environmentId, master.projectId).masters.push(master);
     }
-    return [...projectRows.entries()]
-      .map(([, rows]) => {
-        return {
-          environmentId: rows.environmentId,
-          projectId: rows.projectId,
-          masters: rows.masters.sort(newestFirst).map((master) => ({
-            master,
-            cards: (cardsByOwner.get(`${master.environmentId}:${master.id}`) ?? []).sort(
-              newestFirst,
-            ),
-            peerMasters: [],
-          })),
-          oneOffs: rows.oneOffs.sort(newestFirst),
-          orphanCards: rows.orphanCards.sort(newestFirst),
-          visibleCount:
-            rows.masters.filter((master) =>
-              selected.some(
-                (thread) =>
-                  thread.environmentId === master.environmentId && thread.id === master.id,
-              ),
-            ).length +
-            rows.masters.reduce(
-              (count, master) =>
-                count + (cardsByOwner.get(`${master.environmentId}:${master.id}`)?.length ?? 0),
-              0,
-            ) +
-            rows.oneOffs.length +
-            rows.orphanCards.length,
-        };
-      })
-      .sort((left, right) =>
-        `${left.environmentId}:${left.projectId}`.localeCompare(
-          `${right.environmentId}:${right.projectId}`,
-        ),
-      );
+    return [...rows.values()]
+      .sort((left, right) => orderOf(left) - orderOf(right))
+      .map((row) => ({
+        environmentId: row.environmentId,
+        projectId: row.projectId,
+        masters: row.masters.sort(newestFirst).map((master) => ({
+          master,
+          cards: (cardsByOwner.get(threadKey(master)) ?? []).sort(newestFirst),
+          peerMasters: [],
+        })),
+        oneOffs: row.oneOffs.sort(newestFirst),
+        orphanCards: row.orphanCards.sort(newestFirst),
+        // Structural Master headers (owned elsewhere or archived) don't count.
+        visibleCount:
+          row.masters.filter((master) => memberKeys.has(threadKey(master))).length +
+          row.masters.reduce(
+            (count, master) => count + (cardsByOwner.get(threadKey(master))?.length ?? 0),
+            0,
+          ) +
+          row.oneOffs.length +
+          row.orphanCards.length,
+      }));
   };
-  return { activeProjects: build(false), settledProjects: build(true) };
+
+  return {
+    activeProjects: build("active", true),
+    snoozedProjects: build("snoozed", false),
+    settledProjects: build("settled", false),
+  };
 }
 
+/**
+ * The board for a Master, or for a Card's owning Master. `threads` must carry
+ * the same environment-wide, archive-aware lineage the sidebar uses, so the
+ * two always agree about who owns a Card.
+ */
 export function deriveMasterBoard<T extends MasterBoardThread>(
   activeThread: T,
-  allThreads: readonly T[],
+  threads: readonly T[],
 ): MasterBoardModel<T> | null {
-  const projectThreads = allThreads.filter(
-    (thread) =>
-      thread.environmentId === activeThread.environmentId &&
-      thread.projectId === activeThread.projectId,
+  const environmentThreads = threads.filter(
+    (thread) => thread.environmentId === activeThread.environmentId,
   );
-  const masters = projectThreads.filter((thread) => isMasterThreadTitle(thread.title));
-  const threadById = new Map(projectThreads.map((thread) => [thread.id, thread]));
-  let master = isMasterThreadTitle(activeThread.title) ? activeThread : null;
-  if (master === null && isCardThreadTitle(activeThread.title)) {
-    const visited = new Set<string>();
-    let parentId = activeThread.forkedFrom?.threadId;
-    while (parentId !== undefined && !visited.has(parentId)) {
-      visited.add(parentId);
-      const parent = threadById.get(parentId);
-      if (parent !== undefined && isMasterThreadTitle(parent.title)) {
-        master = parent;
-        break;
-      }
-      parentId = parent?.forkedFrom?.threadId;
-    }
-  }
+  const owners = resolveCardOwners(environmentThreads);
+  const master = isMasterThreadTitle(activeThread.title)
+    ? activeThread
+    : isCardThreadTitle(activeThread.title)
+      ? (owners.get(threadKey(activeThread)) ?? null)
+      : null;
   if (master === null) return null;
-  const cards = projectThreads
-    .filter(
-      (thread) =>
-        thread.archivedAt == null &&
-        isCardThreadTitle(thread.title) &&
-        belongsToMaster(thread, master.id, threadById),
-    )
-    .sort(newestFirst);
 
   return {
     master,
-    cards,
-    // Archived Masters may be needed to resolve the owner of an active Card,
-    // but they must not reappear as navigable peer work.
-    peerMasters: masters
-      .filter((thread) => thread.id !== master.id && thread.archivedAt == null)
+    cards: environmentThreads
+      .filter(
+        (thread) => thread.archivedAt == null && owners.get(threadKey(thread))?.id === master.id,
+      )
+      .sort(newestFirst),
+    // Archived Masters may own active Cards, but must not reappear as
+    // navigable peer work.
+    peerMasters: environmentThreads
+      .filter(
+        (thread) =>
+          thread.id !== master.id &&
+          thread.projectId === master.projectId &&
+          thread.archivedAt == null &&
+          isMasterThreadTitle(thread.title),
+      )
       .sort(newestFirst),
   };
 }

@@ -1,18 +1,24 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ChevronDownIcon, NetworkIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
+import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+
+import { useNowMinute } from "~/hooks/useNowMinute";
 import { cn } from "~/lib/utils";
-import { useThreadShellsForProjectRefs } from "~/state/entities";
-import { useArchivedThreadSnapshots } from "~/lib/archivedThreadsState";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import type { Thread } from "~/types";
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "../Sidebar.logic";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
-import { deriveMasterBoard } from "./MasterStatusBoard.logic";
+import {
+  deriveMasterBoard,
+  isCardThreadTitle,
+  isMasterThreadTitle,
+} from "./MasterStatusBoard.logic";
+import { useMasterLineageThreads } from "./useMasterLineageThreads";
 import { useMasterStatusBoardEnabled } from "./useMasterSettings";
 
 const STATUS_LABEL: Record<SidebarThreadStatus, string> = {
@@ -33,10 +39,17 @@ const STATUS_DOT: Record<SidebarThreadStatus, string> = {
   ready: "bg-emerald-500",
 };
 
-function cardStatus(thread: EnvironmentThreadShell): {
+function cardStatus(
+  thread: EnvironmentThreadShell,
+  now: string,
+): {
   readonly label: string;
   readonly dot: string;
 } {
+  // Same precedence as the sidebar shelves: snooze outranks settlement.
+  if (effectiveSnoozed(thread, { now })) {
+    return { label: "Snoozed", dot: "bg-muted-foreground/60" };
+  }
   if (thread.settledOverride === "settled") {
     return { label: "Completed", dot: "bg-muted-foreground" };
   }
@@ -50,9 +63,10 @@ function shortTitle(title: string): string {
 
 function CardRow(props: {
   readonly thread: EnvironmentThreadShell;
+  readonly now: string;
   readonly onOpen: (thread: EnvironmentThreadShell) => void;
 }) {
-  const status = cardStatus(props.thread);
+  const status = cardStatus(props.thread, props.now);
   return (
     <Button
       variant="ghost"
@@ -66,36 +80,24 @@ function CardRow(props: {
   );
 }
 
-/** Mount point for ChatView. Reads its own setting. */
+/**
+ * Mount point for ChatView. Reads its own setting, and only mounts the board
+ * (and its archived-lineage fetch) for Master and Card threads.
+ */
 export function MasterStatusBoardSlot(props: { readonly activeThread: Thread }) {
-  return useMasterStatusBoardEnabled() ? (
-    <MasterStatusBoard activeThread={props.activeThread} />
-  ) : null;
+  const enabled = useMasterStatusBoardEnabled();
+  const { title } = props.activeThread;
+  if (!enabled || (!isMasterThreadTitle(title) && !isCardThreadTitle(title))) return null;
+  return <MasterStatusBoard activeThread={props.activeThread} />;
 }
 
 function MasterStatusBoard(props: { readonly activeThread: Thread }) {
-  const projectRefs = useMemo(
-    () => [scopeProjectRef(props.activeThread.environmentId, props.activeThread.projectId)],
-    [props.activeThread.environmentId, props.activeThread.projectId],
+  const environmentIds = useMemo(
+    () => [props.activeThread.environmentId],
+    [props.activeThread.environmentId],
   );
-  const threads = useThreadShellsForProjectRefs(projectRefs);
-  // The live shell stream deliberately excludes archived threads. Master
-  // ownership is lineage-based, however, so an archived Master still needs to
-  // be available while resolving its active Cards.
-  const { snapshots: archivedSnapshots } = useArchivedThreadSnapshots([
-    props.activeThread.environmentId,
-  ]);
-  const threadsWithArchivedLineage = useMemo(() => {
-    const byKey = new Map(
-      threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread] as const),
-    );
-    for (const { environmentId, snapshot } of archivedSnapshots) {
-      for (const thread of snapshot.threads) {
-        byKey.set(`${environmentId}:${thread.id}`, { ...thread, environmentId });
-      }
-    }
-    return [...byKey.values()];
-  }, [archivedSnapshots, threads]);
+  const threads = useMasterLineageThreads(environmentIds);
+  const now = useNowMinute();
   const navigate = useNavigate();
   const [open, setOpen] = useState(true);
   const board = useMemo(() => {
@@ -104,10 +106,8 @@ function MasterStatusBoard(props: { readonly activeThread: Thread }) {
         thread.environmentId === props.activeThread.environmentId &&
         thread.id === props.activeThread.id,
     );
-    return activeThreadShell
-      ? deriveMasterBoard(activeThreadShell, threadsWithArchivedLineage)
-      : null;
-  }, [props.activeThread.environmentId, props.activeThread.id, threadsWithArchivedLineage]);
+    return activeThreadShell ? deriveMasterBoard(activeThreadShell, threads) : null;
+  }, [props.activeThread.environmentId, props.activeThread.id, threads]);
 
   if (board === null) return null;
 
@@ -148,7 +148,7 @@ function MasterStatusBoard(props: { readonly activeThread: Thread }) {
         {board.cards.length > 0 ? (
           <div className="flex flex-col gap-px">
             {board.cards.map((thread) => (
-              <CardRow key={thread.id} thread={thread} onOpen={openThread} />
+              <CardRow key={thread.id} thread={thread} now={now} onOpen={openThread} />
             ))}
           </div>
         ) : (

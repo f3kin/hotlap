@@ -5,171 +5,209 @@ import {
   deriveMasterWorkspace,
   isCardThreadTitle,
   isMasterThreadTitle,
+  mergeLiveAndArchivedThreads,
   type MasterBoardThread,
+  type MasterShelf,
 } from "./MasterStatusBoard.logic";
 
-function thread(
-  id: string,
-  title: string,
-  options: Partial<MasterBoardThread> = {},
-): MasterBoardThread {
+interface TestThread extends MasterBoardThread {
+  readonly shelf?: MasterShelf;
+}
+
+function thread(id: string, title: string, options: Partial<TestThread> = {}): TestThread {
   return {
     id,
     title,
-    environmentId: "personal-vps",
-    projectId: "hourglass-infra",
+    environmentId: "env-a",
+    projectId: "orchard",
     updatedAt: "2026-09-16T00:00:00.000Z",
     ...options,
   };
 }
 
-describe("MasterStatusBoard logic", () => {
-  it("projects only active work and keeps settled-only projects in the settled shelf", () => {
-    const master = thread("master", "Master: Fleet", { projectId: "infra" });
-    const card = thread("card", "Card: Verify", {
-      projectId: "separate-worktree",
-      forkedFrom: { threadId: master.id },
-    });
-    const chat = thread("chat", "One-off chat", { projectId: "infra" });
-    const settledMaster = thread("settled-master", "Master: Done", {
-      projectId: "settled-only",
-      settledOverride: "settled",
-    });
-    const settledCard = thread("settled-card", "Card: Done", {
-      projectId: "settled-only",
-      settledOverride: "settled",
-      forkedFrom: { threadId: settledMaster.id },
-    });
+const ARCHIVED = "2026-09-10T00:00:00.000Z";
 
-    const workspace = deriveMasterWorkspace([master, card, chat, settledMaster, settledCard]);
+function workspace(threads: readonly TestThread[], projectIds: readonly string[] = []) {
+  return deriveMasterWorkspace({
+    threads,
+    projects: projectIds.map((id) => ({ environmentId: "env-a", id })),
+    shelfOf: (item) => item.shelf ?? "active",
+  });
+}
 
-    expect(workspace.activeProjects).toHaveLength(1);
-    expect(workspace.activeProjects[0]).toMatchObject({ projectId: "infra", oneOffs: [chat] });
-    expect(workspace.activeProjects[0]?.masters[0]?.cards).toEqual([card]);
-    expect(workspace.settledProjects).toHaveLength(1);
-    expect(workspace.settledProjects[0]?.projectId).toBe("settled-only");
-    expect(workspace.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
+describe("deriveMasterWorkspace", () => {
+  it("gives every known project a row, including one with no threads", () => {
+    const master = thread("master", "Master: Harvest", { projectId: "orchard" });
+
+    const model = workspace([master], ["orchard", "empty-greenhouse"]);
+
+    expect(model.activeProjects.map((group) => group.projectId)).toEqual([
+      "orchard",
+      "empty-greenhouse",
+    ]);
+    expect(model.activeProjects[1]).toMatchObject({
+      masters: [],
+      oneOffs: [],
+      orphanCards: [],
+      visibleCount: 0,
+    });
   });
 
-  it("keeps genuinely unknown Cards in an explicit orphan fallback", () => {
-    const master = thread("master", "Master: Fleet");
-    const orphan = thread("orphan", "Card: Imported without lineage", {
-      projectId: "imports",
+  it("files work under its shelf, keeping a Card with its Master across worktrees", () => {
+    const master = thread("master", "Master: Harvest");
+    const card = thread("card", "Card: Prune", {
+      projectId: "orchard-worktree",
+      forkedFrom: { threadId: master.id },
     });
-    const workspace = deriveMasterWorkspace([master, orphan]);
+    const chat = thread("chat", "Quick question");
+    const snoozed = thread("snoozed", "Later question", { shelf: "snoozed" });
+    const settledMaster = thread("settled-master", "Master: Done", {
+      projectId: "barn",
+      shelf: "settled",
+    });
+
+    const model = workspace([master, card, chat, snoozed, settledMaster], ["orchard", "barn"]);
+
+    const orchard = model.activeProjects.find((group) => group.projectId === "orchard");
+    expect(orchard?.masters[0]?.cards).toEqual([card]);
+    expect(orchard?.oneOffs).toEqual([chat]);
+    expect(model.snoozedProjects).toHaveLength(1);
+    expect(model.snoozedProjects[0]?.oneOffs).toEqual([snoozed]);
+    expect(model.settledProjects[0]).toMatchObject({ projectId: "barn", visibleCount: 1 });
+  });
+
+  it("keeps Cards without Master lineage in an explicit orphan fallback", () => {
+    const master = thread("master", "Master: Harvest");
+    const orphan = thread("orphan", "Card: Imported", { projectId: "imports" });
+
+    const model = workspace([master, orphan]);
 
     expect(
-      workspace.activeProjects.find((project) => project.projectId === "imports")?.orphanCards,
+      model.activeProjects.find((group) => group.projectId === "imports")?.orphanCards,
     ).toEqual([orphan]);
   });
 
-  it("retains archived lineage and a structural owner across lifecycle shelves", () => {
-    const archivedMaster = thread("master", "Master: Archived", {
-      archivedAt: "2026-09-10T00:00:00.000Z",
-      projectId: "infra",
-    });
+  it("keeps an archived Master as the structural owner of its live Cards", () => {
+    const archivedMaster = thread("master", "Master: Archived", { archivedAt: ARCHIVED });
     const archivedParent = thread("parent", "Card: Old parent", {
-      archivedAt: "2026-09-10T00:00:00.000Z",
+      archivedAt: ARCHIVED,
       forkedFrom: { threadId: archivedMaster.id },
     });
-    const activeCard = thread("active", "Card: Imported continuation", {
-      projectId: "separate-worktree",
+    const activeCard = thread("active", "Card: Continuation", {
+      projectId: "orchard-worktree",
       forkedFrom: { threadId: archivedParent.id },
     });
     const settledCard = thread("settled", "Card: Settled continuation", {
-      projectId: "separate-worktree",
-      settledOverride: "settled",
+      shelf: "settled",
       forkedFrom: { threadId: archivedMaster.id },
     });
 
-    const workspace = deriveMasterWorkspace([
-      archivedMaster,
-      archivedParent,
-      activeCard,
-      settledCard,
-    ]);
+    const model = workspace([archivedMaster, archivedParent, activeCard, settledCard]);
 
-    expect(workspace.activeProjects[0]?.masters[0]?.cards).toEqual([activeCard]);
-    expect(workspace.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
-    expect(workspace.activeProjects[0]?.orphanCards).toEqual([]);
-    expect(workspace.settledProjects[0]?.orphanCards).toEqual([]);
+    expect(model.activeProjects[0]?.masters[0]).toMatchObject({
+      master: archivedMaster,
+      cards: [activeCard],
+    });
+    expect(model.activeProjects[0]?.visibleCount).toBe(1);
+    expect(model.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
+    expect(model.activeProjects.flatMap((group) => group.orphanCards)).toEqual([]);
   });
+});
+
+describe("sidebar and board agreement", () => {
+  it("both place a live Card under its archived Master", () => {
+    const archivedMaster = thread("master", "Master: Archived", { archivedAt: ARCHIVED });
+    const card = thread("card", "Card: Still running", {
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const threads = [archivedMaster, card];
+
+    const sidebarOwner = workspace(threads).activeProjects[0]?.masters[0]?.master;
+    const board = deriveMasterBoard(card, threads);
+
+    expect(sidebarOwner).toBe(archivedMaster);
+    expect(board?.master).toBe(archivedMaster);
+    expect(board?.cards).toEqual([card]);
+  });
+
+  it("both resolve a Card living in another project or worktree", () => {
+    const master = thread("master", "Master: Harvest", { projectId: "orchard" });
+    const card = thread("card", "Card: Elsewhere", {
+      projectId: "orchard-worktree",
+      forkedFrom: { threadId: master.id },
+    });
+    const threads = [master, card];
+
+    expect(workspace(threads).activeProjects[0]?.masters[0]?.cards).toEqual([card]);
+    expect(deriveMasterBoard(master, threads)?.cards).toEqual([card]);
+    expect(deriveMasterBoard(card, threads)?.master).toBe(master);
+  });
+});
+
+describe("mergeLiveAndArchivedThreads", () => {
+  it("lets a live row win over a stale archived record, so unarchiving never hides a Card", () => {
+    const master = thread("master", "Master: Harvest");
+    const liveCard = thread("card", "Card: Unarchived", { forkedFrom: { threadId: master.id } });
+    const staleArchivedCard = { ...liveCard, archivedAt: ARCHIVED };
+    const archivedOnly = thread("gone", "Card: Archived", {
+      archivedAt: ARCHIVED,
+      forkedFrom: { threadId: master.id },
+    });
+
+    const merged = mergeLiveAndArchivedThreads(
+      [master, liveCard],
+      [staleArchivedCard, archivedOnly],
+    );
+
+    expect(merged).toEqual([master, liveCard, archivedOnly]);
+    expect(deriveMasterBoard(master, merged)?.cards).toEqual([liveCard]);
+  });
+});
+
+describe("deriveMasterBoard", () => {
   it("recognises Master and Card prefixes without depending on casing or spacing", () => {
-    expect(isMasterThreadTitle(" Master: Fleet")).toBe(true);
-    expect(isMasterThreadTitle("master : Brain")).toBe(true);
-    expect(isCardThreadTitle("CARD: Verify deploy")).toBe(true);
-    expect(isCardThreadTitle("Fleet planning")).toBe(false);
+    expect(isMasterThreadTitle(" Master: Harvest")).toBe(true);
+    expect(isMasterThreadTitle("master : Harvest")).toBe(true);
+    expect(isCardThreadTitle("CARD: Prune")).toBe(true);
+    expect(isCardThreadTitle("Harvest planning")).toBe(false);
   });
 
   it("associates cards through direct and nested fork lineage", () => {
-    const master = thread("master", "Master: Fleet");
-    const direct = thread("direct", "Card: Direct", {
-      forkedFrom: { threadId: master.id },
-    });
-    const nested = thread("nested", "Card: Nested", {
-      forkedFrom: { threadId: direct.id },
-    });
+    const master = thread("master", "Master: Harvest");
+    const direct = thread("direct", "Card: Direct", { forkedFrom: { threadId: master.id } });
+    const nested = thread("nested", "Card: Nested", { forkedFrom: { threadId: direct.id } });
 
     expect(deriveMasterBoard(master, [master, direct, nested])?.cards).toEqual([direct, nested]);
   });
 
-  it("keeps unowned cards out of a board, even when there is one Master", () => {
-    const master = thread("master", "Master: Fleet");
-    const unowned = thread("unowned", "Card: Existing work");
+  it("never guesses ownership for unlinked Cards", () => {
+    const harvest = thread("harvest", "Master: Harvest");
+    const planting = thread("planting", "Master: Planting");
+    const linked = thread("linked", "Card: Linked", { forkedFrom: { threadId: harvest.id } });
+    const unlinked = thread("unlinked", "Card: Unlinked");
 
-    expect(deriveMasterBoard(master, [master, unowned])?.cards).toEqual([]);
-  });
-
-  it("does not guess ownership when a project has multiple Masters", () => {
-    const fleet = thread("fleet", "Master: Fleet");
-    const migration = thread("migration", "Master: Migration");
-    const linked = thread("linked", "Card: Fleet check", {
-      forkedFrom: { threadId: fleet.id },
-    });
-    const ambiguous = thread("ambiguous", "Card: Old card");
-
-    const board = deriveMasterBoard(fleet, [fleet, migration, linked, ambiguous]);
+    const board = deriveMasterBoard(harvest, [harvest, planting, linked, unlinked]);
 
     expect(board?.cards).toEqual([linked]);
-    expect(board?.peerMasters).toEqual([migration]);
+    expect(board?.peerMasters).toEqual([planting]);
   });
 
   it("assigns cards to their nearest Master ancestor", () => {
-    const fleet = thread("fleet", "Master: Fleet");
-    const migration = thread("migration", "Master: Migration", {
-      forkedFrom: { threadId: fleet.id },
+    const harvest = thread("harvest", "Master: Harvest");
+    const planting = thread("planting", "Master: Planting", {
+      forkedFrom: { threadId: harvest.id },
     });
-    const card = thread("card", "Card: Migration check", {
-      forkedFrom: { threadId: migration.id },
-    });
+    const card = thread("card", "Card: Seed check", { forkedFrom: { threadId: planting.id } });
 
-    expect(deriveMasterBoard(fleet, [fleet, migration, card])?.cards).toEqual([]);
-    expect(deriveMasterBoard(migration, [fleet, migration, card])?.cards).toEqual([card]);
-  });
-
-  it("keeps completed and stale cards with their owning Master", () => {
-    const master = thread("master", "Master: Fleet");
-    const completed = thread("completed", "Card: Completed", {
-      forkedFrom: { threadId: master.id },
-      updatedAt: "2026-09-01T00:00:00.000Z",
-      settledOverride: "settled",
-    });
-    const stale = thread("stale", "Card: Stale", {
-      forkedFrom: { threadId: master.id },
-      updatedAt: "2026-08-01T00:00:00.000Z",
-    });
-
-    expect(deriveMasterBoard(master, [master, stale, completed])?.cards).toEqual([
-      completed,
-      stale,
-    ]);
+    expect(deriveMasterBoard(harvest, [harvest, planting, card])?.cards).toEqual([]);
+    expect(deriveMasterBoard(planting, [harvest, planting, card])?.cards).toEqual([card]);
   });
 
   it("excludes archived cards but retains their lineage for a live descendant", () => {
-    const master = thread("master", "Master: Fleet");
+    const master = thread("master", "Master: Harvest");
     const archivedParent = thread("archived-parent", "Card: Archived parent", {
       forkedFrom: { threadId: master.id },
-      archivedAt: "2026-09-10T00:00:00.000Z",
+      archivedAt: ARCHIVED,
     });
     const liveChild = thread("live-child", "Card: Live child", {
       forkedFrom: { threadId: archivedParent.id },
@@ -180,52 +218,24 @@ describe("MasterStatusBoard logic", () => {
     ]);
   });
 
-  it("resolves an active Card back through an archived Master", () => {
-    const archivedMaster = thread("archived-master", "Master: Fleet", {
-      archivedAt: "2026-09-10T00:00:00.000Z",
-    });
-    const activeCard = thread("active-card", "Card: Continue", {
-      forkedFrom: { threadId: archivedMaster.id },
-    });
-
-    expect(deriveMasterBoard(activeCard, [archivedMaster, activeCard])).toMatchObject({
-      master: archivedMaster,
-      cards: [activeCard],
-    });
-  });
-
   it("keeps archived peer Masters hidden while resolving an archived owner", () => {
     const archivedOwner = thread("archived-owner", "Master: Archived owner", {
-      archivedAt: "2026-09-10T00:00:00.000Z",
+      archivedAt: ARCHIVED,
     });
     const archivedPeer = thread("archived-peer", "Master: Archived peer", {
-      archivedAt: "2026-09-11T00:00:00.000Z",
+      archivedAt: ARCHIVED,
     });
     const livePeer = thread("live-peer", "Master: Live peer");
-    const activeCard = thread("active-card", "Card: Continue", {
-      forkedFrom: { threadId: archivedOwner.id },
-    });
+    const card = thread("card", "Card: Continue", { forkedFrom: { threadId: archivedOwner.id } });
 
-    const board = deriveMasterBoard(activeCard, [
-      archivedOwner,
-      archivedPeer,
-      livePeer,
-      activeCard,
-    ]);
+    const board = deriveMasterBoard(card, [archivedOwner, archivedPeer, livePeer, card]);
+
     expect(board?.master).toBe(archivedOwner);
-    expect(board?.cards).toEqual([activeCard]);
     expect(board?.peerMasters).toEqual([livePeer]);
   });
 
-  it("omits cards whose missing live-shell ancestor prevents ownership resolution", () => {
-    const master = thread("master", "Master: Fleet");
-    const child = thread("child", "Card: Child", { forkedFrom: { threadId: "missing-parent" } });
-
-    expect(deriveMasterBoard(master, [master, child])?.cards).toEqual([]);
-  });
-
-  it("ignores broken lineage and cycles, and sorts equal or malformed timestamps consistently", () => {
-    const master = thread("master", "Master: Fleet");
+  it("ignores broken lineage and cycles, and sorts malformed timestamps consistently", () => {
+    const master = thread("master", "Master: Harvest");
     const broken = thread("broken", "Card: Missing parent", {
       forkedFrom: { threadId: "missing" },
     });
@@ -245,22 +255,18 @@ describe("MasterStatusBoard logic", () => {
     );
   });
 
-  it("isolates projects and environments", () => {
-    const master = thread("master", "Master: Fleet");
-    const otherProject = thread("other-project", "Card: Wrong project", {
-      projectId: "personal-brand",
-      forkedFrom: { threadId: master.id },
-    });
-    const otherEnvironment = thread("other-environment", "Card: Wrong environment", {
-      environmentId: "agent-vps",
+  it("isolates environments", () => {
+    const master = thread("master", "Master: Harvest");
+    const otherEnvironment = thread("other", "Card: Other environment", {
+      environmentId: "env-b",
       forkedFrom: { threadId: master.id },
     });
 
-    expect(deriveMasterBoard(master, [master, otherProject, otherEnvironment])?.cards).toEqual([]);
+    expect(deriveMasterBoard(master, [master, otherEnvironment])?.cards).toEqual([]);
   });
 
   it("returns no board for an ordinary thread", () => {
-    const ordinary = thread("ordinary", "Fix the sidebar");
+    const ordinary = thread("ordinary", "Fix the gate");
     expect(deriveMasterBoard(ordinary, [ordinary])).toBeNull();
   });
 });
