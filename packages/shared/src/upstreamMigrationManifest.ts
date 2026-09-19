@@ -52,6 +52,7 @@ export const upstreamMigrationManifest = [
   [50, "ProjectionThreadPullRequests"],
   [51, "ProjectionThreadMessageContext"],
   [52, "ProjectionThreadTitleState"],
+  [53, "PullRequestFilesViewed"],
 ] as const;
 
 export type UpstreamMigrationManifest = typeof upstreamMigrationManifest;

@@ -252,7 +252,8 @@ describe.skipIf(process.platform === "win32")("Hotlap standalone installer", () 
     expect(NodeFS.existsSync(NodePath.join(fixture.root, "t3-bin"))).toBe(false);
     const repeated = fixture.run();
     expect(repeated.status, repeated.stderr).toBe(0);
-    expect(repeated.stdout).toContain("already installed");
+    // Progress lines go to stderr so `curl ... | sh` output stays clean.
+    expect(repeated.stderr).toContain("already downloaded");
     expect(
       NodeFS.readFileSync(NodePath.join(fixture.root, "requests"), "utf8").trim().split("\n"),
     ).toHaveLength(2);

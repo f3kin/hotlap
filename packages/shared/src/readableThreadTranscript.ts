@@ -23,7 +23,7 @@ export interface ReadableThreadTranscript {
 
 export interface ReadableThreadMessageSource {
   readonly id: MessageId;
-  readonly role: "user" | "assistant" | "system";
+  readonly role: "user" | "assistant" | "system" | "reasoning";
   readonly text: string;
   readonly streaming: boolean;
   readonly createdAt: string;
@@ -76,7 +76,8 @@ function readableText(message: ReadableThreadMessageSource): {
 }
 
 function projectMessage(message: ReadableThreadMessageSource): ReadableThreadMessage | null {
-  if (message.role === "system") return null;
+  // Only chat turns are readable; system setup and reasoning traces stay out.
+  if (message.role === "system" || message.role === "reasoning") return null;
 
   const readable = readableText(message);
   const parts: string[] = [];
