@@ -158,7 +158,7 @@ it.skipIf(process.platform === "win32")(
         "apps/server/package.json",
         "scripts/lib/brand-assets.ts",
         "scripts/lib/resolve-catalog.ts",
-        "scripts/lib/cli-external-packages.ts",
+        "scripts/lib/cli-executable-imports.ts",
         "pnpm-workspace.yaml",
       ]) {
         const target = NodePath.join(fixture, relative);

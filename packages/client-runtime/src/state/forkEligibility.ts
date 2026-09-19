@@ -2,6 +2,7 @@ import type {
   MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationLatestTurn,
+  OrchestrationMessageRole,
   OrchestrationThreadShell,
 } from "@t3tools/contracts";
 import { isReadOnlyHistoryMessageId } from "@t3tools/contracts";
@@ -42,7 +43,7 @@ export function isForkProviderSelectionUnlocked(
         readonly latestUserMessageAt?: OrchestrationThreadShell["latestUserMessageAt"];
         readonly messages?: ReadonlyArray<{
           readonly id: MessageId;
-          readonly role: "user" | "assistant" | "system";
+          readonly role: OrchestrationMessageRole;
         }>;
       })
     | null

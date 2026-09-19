@@ -6,7 +6,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runHotlapMigrations, runMigrations } from "../Migrations.ts";
 import migrateThreadForks from "./001_ProjectionThreadForks.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("001_ProjectionThreadForks", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("001_ProjectionThreadForks", (it) => {
   it.effect("adds nullable lineage without changing existing thread rows", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
