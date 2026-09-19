@@ -126,7 +126,12 @@ export function useThreadActionMenu(input: {
   const openMenu = useCallback(
     (
       position: { x: number; y: number },
-      target?: { readonly threadRef: ScopedThreadRef; readonly projectCwd: string | null },
+      target?: {
+        readonly threadRef: ScopedThreadRef;
+        readonly projectCwd: string | null;
+        /** Runs after a successful settle or snooze, e.g. to move a list forward. */
+        readonly onParked?: () => void;
+      },
     ) => {
       const threadRef = target ? target.threadRef : defaultThreadRef;
       const projectCwd = target ? target.projectCwd : defaultProjectCwd;
@@ -197,6 +202,7 @@ export function useThreadActionMenu(input: {
               },
             }),
           );
+          target?.onParked?.();
           return;
         }
         const reportFailure = async (
@@ -207,6 +213,7 @@ export function useThreadActionMenu(input: {
           if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
             failureToast(title, squashAtomCommandFailure(result));
           }
+          return result._tag !== "Failure";
         };
         switch (action) {
           case "project-settings": {
@@ -242,7 +249,9 @@ export function useThreadActionMenu(input: {
             return;
           }
           case "settle":
-            await reportFailure("Failed to settle thread", () => settleThread(threadRef));
+            if (await reportFailure("Failed to settle thread", () => settleThread(threadRef))) {
+              target?.onParked?.();
+            }
             return;
           case "unsettle":
             await reportFailure("Failed to un-settle thread", () => unsettleThread(threadRef));

@@ -7,6 +7,7 @@ import {
   isMasterThreadTitle,
   mergeLiveAndArchivedThreads,
   navigableRows,
+  nextUnparkedKey,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -153,6 +154,19 @@ describe("exclusive shelves", () => {
 
     expect(group?.masters[0]).toMatchObject({ master: archivedMaster, structural: true });
     expect(group ? navigableRows(group) : []).toEqual([card, chat]);
+  });
+});
+
+describe("nextUnparkedKey", () => {
+  it("moves to the next unparked row after parking the open thread, wrapping around", () => {
+    const parked = new Set(["b", "d"]);
+    const isParked = (key: string) => parked.has(key);
+
+    expect(nextUnparkedKey(["a", "b", "c", "d"], "a", isParked)).toBe("c");
+    expect(nextUnparkedKey(["a", "b", "c", "d"], "c", isParked)).toBe("a");
+    expect(nextUnparkedKey(["a", "b"], "a", isParked)).toBeNull();
+    // Off screen: no guess, the caller starts a new thread instead.
+    expect(nextUnparkedKey(["a", "b"], "z", isParked)).toBeNull();
   });
 });
 

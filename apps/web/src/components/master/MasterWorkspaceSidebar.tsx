@@ -1,4 +1,8 @@
-import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
+import {
+  scopeProjectRef,
+  scopeThreadRef,
+  scopedThreadKey,
+} from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -74,6 +78,7 @@ import {
   deriveMasterWorkspace,
   isMasterThreadTitle,
   navigableRows,
+  nextUnparkedKey,
   type MasterShelf,
   type MasterWorkspaceProject,
 } from "./MasterStatusBoard.logic";
@@ -626,15 +631,37 @@ function MasterWorkspaceSidebar() {
     projectCwd: null,
     onStartRename: startRename,
   });
+  const activeKeyRef = useRef(activeKey);
+  useEffect(() => {
+    activeKeyRef.current = activeKey;
+  }, [activeKey]);
   const onMenu = useCallback(
     (thread: ThreadRow, position: { x: number; y: number }) => {
       menuTargetRef.current = thread;
+      const key = rowKey(thread);
+      // Like the default sidebar: settling or snoozing the open thread from its
+      // row moves on to the next unparked row (planned now, in today's order),
+      // or to a new thread in its project.
+      const nextKey = nextUnparkedKey(orderedKeys, key, (candidate) => {
+        const row = rowByKey.get(candidate);
+        return row === undefined || shelfOf(row) === "snoozed" || shelfOf(row) === "settled";
+      });
+      const next = nextKey ? rowByKey.get(nextKey) : undefined;
       openMenu(position, {
         threadRef: scopeThreadRef(thread.environmentId, thread.id),
         projectCwd: projectOf(thread)?.workspaceRoot ?? null,
+        onParked: () => {
+          // A navigation made while the command ran wins over ours.
+          if (activeKeyRef.current !== key) return;
+          if (next) openThread(next);
+          else
+            void newThreadContext.handleNewThread(
+              scopeProjectRef(thread.environmentId, thread.projectId),
+            );
+        },
       });
     },
-    [openMenu, projectOf],
+    [newThreadContext, openMenu, openThread, orderedKeys, projectOf, rowByKey, shelfOf],
   );
   const commitRename = useCallback(
     (thread: ThreadRow, title: string) => {

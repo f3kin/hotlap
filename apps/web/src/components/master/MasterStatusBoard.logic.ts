@@ -251,6 +251,25 @@ export function navigableRows<T extends MasterBoardThread>(group: MasterWorkspac
 }
 
 /**
+ * Where to go after parking (settling or snoozing) the open thread: the next
+ * row after it, wrapping around, that isn't parked. Null when the thread isn't
+ * on screen or nothing else qualifies; callers then start a new thread.
+ */
+export function nextUnparkedKey(
+  orderedKeys: readonly string[],
+  currentKey: string,
+  isParked: (key: string) => boolean,
+): string | null {
+  const index = orderedKeys.indexOf(currentKey);
+  if (index === -1) return null;
+  return (
+    [...orderedKeys.slice(index + 1), ...orderedKeys.slice(0, index)].find(
+      (key) => !isParked(key),
+    ) ?? null
+  );
+}
+
+/**
  * The board for a Master, or for a Card's owning Master. `threads` must carry
  * the same environment-wide, archive-aware lineage the sidebar uses, so the
  * two always agree about who owns a Card.
