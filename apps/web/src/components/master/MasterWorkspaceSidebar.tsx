@@ -1,6 +1,15 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
-import { ChevronDownIcon, PinIcon } from "lucide-react";
 import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { effectiveSnoozed, snoozeWakeLabel } from "@t3tools/client-runtime/state/thread-settled";
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import { ChevronDownIcon, EllipsisIcon, PinIcon } from "lucide-react";
+import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -13,47 +22,61 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 
 import { cn } from "~/lib/utils";
 import { isElectron } from "~/env";
-import { openCommandPalette } from "~/commandPaletteBus";
-import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { useProjects } from "~/state/entities";
+import { isCommandPaletteOpen, openCommandPalette } from "~/commandPaletteBus";
+import {
+  resolveShortcutCommand,
+  shortcutLabelForCommand,
+  shouldShowThreadJumpHintsForModifiers,
+  threadJumpCommandForIndex,
+  threadJumpIndexFromCommand,
+  threadTraversalDirectionFromCommand,
+} from "~/keybindings";
+import { isModelPickerOpen } from "~/modelPickerVisibility";
+import { useShortcutModifierState } from "~/shortcutModifierState";
+import { useTerminalFocus } from "~/hooks/useTerminalFocus";
+import { isTerminalFocused } from "~/lib/terminalFocus";
+import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
+import { useProjects, useServerConfigs } from "~/state/entities";
+import { primaryServerKeybindingsAtom } from "~/state/server";
+import { threadEnvironment } from "~/state/threads";
+import { useAtomCommand } from "~/state/use-atom-command";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "~/threadRoutes";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
+import { useNowMinute } from "~/hooks/useNowMinute";
+import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
+import { useThreadActions } from "~/hooks/useThreadActions";
 import { startNewThreadFromContext } from "~/lib/chatThreadActions";
+import { resolveRenameCommit } from "../chat/ChatHeader";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { SidebarContent, SidebarGroup, useSidebar } from "../ui/sidebar";
+import { toastManager } from "../ui/toast";
 import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChrome";
 import { SidebarThreadHeader } from "../sidebar/SidebarThreadHeader";
-import { deriveMasterWorkspace, isMasterThreadTitle } from "./MasterStatusBoard.logic";
+import {
+  resolveAdjacentThreadId,
+  sortPinnedThreadsForSidebar,
+  useThreadJumpHintVisibility,
+} from "../Sidebar.logic";
 import { ProjectFavicon } from "../ProjectFavicon";
-import { useMasterLineageThreads } from "./useMasterLineageThreads";
-import { useMasterWorkspaceEnabled } from "./useMasterSettings";
 import {
   ThreadRowLeadingStatus,
   ThreadRowTrailingStatus,
   ThreadWorktreeIndicator,
 } from "../ThreadStatusIndicators";
+import {
+  deriveMasterWorkspace,
+  type MasterShelf,
+  type MasterWorkspaceProject,
+} from "./MasterStatusBoard.logic";
+import { useMasterLineageThreads } from "./useMasterLineageThreads";
+import { useMasterWorkspaceEnabled } from "./useMasterSettings";
 
-export const SHORTCUTS_STORAGE_KEY = "t3code:master-workspace-shortcuts";
+type ThreadRow = EnvironmentThreadShell;
+type ProjectGroup = MasterWorkspaceProject<ThreadRow>;
 
-export function readMasterWorkspaceShortcuts(value: string | null): readonly string[] {
-  if (!value) return [];
-  try {
-    const parsed: unknown = JSON.parse(value);
-    return Array.isArray(parsed)
-      ? [...new Set(parsed.filter((item): item is string => typeof item === "string"))]
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-export function toggleMasterWorkspaceShortcut(
-  current: readonly string[],
-  key: string,
-): readonly string[] {
-  return current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
+function rowKey(thread: ThreadRow): string {
+  return scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 }
 
 function shortTitle(title: string) {
@@ -64,49 +87,20 @@ function matchesSearch(title: string, query: string) {
   return title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
 }
 
-function projectWorkSummary(
-  group: ReturnType<typeof deriveMasterWorkspace>["activeProjects"][number],
-) {
+function projectWorkSummary(group: ProjectGroup) {
   if (group.masters.length) return `${group.masters.length} Masters`;
   if (group.oneOffs.length) return `${group.oneOffs.length} Chats`;
-  return `${group.orphanCards.length} Orphan Cards`;
+  if (group.orphanCards.length) return `${group.orphanCards.length} Orphan Cards`;
+  return "No threads";
 }
 
-type ThreadRow = EnvironmentThreadShell;
-
-function ThreadButton({
-  thread,
-  active,
-  selected,
-  nested,
-  pin,
-  onClick,
-}: {
-  thread: ThreadRow;
-  active: boolean;
-  selected?: boolean;
-  nested?: boolean;
-  pin?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <Button
-      variant="ghost"
-      className={cn(
-        "min-h-11 w-full justify-start gap-2 px-2 text-xs font-normal",
-        nested && "pl-4 text-muted-foreground",
-        (active || selected) && "bg-sidebar-row-active text-sidebar-foreground",
-      )}
-      aria-current={active ? "page" : undefined}
-      onClick={onClick}
-    >
-      {pin ? <PinIcon className="size-3 shrink-0 text-muted-foreground" /> : null}
-      <ThreadRowLeadingStatus thread={thread} />
-      <span className="min-w-0 flex-1 truncate text-left">{shortTitle(thread.title)}</span>
-      <ThreadWorktreeIndicator thread={thread} />
-      <ThreadRowTrailingStatus thread={thread} />
-    </Button>
-  );
+/** A project's threads in the order they render; drives mod+1..9 and traversal. */
+function groupRowsInOrder(group: ProjectGroup): ThreadRow[] {
+  return [
+    ...group.masters.flatMap((board) => [board.master, ...board.cards]),
+    ...group.oneOffs,
+    ...group.orphanCards,
+  ];
 }
 
 /**
@@ -117,6 +111,239 @@ export function MasterWorkspaceSidebarSlot(props: { readonly fallback: ReactNode
   return useMasterWorkspaceEnabled() ? <MasterWorkspaceSidebar /> : props.fallback;
 }
 
+interface RowContext {
+  readonly activeKey: string | null;
+  readonly selectedKey?: string | null;
+  readonly jumpLabelByKey: ReadonlyMap<string, string>;
+  readonly renaming: { readonly key: string; readonly title: string } | null;
+  readonly now: string;
+  readonly isMobile: boolean;
+  readonly onOpen: (thread: ThreadRow) => void;
+  readonly onMenu: (thread: ThreadRow, position: { x: number; y: number }) => void;
+  readonly onRenameChange: (title: string) => void;
+  readonly onRenameCommit: (thread: ThreadRow, title: string) => void;
+  readonly onRenameCancel: () => void;
+}
+
+function ThreadRowButton({
+  thread,
+  context,
+  nested,
+  pinned,
+  trailing,
+}: {
+  thread: ThreadRow;
+  context: RowContext;
+  nested?: boolean;
+  pinned?: boolean;
+  trailing?: ReactNode;
+}) {
+  const key = rowKey(thread);
+  const active = context.activeKey === key;
+  const selected = context.selectedKey === key;
+  const archived = thread.archivedAt != null;
+  const snoozedUntil =
+    thread.snoozedUntil != null && effectiveSnoozed(thread, { now: context.now })
+      ? thread.snoozedUntil
+      : null;
+  const jumpLabel = context.jumpLabelByKey.get(key) ?? null;
+  const renamingTitle = context.renaming?.key === key ? context.renaming.title : null;
+  const committedRef = useRef(false);
+
+  if (renamingTitle !== null) {
+    return (
+      <div className={cn("flex min-h-11 items-center px-2", nested && "pl-4")}>
+        <input
+          autoFocus
+          aria-label="Thread title"
+          className="h-7 w-full min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          value={renamingTitle}
+          onFocus={(event) => {
+            committedRef.current = false;
+            event.currentTarget.select();
+          }}
+          onChange={(event) => context.onRenameChange(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              committedRef.current = true;
+              context.onRenameCommit(thread, event.currentTarget.value);
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              committedRef.current = true;
+              context.onRenameCancel();
+            }
+          }}
+          onBlur={(event) => {
+            if (!committedRef.current) context.onRenameCommit(thread, event.currentTarget.value);
+          }}
+        />
+      </div>
+    );
+  }
+
+  const openMenuAtElement = (element: HTMLElement) => {
+    const rect = element.getBoundingClientRect();
+    context.onMenu(thread, { x: rect.left, y: rect.bottom + 4 });
+  };
+
+  return (
+    <div className="group/master-row relative flex min-w-0 flex-1 items-center">
+      <Button
+        variant="ghost"
+        className={cn(
+          "min-h-11 w-full min-w-0 justify-start gap-2 px-2 text-xs font-normal",
+          nested && "pl-4 text-muted-foreground",
+          (archived || snoozedUntil) && "text-muted-foreground",
+          (active || selected) && "bg-sidebar-row-active text-sidebar-foreground",
+        )}
+        aria-current={active ? "page" : undefined}
+        onClick={() => context.onOpen(thread)}
+        onContextMenu={(event: MouseEvent) => {
+          if (archived) return;
+          event.preventDefault();
+          context.onMenu(thread, { x: event.clientX, y: event.clientY });
+        }}
+        onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+          if (archived) return;
+          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            event.preventDefault();
+            openMenuAtElement(event.currentTarget);
+          }
+        }}
+      >
+        {pinned ? <PinIcon className="size-3 shrink-0 text-muted-foreground" /> : null}
+        <ThreadRowLeadingStatus thread={thread} />
+        <span className="min-w-0 flex-1 truncate text-left">{shortTitle(thread.title)}</span>
+        {archived ? <span className="shrink-0 text-[10px]">Archived</span> : null}
+        {snoozedUntil ? (
+          <span className="shrink-0 text-[10px]">
+            {snoozeWakeLabel(snoozedUntil, { now: context.now })}
+          </span>
+        ) : null}
+        <ThreadWorktreeIndicator thread={thread} />
+        <ThreadRowTrailingStatus thread={thread} />
+      </Button>
+      {jumpLabel ? (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute right-1.5 top-1/2 z-10 inline-flex h-5 -translate-y-1/2 items-center rounded-full border border-border/80 bg-background/95 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
+        >
+          {jumpLabel}
+        </span>
+      ) : null}
+      {archived ? null : (
+        <Button
+          variant="ghost"
+          className={cn(
+            "min-h-11 min-w-8 shrink-0 px-0 text-muted-foreground",
+            // Hover-revealed on desktop; always reachable on touch.
+            !context.isMobile &&
+              "opacity-0 focus-visible:opacity-100 group-hover/master-row:opacity-100",
+            context.isMobile && "min-w-11",
+          )}
+          aria-label={`Thread actions for ${shortTitle(thread.title)}`}
+          onClick={(event: MouseEvent<HTMLButtonElement>) => openMenuAtElement(event.currentTarget)}
+        >
+          <EllipsisIcon className="size-3.5" />
+        </Button>
+      )}
+      {trailing}
+    </div>
+  );
+}
+
+function ProjectGroupRows({
+  group,
+  context,
+  pinControl,
+}: {
+  group: ProjectGroup;
+  context: RowContext;
+  pinControl: (thread: ThreadRow) => ReactNode;
+}) {
+  if (group.masters.length === 0 && group.oneOffs.length === 0 && group.orphanCards.length === 0) {
+    return (
+      <p className="px-2 py-2 text-[11px] text-muted-foreground">
+        No threads yet. Start one with New thread.
+      </p>
+    );
+  }
+  return (
+    <>
+      {group.masters.map((board) => (
+        <div key={rowKey(board.master)} className="mb-1">
+          <ThreadRowButton
+            thread={board.master}
+            context={context}
+            trailing={pinControl(board.master)}
+          />
+          {board.cards.map((card) => (
+            <ThreadRowButton key={rowKey(card)} thread={card} context={context} nested />
+          ))}
+        </div>
+      ))}
+      {group.oneOffs.length ? (
+        <div className="mt-1 border-t border-sidebar-border pt-1">
+          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">Chats</p>
+          {group.oneOffs.map((thread) => (
+            <ThreadRowButton key={rowKey(thread)} thread={thread} context={context} />
+          ))}
+        </div>
+      ) : null}
+      {group.orphanCards.length ? (
+        <div className="mt-1 border-t border-sidebar-border pt-1">
+          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">Orphan Cards</p>
+          {group.orphanCards.map((thread) => (
+            <ThreadRowButton key={rowKey(thread)} thread={thread} context={context} nested />
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function ShelfGroup({
+  label,
+  groups,
+  expanded,
+  onExpandedChange,
+  projectTitle,
+  renderGroup,
+}: {
+  label: string;
+  groups: readonly ProjectGroup[];
+  expanded: boolean;
+  onExpandedChange: (open: boolean) => void;
+  projectTitle: (group: ProjectGroup) => ReactNode;
+  renderGroup: (group: ProjectGroup) => ReactNode;
+}) {
+  if (groups.length === 0) return null;
+  const count = groups.reduce((total, group) => total + group.visibleCount, 0);
+  return (
+    <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
+      <Collapsible open={expanded} onOpenChange={onExpandedChange}>
+        <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 rounded-md px-[var(--sidebar-row-content-inset)] text-left text-xs hover:bg-sidebar-accent">
+          <ChevronDownIcon
+            className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")}
+          />
+          <span className="min-w-0 flex-1 truncate">
+            {label} ({count})
+          </span>
+        </CollapsibleTrigger>
+        <CollapsiblePanel className="pl-3">
+          {groups.map((group) => (
+            <div key={`${group.environmentId}:${group.projectId}`} className="py-1">
+              {projectTitle(group)}
+              {renderGroup(group)}
+            </div>
+          ))}
+        </CollapsiblePanel>
+      </Collapsible>
+    </SidebarGroup>
+  );
+}
+
 function MasterWorkspaceSidebar() {
   const projects = useProjects();
   const environmentIds = useMemo(
@@ -124,94 +351,332 @@ function MasterWorkspaceSidebar() {
     [projects],
   );
   const threads = useMasterLineageThreads(environmentIds);
+  const serverConfigs = useServerConfigs();
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const now = useNowMinute();
   const navigate = useNavigate();
   const params = useParams({ strict: false });
   const activeRef = resolveThreadRouteRef(params);
+  const activeKey = activeRef ? scopedThreadKey(activeRef) : null;
   const { isMobile, setOpenMobile } = useSidebar();
   const newThreadContext = useHandleNewThread();
+  const { pinThread, confirmAndUnpinThread } = useThreadActions();
+  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+    reportFailure: false,
+  });
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const [shortcutIds, setShortcutIds] = useState<readonly string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   const [openProjectKeys, setOpenProjectKeys] = useState<ReadonlySet<string>>(new Set());
+  const [snoozedExpanded, setSnoozedExpanded] = useState(false);
   const [settledExpanded, setSettledExpanded] = useState(false);
+  const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
 
-  useEffect(() => {
-    setShortcutIds(
-      readMasterWorkspaceShortcuts(window.localStorage.getItem(SHORTCUTS_STORAGE_KEY)),
-    );
-  }, []);
-
-  const visibleThreads = useMemo(
+  const capability = useCallback(
+    (environmentId: EnvironmentId, name: "threadSnooze" | "threadSettlement" | "threadPinning") =>
+      serverConfigs.get(environmentId)?.environment.capabilities[name] === true,
+    [serverConfigs],
+  );
+  // Same precedence as the default sidebar: snooze outranks settlement.
+  const shelfOf = useCallback(
+    (thread: ThreadRow): MasterShelf =>
+      capability(thread.environmentId, "threadSnooze") && effectiveSnoozed(thread, { now })
+        ? "snoozed"
+        : capability(thread.environmentId, "threadSettlement") &&
+            thread.settledOverride === "settled"
+          ? "settled"
+          : "active",
+    [capability, now],
+  );
+  const liveThreads = useMemo(
     () => threads.filter((thread) => thread.archivedAt == null),
     [threads],
-  );
-  const masters = useMemo(
-    () => visibleThreads.filter((thread) => isMasterThreadTitle(thread.title)),
-    [visibleThreads],
   );
   const workspace = useMemo(
     () =>
       deriveMasterWorkspace({
         threads,
-        projects: [],
-        shelfOf: (thread) => (thread.settledOverride === "settled" ? "settled" : "active"),
+        projects: projects.map((project) => ({
+          environmentId: project.environmentId,
+          id: project.id,
+        })),
+        shelfOf,
       }),
-    [threads],
+    [projects, shelfOf, threads],
   );
-  const shortcutMasters = masters.filter((thread) =>
-    shortcutIds.includes(scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
+  const pinnedThreads = useMemo(
+    () =>
+      sortPinnedThreadsForSidebar(
+        liveThreads.filter((thread) => thread.pinnedAt != null && shelfOf(thread) === "active"),
+      ),
+    [liveThreads, shelfOf],
   );
   const searchResults = useMemo(
     () =>
       searchQuery.trim()
-        ? visibleThreads.filter((thread) => matchesSearch(thread.title, searchQuery))
+        ? liveThreads.filter((thread) => matchesSearch(thread.title, searchQuery))
         : [],
-    [searchQuery, visibleThreads],
+    [searchQuery, liveThreads],
+  );
+  const projectByKey = useMemo(
+    () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
+    [projects],
+  );
+  const projectOf = useCallback(
+    (group: { environmentId: string; projectId: string }) =>
+      projectByKey.get(`${group.environmentId}:${group.projectId}`),
+    [projectByKey],
+  );
+  const isProjectOpen = useCallback(
+    (group: ProjectGroup) =>
+      openProjectKeys.has(`${group.environmentId}:${group.projectId}`) ||
+      (activeKey !== null &&
+        groupRowsInOrder(group).some((thread) => rowKey(thread) === activeKey)),
+    [activeKey, openProjectKeys],
   );
 
-  useEffect(
-    () => setActiveSearchIndex((index) => Math.min(index, Math.max(searchResults.length - 1, 0))),
-    [searchResults.length],
+  // Rows in on-screen order, for mod+1..9 and next/previous thread.
+  const orderedRows = useMemo(() => {
+    if (searchQuery.trim()) return searchResults;
+    const rows: ThreadRow[] = [...pinnedThreads];
+    for (const group of workspace.activeProjects) {
+      if (projectOf(group) && isProjectOpen(group)) rows.push(...groupRowsInOrder(group));
+    }
+    if (snoozedExpanded) rows.push(...workspace.snoozedProjects.flatMap(groupRowsInOrder));
+    if (settledExpanded) rows.push(...workspace.settledProjects.flatMap(groupRowsInOrder));
+    return rows;
+  }, [
+    isProjectOpen,
+    pinnedThreads,
+    projectOf,
+    searchQuery,
+    searchResults,
+    settledExpanded,
+    snoozedExpanded,
+    workspace,
+  ]);
+  const orderedKeys = useMemo(() => {
+    const seen = new Set<string>();
+    const keys: string[] = [];
+    for (const thread of orderedRows) {
+      const key = rowKey(thread);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+    return keys;
+  }, [orderedRows]);
+  const rowByKey = useMemo(
+    () => new Map(orderedRows.map((thread) => [rowKey(thread), thread])),
+    [orderedRows],
   );
 
-  const openThread = (thread: (typeof threads)[number]) => {
-    if (isMobile) setOpenMobile(false);
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
-    });
+  // Clamped at read time so a shrinking result list never points past its end.
+  const selectedSearchIndex = Math.min(activeSearchIndex, Math.max(searchResults.length - 1, 0));
+  const changeSearchQuery = (query: string) => {
+    setSearchQuery(query);
+    setActiveSearchIndex(0);
   };
-  const toggleShortcut = (key: string) => {
-    setShortcutIds((current) => {
-      const next = toggleMasterWorkspaceShortcut(current, key);
-      try {
-        window.localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(next));
-      } catch {
-        /* session state still works */
+
+  const openThread = useCallback(
+    (thread: ThreadRow) => {
+      if (isMobile) setOpenMobile(false);
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
+      });
+    },
+    [isMobile, navigate, setOpenMobile],
+  );
+
+  const routeTerminalOpen = useTerminalUiStateStore((state) =>
+    activeRef
+      ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, activeRef).terminalOpen
+      : false,
+  );
+  useEffect(() => {
+    const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || event.repeat || isCommandPaletteOpen() || isModelPickerOpen()) {
+        return;
       }
-      return next;
-    });
+      const command = resolveShortcutCommand(event, keybindings, {
+        platform: navigator.platform,
+        context: {
+          terminalFocus: isTerminalFocused(),
+          terminalOpen: routeTerminalOpen,
+          modelPickerOpen: isModelPickerOpen(),
+        },
+      });
+      const navigateToKey = (key: string | null) => {
+        const thread = key ? rowByKey.get(key) : undefined;
+        if (!thread) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openThread(thread);
+      };
+      const direction = threadTraversalDirectionFromCommand(command);
+      if (direction !== null) {
+        navigateToKey(
+          resolveAdjacentThreadId({
+            threadIds: orderedKeys,
+            currentThreadId: activeKey,
+            direction,
+          }),
+        );
+        return;
+      }
+      const jumpIndex = threadJumpIndexFromCommand(command ?? "");
+      if (jumpIndex !== null) navigateToKey(orderedKeys[jumpIndex] ?? null);
+    };
+    window.addEventListener("keydown", onWindowKeyDown);
+    return () => window.removeEventListener("keydown", onWindowKeyDown);
+  }, [activeKey, keybindings, openThread, orderedKeys, rowByKey, routeTerminalOpen]);
+
+  // Hints show only while the held modifiers exactly match a jump binding.
+  const shortcutModifiers = useShortcutModifierState();
+  const terminalFocused = useTerminalFocus();
+  const { showThreadJumpHints, updateThreadJumpHintsVisibility } = useThreadJumpHintVisibility();
+  const shouldShowJumpHintsNow = shouldShowThreadJumpHintsForModifiers(
+    shortcutModifiers,
+    keybindings,
+    {
+      platform: navigator.platform,
+      context: {
+        terminalFocus: terminalFocused,
+        terminalOpen: routeTerminalOpen,
+        modelPickerOpen: isModelPickerOpen(),
+      },
+    },
+  );
+  useEffect(() => {
+    updateThreadJumpHintsVisibility(shouldShowJumpHintsNow);
+  }, [shouldShowJumpHintsNow, updateThreadJumpHintsVisibility]);
+  const jumpLabelByKey = useMemo(() => {
+    const labels = new Map<string, string>();
+    if (!showThreadJumpHints) return labels;
+    for (const [index, key] of orderedKeys.entries()) {
+      const command = threadJumpCommandForIndex(index);
+      if (!command) break;
+      const label = shortcutLabelForCommand(keybindings, command);
+      if (label) labels.set(key, label);
+    }
+    return labels;
+  }, [keybindings, orderedKeys, showThreadJumpHints]);
+
+  // One shared action menu (the chat header's) for every row.
+  const menuTargetRef = useRef<ThreadRow | null>(null);
+  const startRename = useCallback(() => {
+    const thread = menuTargetRef.current;
+    if (thread) setRenaming({ key: rowKey(thread), title: thread.title });
+  }, []);
+  const { openMenu } = useThreadActionMenu({
+    threadRef: null,
+    projectCwd: null,
+    onStartRename: startRename,
+  });
+  const onMenu = useCallback(
+    (thread: ThreadRow, position: { x: number; y: number }) => {
+      menuTargetRef.current = thread;
+      openMenu(position, {
+        threadRef: scopeThreadRef(thread.environmentId, thread.id),
+        projectCwd: projectOf(thread)?.workspaceRoot ?? null,
+      });
+    },
+    [openMenu, projectOf],
+  );
+  const commitRename = useCallback(
+    (thread: ThreadRow, title: string) => {
+      setRenaming(null);
+      const resolution = resolveRenameCommit({ title, originalTitle: thread.title });
+      if (resolution.action === "reject-empty") {
+        toastManager.add({ type: "warning", title: "Thread title cannot be empty" });
+        return;
+      }
+      if (resolution.action === "noop") return;
+      void updateThreadMetadata({
+        environmentId: thread.environmentId,
+        input: { threadId: thread.id, title: resolution.title },
+      }).then((result) => {
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add({
+            type: "error",
+            title: "Failed to rename thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          });
+        }
+      });
+    },
+    [updateThreadMetadata],
+  );
+
+  const togglePin = useCallback(
+    (thread: ThreadRow) => {
+      const ref: ScopedThreadRef = scopeThreadRef(thread.environmentId, thread.id);
+      void (thread.pinnedAt != null ? confirmAndUnpinThread(ref) : pinThread(ref)).then(
+        (result) => {
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            toastManager.add({
+              type: "error",
+              title: thread.pinnedAt != null ? "Failed to unpin thread" : "Failed to pin thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            });
+          }
+        },
+      );
+    },
+    [confirmAndUnpinThread, pinThread],
+  );
+  const pinControl = (thread: ThreadRow) => {
+    if (thread.archivedAt != null || !capability(thread.environmentId, "threadPinning")) {
+      return null;
+    }
+    const pinned = thread.pinnedAt != null;
+    return (
+      <Button
+        variant="ghost"
+        className="min-h-11 min-w-11 shrink-0"
+        aria-label={pinned ? "Unpin Master" : "Pin Master"}
+        aria-pressed={pinned}
+        onClick={() => togglePin(thread)}
+      >
+        <PinIcon className={cn("size-3", pinned && "fill-current")} />
+      </Button>
+    );
   };
+
+  const rowContext: RowContext = {
+    activeKey,
+    jumpLabelByKey,
+    renaming,
+    now,
+    isMobile,
+    onOpen: openThread,
+    onMenu,
+    onRenameChange: (title) => setRenaming((current) => (current ? { ...current, title } : null)),
+    onRenameCommit: commitRename,
+    onRenameCancel: () => setRenaming(null),
+  };
+
   const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown" && searchResults.length) {
       event.preventDefault();
-      setActiveSearchIndex((index) => (index + 1) % searchResults.length);
+      setActiveSearchIndex((selectedSearchIndex + 1) % searchResults.length);
     } else if (event.key === "ArrowUp" && searchResults.length) {
       event.preventDefault();
-      setActiveSearchIndex((index) => (index - 1 + searchResults.length) % searchResults.length);
-    } else if (event.key === "Enter" && searchResults[activeSearchIndex]) {
+      setActiveSearchIndex((selectedSearchIndex - 1 + searchResults.length) % searchResults.length);
+    } else if (event.key === "Enter" && searchResults[selectedSearchIndex]) {
       event.preventDefault();
-      openThread(searchResults[activeSearchIndex]);
-    } else if (event.key === "Escape") setSearchQuery("");
+      openThread(searchResults[selectedSearchIndex]);
+    } else if (event.key === "Escape") changeSearchQuery("");
   };
-  const onNewThread = (event: MouseEvent) => {
-    if (projects.length > 1 && !event.shiftKey) {
-      if (isMobile) setOpenMobile(false);
+  const onNewThread = (event?: MouseEvent) => {
+    if (isMobile) setOpenMobile(false);
+    if (projects.length > 1 && !event?.shiftKey) {
       openCommandPalette({ open: "new-thread-in" });
       return;
     }
-    if (isMobile) setOpenMobile(false);
     void startNewThreadFromContext({
       activeDraftThread: newThreadContext.activeDraftThread,
       activeThread: newThreadContext.activeThread ?? undefined,
@@ -219,6 +684,26 @@ function MasterWorkspaceSidebar() {
       handleNewThread: newThreadContext.handleNewThread,
     });
   };
+  // Mirrors the default sidebar: with several projects the primary label is
+  // only the picker's shortcut, and chat.newLocal is the direct-create twin.
+  const newThreadShortcutLabel =
+    shortcutLabelForCommand(keybindings, "chat.new") ??
+    (projects.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
+  const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
+
+  const shelfProjectTitle = (group: ProjectGroup) => {
+    const project = projectOf(group);
+    return project ? (
+      <div className="flex items-center gap-2 px-2 text-[11px] text-muted-foreground">
+        <ProjectFavicon project={project} className="size-3.5" />
+        {project.title}
+      </div>
+    ) : null;
+  };
+  const renderShelfGroup = (group: ProjectGroup) =>
+    projectOf(group) ? (
+      <ProjectGroupRows group={group} context={rowContext} pinControl={pinControl} />
+    ) : null;
 
   return (
     <>
@@ -233,17 +718,17 @@ function MasterWorkspaceSidebar() {
               onNewProject={() => openCommandPalette({ open: "add-project" })}
               onNewThread={onNewThread}
               newThreadDisabled={false}
-              newThreadShortcutLabel={undefined}
-              newThreadInProjectShortcutLabel={undefined}
+              newThreadShortcutLabel={newThreadShortcutLabel}
+              newThreadInProjectShortcutLabel={newThreadInProjectShortcutLabel}
               showNewThreadInProjectHint={projects.length > 1}
               searchInputRef={searchInputRef}
               searchQuery={searchQuery}
-              onSearchQueryChange={setSearchQuery}
+              onSearchQueryChange={changeSearchQuery}
               onSearchKeyDown={onSearchKeyDown}
               isSearching={Boolean(searchQuery.trim())}
               searchResultCount={searchResults.length}
-              activeSearchResultIndex={activeSearchIndex}
-              onClearSearch={() => setSearchQuery("")}
+              activeSearchResultIndex={selectedSearchIndex}
+              onClearSearch={() => changeSearchQuery("")}
             />
           </SidebarGroup>
         }
@@ -255,12 +740,14 @@ function MasterWorkspaceSidebar() {
             role="listbox"
           >
             {searchResults.map((thread, index) => (
-              <ThreadButton
-                key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
+              <ThreadRowButton
+                key={rowKey(thread)}
                 thread={thread}
-                active={false}
-                selected={index === activeSearchIndex}
-                onClick={() => openThread(thread)}
+                context={{
+                  ...rowContext,
+                  activeKey: null,
+                  selectedKey: index === selectedSearchIndex ? rowKey(thread) : null,
+                }}
               />
             ))}
           </SidebarGroup>
@@ -270,23 +757,17 @@ function MasterWorkspaceSidebar() {
               <p className="px-[var(--sidebar-row-content-inset)] pb-1 text-[11px] font-medium text-muted-foreground">
                 Pinned
               </p>
-              {shortcutMasters.length === 0 ? (
+              {pinnedThreads.length === 0 ? (
                 <p className="px-[var(--sidebar-row-content-inset)] py-2 text-xs text-muted-foreground">
                   Pin a Master to keep it here.
                 </p>
               ) : (
-                shortcutMasters.map((thread) => (
-                  <ThreadButton
-                    key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
+                pinnedThreads.map((thread) => (
+                  <ThreadRowButton
+                    key={rowKey(thread)}
                     thread={thread}
-                    active={
-                      activeRef
-                        ? scopedThreadKey(activeRef) ===
-                          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-                        : false
-                    }
-                    pin
-                    onClick={() => openThread(thread)}
+                    context={rowContext}
+                    pinned
                   />
                 ))
               )}
@@ -297,24 +778,9 @@ function MasterWorkspaceSidebar() {
               </p>
               {workspace.activeProjects.map((group) => {
                 const projectKey = `${group.environmentId}:${group.projectId}`;
-                const project = projects.find(
-                  (item) =>
-                    item.environmentId === group.environmentId && item.id === group.projectId,
-                );
+                const project = projectOf(group);
                 if (!project) return null;
-                const hasActiveThread = activeRef
-                  ? threads.some(
-                      (thread) =>
-                        thread.environmentId === group.environmentId &&
-                        (thread.projectId === group.projectId ||
-                          group.masters.some((board) =>
-                            board.cards.some((card) => card.id === thread.id),
-                          )) &&
-                        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) ===
-                          scopedThreadKey(activeRef),
-                    )
-                  : false;
-                const open = hasActiveThread || openProjectKeys.has(projectKey);
+                const open = isProjectOpen(group);
                 return (
                   <Collapsible
                     key={projectKey}
@@ -342,179 +808,32 @@ function MasterWorkspaceSidebar() {
                       </span>
                     </CollapsibleTrigger>
                     <CollapsiblePanel className="pl-3">
-                      {group.masters.map((board) => {
-                        const master = board.master;
-                        const key = scopedThreadKey(
-                          scopeThreadRef(master.environmentId, master.id),
-                        );
-                        return (
-                          <div key={key} className="mb-1">
-                            <div className="flex items-center">
-                              <ThreadButton
-                                thread={master}
-                                active={activeRef ? scopedThreadKey(activeRef) === key : false}
-                                onClick={() => openThread(master)}
-                              />
-                              <Button
-                                variant="ghost"
-                                className="min-h-11 min-w-11"
-                                aria-label={
-                                  shortcutIds.includes(key) ? "Unpin Master" : "Pin Master"
-                                }
-                                onClick={() => toggleShortcut(key)}
-                              >
-                                <PinIcon
-                                  className={cn(
-                                    "size-3",
-                                    shortcutIds.includes(key) && "fill-current",
-                                  )}
-                                />
-                              </Button>
-                            </div>
-                            {board.cards.map((card) => (
-                              <ThreadButton
-                                key={scopedThreadKey(scopeThreadRef(card.environmentId, card.id))}
-                                thread={card}
-                                active={
-                                  activeRef
-                                    ? scopedThreadKey(activeRef) ===
-                                      scopedThreadKey(scopeThreadRef(card.environmentId, card.id))
-                                    : false
-                                }
-                                nested
-                                onClick={() => openThread(card)}
-                              />
-                            ))}
-                          </div>
-                        );
-                      })}
-                      {group.oneOffs.length ? (
-                        <div className="mt-1 border-t border-sidebar-border pt-1">
-                          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                            Chats
-                          </p>
-                          {group.oneOffs.map((thread) => (
-                            <ThreadButton
-                              key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
-                              thread={thread}
-                              active={
-                                activeRef
-                                  ? scopedThreadKey(activeRef) ===
-                                    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-                                  : false
-                              }
-                              onClick={() => openThread(thread)}
-                            />
-                          ))}
-                        </div>
-                      ) : null}
-                      {group.orphanCards.length ? (
-                        <div className="mt-1 border-t border-sidebar-border pt-1">
-                          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                            Orphan Cards
-                          </p>
-                          {group.orphanCards.map((thread) => (
-                            <ThreadButton
-                              key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
-                              thread={thread}
-                              active={
-                                activeRef
-                                  ? scopedThreadKey(activeRef) ===
-                                    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-                                  : false
-                              }
-                              nested
-                              onClick={() => openThread(thread)}
-                            />
-                          ))}
-                        </div>
-                      ) : null}
+                      <ProjectGroupRows
+                        group={group}
+                        context={rowContext}
+                        pinControl={pinControl}
+                      />
                     </CollapsiblePanel>
                   </Collapsible>
                 );
               })}
             </SidebarGroup>
-            {workspace.settledProjects.length ? (
-              <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
-                <Collapsible open={settledExpanded} onOpenChange={setSettledExpanded}>
-                  <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 rounded-md px-[var(--sidebar-row-content-inset)] text-left text-xs hover:bg-sidebar-accent">
-                    <ChevronDownIcon
-                      className={cn(
-                        "size-3 shrink-0 transition-transform",
-                        !settledExpanded && "-rotate-90",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1 truncate">
-                      Settled (
-                      {workspace.settledProjects.reduce(
-                        (count, group) => count + group.visibleCount,
-                        0,
-                      )}
-                      )
-                    </span>
-                  </CollapsibleTrigger>
-                  <CollapsiblePanel className="pl-3">
-                    {workspace.settledProjects.map((group) => {
-                      const project = projects.find(
-                        (item) =>
-                          item.environmentId === group.environmentId && item.id === group.projectId,
-                      );
-                      if (!project) return null;
-                      return (
-                        <div key={`${group.environmentId}:${group.projectId}`} className="py-1">
-                          <div className="flex items-center gap-2 px-2 text-[11px] text-muted-foreground">
-                            <ProjectFavicon project={project} className="size-3.5" />
-                            {project.title}
-                          </div>
-                          {group.masters.map((board) => (
-                            <div key={board.master.id}>
-                              <ThreadButton
-                                thread={board.master}
-                                active={false}
-                                onClick={() => openThread(board.master)}
-                              />
-                              {board.cards.map((card) => (
-                                <ThreadButton
-                                  key={card.id}
-                                  thread={card}
-                                  active={false}
-                                  nested
-                                  onClick={() => openThread(card)}
-                                />
-                              ))}
-                            </div>
-                          ))}
-                          {group.oneOffs.length ? (
-                            <div className="mt-1 border-t border-sidebar-border pt-1">
-                              <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">
-                                Chats
-                              </p>
-                              {group.oneOffs.map((thread) => (
-                                <ThreadButton
-                                  key={thread.id}
-                                  thread={thread}
-                                  active={false}
-                                  onClick={() => openThread(thread)}
-                                />
-                              ))}
-                            </div>
-                          ) : null}
-                          {group.orphanCards.map((thread) => (
-                            <ThreadButton
-                              key={thread.id}
-                              thread={thread}
-                              active={false}
-                              nested
-                              onClick={() => openThread(thread)}
-                            />
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </CollapsiblePanel>
-                </Collapsible>
-              </SidebarGroup>
-            ) : null}
+            <ShelfGroup
+              label="Snoozed"
+              groups={workspace.snoozedProjects}
+              expanded={snoozedExpanded}
+              onExpandedChange={setSnoozedExpanded}
+              projectTitle={shelfProjectTitle}
+              renderGroup={renderShelfGroup}
+            />
+            <ShelfGroup
+              label="Settled"
+              groups={workspace.settledProjects}
+              expanded={settledExpanded}
+              onExpandedChange={setSettledExpanded}
+              projectTitle={shelfProjectTitle}
+              renderGroup={renderShelfGroup}
+            />
           </>
         )}
       </SidebarContent>

@@ -69,7 +69,7 @@ export function useThreadActionMenu(input: {
   readonly projectCwd: string | null;
   readonly onStartRename: () => void;
 }) {
-  const { threadRef, projectCwd, onStartRename } = input;
+  const { threadRef: defaultThreadRef, projectCwd: defaultProjectCwd, onStartRename } = input;
   const router = useRouter();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -122,8 +122,14 @@ export function useThreadActionMenu(input: {
   });
   const copyThreadTranscript = useCopyThreadTranscript();
 
+  // `target` lets a list surface share one menu across its rows.
   const openMenu = useCallback(
-    (position: { x: number; y: number }) => {
+    (
+      position: { x: number; y: number },
+      target?: { readonly threadRef: ScopedThreadRef; readonly projectCwd: string | null },
+    ) => {
+      const threadRef = target ? target.threadRef : defaultThreadRef;
+      const projectCwd = target ? target.projectCwd : defaultProjectCwd;
       if (threadRef === null) return;
       void (async () => {
         const api = readLocalApi();
@@ -350,19 +356,19 @@ export function useThreadActionMenu(input: {
       copyPathToClipboard,
       copyThreadIdToClipboard,
       copyThreadTranscript,
+      defaultProjectCwd,
+      defaultThreadRef,
       deleteThread,
       handleNewThread,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
       onStartRename,
       pinThread,
-      projectCwd,
       projectGroupingSettings,
       projects,
       router,
       settleThread,
       snoozeThread,
-      threadRef,
       timestampFormat,
       unsettleThread,
       unsnoozeThread,
