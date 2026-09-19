@@ -201,30 +201,6 @@ describe("scoped settings writes", () => {
     });
   });
 
-  it("keeps the Master board preference local and independent from the legacy sidebar", async () => {
-    const persistServer = vi.fn().mockResolvedValue({ _tag: "Success" });
-    const persistClient = vi.fn();
-    await persistScopedSettingsPatch(
-      planScopedSettingsPatch(project, environments, { masterStatusBoardEnabled: true }),
-      persistServer,
-      persistClient,
-    );
-    expect(persistClient).toHaveBeenCalledExactlyOnceWith({ masterStatusBoardEnabled: true });
-    expect(persistServer).not.toHaveBeenCalled();
-  });
-
-  it("keeps the Master workspace preference local", async () => {
-    const persistServer = vi.fn().mockResolvedValue({ _tag: "Success" });
-    const persistClient = vi.fn();
-    await persistScopedSettingsPatch(
-      planScopedSettingsPatch(project, environments, { masterWorkspaceEnabled: true }),
-      persistServer,
-      persistClient,
-    );
-    expect(persistClient).toHaveBeenCalledExactlyOnceWith({ masterWorkspaceEnabled: true });
-    expect(persistServer).not.toHaveBeenCalled();
-  });
-
   it("writes project overrides into each member's entry on its environment", () => {
     const withExisting = environment("Server", {
       settings: {

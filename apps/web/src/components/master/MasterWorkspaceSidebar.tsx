@@ -1,6 +1,14 @@
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { ChevronDownIcon, PinIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 
 import { cn } from "~/lib/utils";
@@ -10,18 +18,19 @@ import { useProjects, useThreadShells } from "~/state/entities";
 import { buildThreadRouteParams, resolveThreadRouteRef } from "~/threadRoutes";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
 import { startNewThreadFromContext } from "~/lib/chatThreadActions";
-import { Button } from "./ui/button";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "./ui/collapsible";
-import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
-import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
-import { SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
-import { deriveMasterWorkspace, isMasterThreadTitle } from "./master/MasterStatusBoard.logic";
-import { ProjectFavicon } from "./ProjectFavicon";
+import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { SidebarContent, SidebarGroup, useSidebar } from "../ui/sidebar";
+import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChrome";
+import { SidebarThreadHeader } from "../sidebar/SidebarThreadHeader";
+import { deriveMasterWorkspace, isMasterThreadTitle } from "./MasterStatusBoard.logic";
+import { ProjectFavicon } from "../ProjectFavicon";
+import { useMasterWorkspaceEnabled } from "./useMasterSettings";
 import {
   ThreadRowLeadingStatus,
   ThreadRowTrailingStatus,
   ThreadWorktreeIndicator,
-} from "./ThreadStatusIndicators";
+} from "../ThreadStatusIndicators";
 
 export const SHORTCUTS_STORAGE_KEY = "t3code:master-workspace-shortcuts";
 
@@ -97,7 +106,15 @@ function ThreadButton({
   );
 }
 
-export default function MasterWorkspaceSidebar() {
+/**
+ * Mount point for AppSidebarLayout. Reads its own setting and falls back to
+ * whichever upstream sidebar would otherwise render.
+ */
+export function MasterWorkspaceSidebarSlot(props: { readonly fallback: ReactNode }) {
+  return useMasterWorkspaceEnabled() ? <MasterWorkspaceSidebar /> : props.fallback;
+}
+
+function MasterWorkspaceSidebar() {
   const projects = useProjects();
   const threads = useThreadShells();
   const navigate = useNavigate();

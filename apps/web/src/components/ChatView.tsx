@@ -372,7 +372,7 @@ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd, worktreeSetupAgentStarted } from "./chat/MessagesTimeline.logic";
 import { resolveComposerTimelineInset, resolveScrollToEndClearance } from "./composerFooterLayout";
 import { ChatHeader } from "./chat/ChatHeader";
-import { MasterStatusBoard } from "./master/MasterStatusBoard";
+import { MasterStatusBoardSlot } from "./master/MasterStatusBoard";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -2341,9 +2341,6 @@ export default function ChatView(props: ChatViewProps) {
     ? `${activeProject.environmentId}:${activeProject.workspaceRoot}`
     : null;
   const clientSettingsHydrated = useClientSettingsHydrated();
-  const masterStatusBoardEnabled = useClientSettings(
-    (settings) => settings.masterStatusBoardEnabled,
-  );
   const [pendingFileSurfaceIdsByProject, setPendingFileSurfaceIdsByProject] = useState<
     ReadonlyMap<string, ReadonlySet<string>>
   >(() => new Map());
@@ -9960,10 +9957,7 @@ export default function ChatView(props: ChatViewProps) {
             onDeleteProjectScript={deleteProjectScript}
           />
         </WorkspacePageHeader>
-
-        {clientSettingsHydrated && masterStatusBoardEnabled ? (
-          <MasterStatusBoard activeThread={activeThread} />
-        ) : null}
+        <MasterStatusBoardSlot activeThread={activeThread} />
 
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">

@@ -13,6 +13,7 @@ import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "../Sidebar
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { deriveMasterBoard } from "./MasterStatusBoard.logic";
+import { useMasterStatusBoardEnabled } from "./useMasterSettings";
 
 const STATUS_LABEL: Record<SidebarThreadStatus, string> = {
   approval: "Approval",
@@ -65,7 +66,14 @@ function CardRow(props: {
   );
 }
 
-export function MasterStatusBoard(props: { readonly activeThread: Thread }) {
+/** Mount point for ChatView. Reads its own setting. */
+export function MasterStatusBoardSlot(props: { readonly activeThread: Thread }) {
+  return useMasterStatusBoardEnabled() ? (
+    <MasterStatusBoard activeThread={props.activeThread} />
+  ) : null;
+}
+
+function MasterStatusBoard(props: { readonly activeThread: Thread }) {
   const projectRefs = useMemo(
     () => [scopeProjectRef(props.activeThread.environmentId, props.activeThread.projectId)],
     [props.activeThread.environmentId, props.activeThread.projectId],

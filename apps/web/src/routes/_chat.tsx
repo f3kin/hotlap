@@ -5,11 +5,8 @@ import { useEffect, useMemo } from "react";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { resolveThreadRouteTarget } from "../threadRoutes";
-import {
-  useClientSettings,
-  useLegacySidebarEnabled,
-  useMasterWorkspaceEnabled,
-} from "../hooks/useSettings";
+import { useClientSettings } from "../hooks/useSettings";
+import { useLegacySidebarShown } from "../components/master/useMasterSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
@@ -34,8 +31,7 @@ function ChatRouteGlobalShortcuts() {
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const legacySidebarEnabled = useLegacySidebarEnabled();
-  const masterWorkspaceEnabled = useMasterWorkspaceEnabled();
+  const legacySidebarEnabled = useLegacySidebarShown();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -102,7 +98,7 @@ function ChatRouteGlobalShortcuts() {
         // The default sidebar routes creation through the command palette
         // whenever there is a real choice to make; the legacy sidebar (and
         // single-project setups) keep the immediate contextual create.
-        if ((!legacySidebarEnabled || masterWorkspaceEnabled) && projectGroupCount > 1) {
+        if (!legacySidebarEnabled && projectGroupCount > 1) {
           openCommandPalette({ open: "new-thread-in" });
           return;
         }
@@ -175,7 +171,6 @@ function ChatRouteGlobalShortcuts() {
     routeThreadRef,
     selectedThreadKeysSize,
     legacySidebarEnabled,
-    masterWorkspaceEnabled,
     terminalOpen,
   ]);
 

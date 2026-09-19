@@ -379,14 +379,6 @@ export function useLegacySidebarEnabled(): boolean {
   return settingsHydrated && legacySidebarEnabled;
 }
 
-/** Personal Master-first navigation. It deliberately wins over the saved legacy
- * fallback without rewriting that preference. */
-export function useMasterWorkspaceEnabled(): boolean {
-  const settingsHydrated = useClientSettingsHydrated();
-  const enabled = useClientSettingsValue().masterWorkspaceEnabled;
-  return settingsHydrated && enabled;
-}
-
 /** Read current settings for one environment, merged with client-local preferences. */
 export function useEnvironmentSettings<T = UnifiedSettings>(
   environmentId: EnvironmentId,

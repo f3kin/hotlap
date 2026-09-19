@@ -1,5 +1,7 @@
 import { Spinner } from "~/components/ui/spinner";
 import { NotificationSettings } from "./NotificationSettings";
+import { MasterSettingsRows } from "../master/MasterSettingsRows";
+import { getChangedMasterSettingLabels, MASTER_SETTINGS_DEFAULTS } from "../master/masterSettings";
 import { ArchiveIcon, ArchiveX, CheckIcon, ChevronRightIcon, SettingsIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
@@ -574,12 +576,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
         ? ["Proactive panels"]
         : []),
-      ...(settings.masterStatusBoardEnabled !== DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled
-        ? ["Master status board"]
-        : []),
-      ...(settings.masterWorkspaceEnabled !== DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled
-        ? ["Master workspace"]
-        : []),
+      ...getChangedMasterSettingLabels(settings),
       ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
         ? ["Show skills in slash menu"]
         : []),
@@ -762,8 +759,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
-      masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
-      masterWorkspaceEnabled: DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled,
+      ...MASTER_SETTINGS_DEFAULTS,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
@@ -2878,58 +2874,7 @@ export function GeneralSettingsPanel() {
       </SettingsSection>
 
       <SettingsSection id="projects-and-threads" title="Projects & threads">
-        <SettingsRow
-          {...searchableSetting("master-workspace")}
-          title="Master workspace"
-          description="Use Pinned Masters and compact project trees in this client. Existing sidebar preferences stay saved."
-          resetAction={
-            settings.masterWorkspaceEnabled !== DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled ? (
-              <SettingResetButton
-                label="Master workspace"
-                onClick={() =>
-                  updateSettings({
-                    masterWorkspaceEnabled: DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.masterWorkspaceEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ masterWorkspaceEnabled: Boolean(checked) })
-              }
-              aria-label="Master workspace"
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("master-status-board")}
-          description="Show owned Card threads and other Masters above Master chats."
-          resetAction={
-            settings.masterStatusBoardEnabled !==
-            DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled ? (
-              <SettingResetButton
-                label="Master status board"
-                onClick={() =>
-                  updateSettings({
-                    masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.masterStatusBoardEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ masterStatusBoardEnabled: Boolean(checked) })
-              }
-              aria-label="Master status board"
-            />
-          }
-        />
+        <MasterSettingsRows />
         <SettingsRow
           serverScoped
           settingKeys={["newWorktreesStartFromOrigin"]}

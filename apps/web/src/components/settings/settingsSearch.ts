@@ -7,6 +7,7 @@ import {
   type ResolvedSettingsScope,
   type SettingsScopeSearch,
 } from "./settingsScope";
+import { MASTER_SETTINGS_SEARCH_ITEMS } from "../master/masterSettings";
 
 export type SettingsPath =
   | "/settings/projects"
@@ -243,18 +244,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/general",
     searchTerms: ["notification sound alert completion input approval desktop"],
   },
-  {
-    id: "master-workspace",
-    title: "Master workspace",
-    to: "/settings/general",
-    searchTerms: ["master pinned projects cards one-off sidebar personal"],
-  },
-  {
-    id: "master-status-board",
-    title: "Master status board",
-    to: "/settings/general",
-    searchTerms: ["master card status board threads workflow"],
-  },
+  ...MASTER_SETTINGS_SEARCH_ITEMS,
   {
     id: "in-app-notifications",
     title: "In-app notifications",
