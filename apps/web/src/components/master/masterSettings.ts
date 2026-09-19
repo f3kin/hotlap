@@ -1,10 +1,12 @@
-import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts/settings";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 
 import type { SettingsSearchItem } from "../settings/settingsSearch";
 
 /**
  * Master workspace settings, owned here so upstream settings files only carry
  * one-line mount points. Both preferences are client-local and default off.
+ * They reset from their own rows rather than the panel-wide "Restore defaults",
+ * which would need Master bookkeeping inside SettingsPanels.
  */
 export const MASTER_SETTINGS_SEARCH_ITEMS = [
   {
@@ -25,17 +27,3 @@ export const MASTER_SETTINGS_DEFAULTS = {
   masterWorkspaceEnabled: DEFAULT_UNIFIED_SETTINGS.masterWorkspaceEnabled,
   masterStatusBoardEnabled: DEFAULT_UNIFIED_SETTINGS.masterStatusBoardEnabled,
 } as const;
-
-/** Labels for "Restore defaults", in the order the rows render. */
-export function getChangedMasterSettingLabels(
-  settings: Pick<UnifiedSettings, keyof typeof MASTER_SETTINGS_DEFAULTS>,
-): ReadonlyArray<string> {
-  return [
-    ...(settings.masterWorkspaceEnabled !== MASTER_SETTINGS_DEFAULTS.masterWorkspaceEnabled
-      ? ["Master workspace"]
-      : []),
-    ...(settings.masterStatusBoardEnabled !== MASTER_SETTINGS_DEFAULTS.masterStatusBoardEnabled
-      ? ["Master status board"]
-      : []),
-  ];
-}

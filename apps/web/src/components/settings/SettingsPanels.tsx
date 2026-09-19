@@ -2,7 +2,6 @@ import { SettingsGroup } from "./SettingsGroup";
 import { Spinner } from "~/components/ui/spinner";
 import { NotificationSettings } from "./NotificationSettings";
 import { MasterSettingsRows } from "../master/MasterSettingsRows";
-import { getChangedMasterSettingLabels, MASTER_SETTINGS_DEFAULTS } from "../master/masterSettings";
 import { ArchiveIcon, ArchiveX, CheckIcon, ChevronRightIcon, SettingsIcon } from "lucide-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
@@ -577,7 +576,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
         ? ["Proactive panels"]
         : []),
-      ...getChangedMasterSettingLabels(settings),
       ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
         ? ["Show skills in slash menu"]
         : []),
@@ -658,8 +656,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffFilesCollapsed,
       settings.diffIgnoreWhitespace,
       settings.diffLayout,
-      settings.masterStatusBoardEnabled,
-      settings.masterWorkspaceEnabled,
       settings.proactivePanelsEnabled,
       settings.environmentIdentificationMode,
       settings.contextWindowMeterEnabled,
@@ -764,7 +760,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
-      ...MASTER_SETTINGS_DEFAULTS,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerCollapseOnScroll: DEFAULT_UNIFIED_SETTINGS.composerCollapseOnScroll,
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,

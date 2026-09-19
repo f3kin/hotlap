@@ -555,6 +555,30 @@ function MasterWorkspaceSidebar() {
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [activeKey, keybindings, openThread, orderedKeys, rowByKey, routeTerminalOpen]);
 
+  // chat.new opens the "New thread in" picker whenever there is a real choice,
+  // like the default sidebar, even if the legacy sidebar preference is saved
+  // underneath this one. Capture phase runs before the route's global handler,
+  // which skips events already handled here.
+  useEffect(() => {
+    const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || isCommandPaletteOpen() || projectGroupCount <= 1) return;
+      const command = resolveShortcutCommand(event, keybindings, {
+        platform: navigator.platform,
+        context: {
+          terminalFocus: isTerminalFocused(),
+          terminalOpen: routeTerminalOpen,
+          modelPickerOpen: isModelPickerOpen(),
+        },
+      });
+      if (command !== "chat.new") return;
+      event.preventDefault();
+      event.stopPropagation();
+      openCommandPalette({ open: "new-thread-in" });
+    };
+    window.addEventListener("keydown", onWindowKeyDown, true);
+    return () => window.removeEventListener("keydown", onWindowKeyDown, true);
+  }, [keybindings, projectGroupCount, routeTerminalOpen]);
+
   // Hints show only while the held modifiers exactly match a jump binding.
   const shortcutModifiers = useShortcutModifierState();
   const terminalFocused = useTerminalFocus();
