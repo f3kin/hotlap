@@ -135,11 +135,11 @@ describe("exclusive shelves", () => {
       { thread: pinnedCard, cards: [] },
     ]);
     expect(model.activeProjects[0]).toMatchObject({ masters: [], visibleCount: 0 });
-    // A parked Card stays on its own shelf under a structural header.
-    expect(model.snoozedProjects[0]?.masters[0]).toMatchObject({
-      master,
-      cards: [snoozedCard],
-    });
+    // A parked Card stays on its own shelf under an inert structural header,
+    // so the pinned Master is navigable exactly once.
+    const snoozedGroup = model.snoozedProjects[0];
+    expect(snoozedGroup?.masters[0]).toEqual({ master, cards: [snoozedCard], structural: true });
+    expect(snoozedGroup ? navigableRows(snoozedGroup) : []).toEqual([snoozedCard]);
   });
 
   it("never offers an archived Master as a navigable row, only its live Cards", () => {
@@ -151,7 +151,7 @@ describe("exclusive shelves", () => {
 
     const group = workspace([archivedMaster, card, chat]).activeProjects[0];
 
-    expect(group?.masters[0]?.master).toBe(archivedMaster);
+    expect(group?.masters[0]).toMatchObject({ master: archivedMaster, structural: true });
     expect(group ? navigableRows(group) : []).toEqual([card, chat]);
   });
 });

@@ -26,10 +26,21 @@ export interface MasterPinnedEntry<T extends MasterBoardThread> {
   readonly cards: readonly T[];
 }
 
+/**
+ * A Master and its Cards on one shelf. `structural` means the Master itself
+ * lives elsewhere (another shelf, or archived) and only heads its Cards here:
+ * render it as an inert heading, never as a second navigable copy.
+ */
+export interface MasterShelfBoard<T extends MasterBoardThread> {
+  readonly master: T;
+  readonly cards: readonly T[];
+  readonly structural: boolean;
+}
+
 export interface MasterWorkspaceProject<T extends MasterBoardThread> {
   readonly environmentId: string;
   readonly projectId: string;
-  readonly masters: readonly MasterBoardModel<T>[];
+  readonly masters: readonly MasterShelfBoard<T>[];
   readonly oneOffs: readonly T[];
   readonly orphanCards: readonly T[];
   readonly visibleCount: number;
@@ -198,7 +209,7 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
         masters: row.masters.sort(newestFirst).map((master) => ({
           master,
           cards: (cardsByOwner.get(threadKey(master)) ?? []).sort(newestFirst),
-          peerMasters: [],
+          structural: !memberKeys.has(threadKey(master)),
         })),
         oneOffs: row.oneOffs.sort(newestFirst),
         orphanCards: row.orphanCards.sort(newestFirst),
@@ -225,14 +236,14 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
 }
 
 /**
- * A project group's rows in render order, minus archived Masters: those are
- * structural headings for their live Cards, not navigable threads. Drives
+ * A project group's rows in render order, minus structural Master headings,
+ * so every navigable thread appears exactly once across shelves. Drives
  * mod+1..9 and next/previous thread.
  */
 export function navigableRows<T extends MasterBoardThread>(group: MasterWorkspaceProject<T>): T[] {
   return [
     ...group.masters.flatMap((board) =>
-      board.master.archivedAt == null ? [board.master, ...board.cards] : [...board.cards],
+      board.structural ? [...board.cards] : [board.master, ...board.cards],
     ),
     ...group.oneOffs,
     ...group.orphanCards,

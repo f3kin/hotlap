@@ -35,6 +35,8 @@ import { isModelPickerOpen } from "~/modelPickerVisibility";
 import { useShortcutModifierState } from "~/shortcutModifierState";
 import { useTerminalFocus } from "~/hooks/useTerminalFocus";
 import { isTerminalFocused } from "~/lib/terminalFocus";
+import { isPreviewFocused } from "~/lib/previewFocus";
+import { selectActiveRightPanel, useRightPanelStore } from "~/rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
 import { useProjects, useServerConfigs } from "~/state/entities";
 import { usePrimaryEnvironmentId } from "~/state/environments";
@@ -138,7 +140,6 @@ function ThreadRowButton({
   const key = rowKey(thread);
   const active = context.activeKey === key;
   const selected = context.selectedKey === key;
-  const archived = thread.archivedAt != null;
   const snoozedUntil =
     thread.snoozedUntil != null && effectiveSnoozed(thread, { now: context.now })
       ? thread.snoozedUntil
@@ -175,17 +176,6 @@ function ThreadRowButton({
             if (!committedRef.current) context.onRenameCommit(thread, event.currentTarget.value);
           }}
         />
-      </div>
-    );
-  }
-
-  // An archived Master is only here as the owner of live Cards: a heading, not
-  // a navigable thread (it isn't in the live stream).
-  if (archived) {
-    return (
-      <div className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-2 text-xs text-muted-foreground">
-        <span className="min-w-0 flex-1 truncate">{shortTitle(thread.title)}</span>
-        <span className="shrink-0 text-[10px]">Archived</span>
       </div>
     );
   }
@@ -258,6 +248,19 @@ function ThreadRowButton({
   );
 }
 
+/**
+ * A Master that only heads its Cards on this shelf: it is archived, or its own
+ * row lives on another shelf. Inert, so each thread stays navigable once.
+ */
+function MasterHeading({ thread }: { thread: ThreadRow }) {
+  return (
+    <div className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-2 text-xs text-muted-foreground">
+      <span className="min-w-0 flex-1 truncate">{shortTitle(thread.title)}</span>
+      {thread.archivedAt != null ? <span className="shrink-0 text-[10px]">Archived</span> : null}
+    </div>
+  );
+}
+
 function ProjectGroupRows({
   group,
   context,
@@ -278,11 +281,15 @@ function ProjectGroupRows({
     <>
       {group.masters.map((board) => (
         <div key={rowKey(board.master)} className="mb-1">
-          <ThreadRowButton
-            thread={board.master}
-            context={context}
-            trailing={pinControl(board.master)}
-          />
+          {board.structural ? (
+            <MasterHeading thread={board.master} />
+          ) : (
+            <ThreadRowButton
+              thread={board.master}
+              context={context}
+              trailing={pinControl(board.master)}
+            />
+          )}
           {board.cards.map((card) => (
             <ThreadRowButton key={rowKey(card)} thread={card} context={context} nested />
           ))}
@@ -506,6 +513,9 @@ function MasterWorkspaceSidebar() {
     [isMobile, navigate, setOpenMobile],
   );
 
+  const routePreviewOpen = useRightPanelStore((state) =>
+    activeRef ? selectActiveRightPanel(state.byThreadKey, activeRef) === "preview" : false,
+  );
   const routeTerminalOpen = useTerminalUiStateStore((state) =>
     activeRef
       ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, activeRef).terminalOpen
@@ -556,12 +566,13 @@ function MasterWorkspaceSidebar() {
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || isCommandPaletteOpen() || projectGroupCount <= 1) return;
+      // Same context as the route's handler, so both resolve the same command.
       const command = resolveShortcutCommand(event, keybindings, {
-        platform: navigator.platform,
         context: {
           terminalFocus: isTerminalFocused(),
           terminalOpen: routeTerminalOpen,
-          modelPickerOpen: isModelPickerOpen(),
+          previewFocus: isPreviewFocused(),
+          previewOpen: routePreviewOpen,
         },
       });
       if (command !== "chat.new") return;
@@ -571,7 +582,7 @@ function MasterWorkspaceSidebar() {
     };
     window.addEventListener("keydown", onWindowKeyDown, true);
     return () => window.removeEventListener("keydown", onWindowKeyDown, true);
-  }, [keybindings, projectGroupCount, routeTerminalOpen]);
+  }, [keybindings, projectGroupCount, routePreviewOpen, routeTerminalOpen]);
 
   // Hints show only while the held modifiers exactly match a jump binding.
   const shortcutModifiers = useShortcutModifierState();
