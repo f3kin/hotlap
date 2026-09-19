@@ -15,6 +15,7 @@ import { ChevronDownIcon, EllipsisIcon, PinIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -631,8 +632,11 @@ function MasterWorkspaceSidebar() {
     projectCwd: null,
     onStartRename: startRename,
   });
+  // Synced in the commit that changes the route (layout effects run
+  // synchronously there), so a park completing after a navigation always sees
+  // the new route and never redirects the user.
   const activeKeyRef = useRef(activeKey);
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeKeyRef.current = activeKey;
   }, [activeKey]);
   const onMenu = useCallback(
