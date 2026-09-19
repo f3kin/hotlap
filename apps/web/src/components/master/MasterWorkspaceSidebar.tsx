@@ -196,7 +196,9 @@ function ThreadRowButton({
       <Button
         variant="ghost"
         className={cn(
-          "min-h-11 w-full min-w-0 justify-start gap-2 px-2 text-xs font-normal",
+          // Button's base classes include shrink-0; this row must yield space
+          // to the actions and pin buttons beside it.
+          "min-h-11 min-w-0 flex-1 shrink justify-start gap-2 px-2 text-xs font-normal",
           nested && "pl-4 text-muted-foreground",
           (archived || snoozedUntil) && "text-muted-foreground",
           (active || selected) && "bg-sidebar-row-active text-sidebar-foreground",
