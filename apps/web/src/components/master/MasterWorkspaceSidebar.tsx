@@ -37,6 +37,10 @@ import { useTerminalFocus } from "~/hooks/useTerminalFocus";
 import { isTerminalFocused } from "~/lib/terminalFocus";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
 import { useProjects, useServerConfigs } from "~/state/entities";
+import { usePrimaryEnvironmentId } from "~/state/environments";
+import { useClientSettings } from "~/hooks/useSettings";
+import { selectProjectGroupingSettings } from "~/logicalProject";
+import { buildSidebarProjectSnapshots } from "~/sidebarProjectGrouping";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -346,6 +350,20 @@ function ShelfGroup({
 
 function MasterWorkspaceSidebar() {
   const projects = useProjects();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  // Logical project groups (worktrees fold into their repo), the same count the
+  // chat.new shortcut uses to decide between the picker and a direct create.
+  const projectGroupCount = useMemo(
+    () =>
+      buildSidebarProjectSnapshots({
+        projects,
+        settings: projectGroupingSettings,
+        primaryEnvironmentId,
+        resolveEnvironmentLabel: () => null,
+      }).length,
+    [primaryEnvironmentId, projectGroupingSettings, projects],
+  );
   const environmentIds = useMemo(
     () => [...new Set(projects.map((project) => project.environmentId))] as EnvironmentId[],
     [projects],
@@ -442,8 +460,11 @@ function MasterWorkspaceSidebar() {
     for (const group of workspace.activeProjects) {
       if (projectOf(group) && isProjectOpen(group)) rows.push(...groupRowsInOrder(group));
     }
-    if (snoozedExpanded) rows.push(...workspace.snoozedProjects.flatMap(groupRowsInOrder));
-    if (settledExpanded) rows.push(...workspace.settledProjects.flatMap(groupRowsInOrder));
+    // Only rows that actually render: shelf groups without a project record don't.
+    const shelfRows = (groups: readonly ProjectGroup[]) =>
+      groups.filter((group) => projectOf(group)).flatMap(groupRowsInOrder);
+    if (snoozedExpanded) rows.push(...shelfRows(workspace.snoozedProjects));
+    if (settledExpanded) rows.push(...shelfRows(workspace.settledProjects));
     return rows;
   }, [
     isProjectOpen,
@@ -673,7 +694,7 @@ function MasterWorkspaceSidebar() {
   };
   const onNewThread = (event?: MouseEvent) => {
     if (isMobile) setOpenMobile(false);
-    if (projects.length > 1 && !event?.shiftKey) {
+    if (projectGroupCount > 1 && !event?.shiftKey) {
       openCommandPalette({ open: "new-thread-in" });
       return;
     }
@@ -688,7 +709,7 @@ function MasterWorkspaceSidebar() {
   // only the picker's shortcut, and chat.newLocal is the direct-create twin.
   const newThreadShortcutLabel =
     shortcutLabelForCommand(keybindings, "chat.new") ??
-    (projects.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
+    (projectGroupCount <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
 
   const shelfProjectTitle = (group: ProjectGroup) => {
@@ -720,7 +741,7 @@ function MasterWorkspaceSidebar() {
               newThreadDisabled={false}
               newThreadShortcutLabel={newThreadShortcutLabel}
               newThreadInProjectShortcutLabel={newThreadInProjectShortcutLabel}
-              showNewThreadInProjectHint={projects.length > 1}
+              showNewThreadInProjectHint={projectGroupCount > 1}
               searchInputRef={searchInputRef}
               searchQuery={searchQuery}
               onSearchQueryChange={changeSearchQuery}

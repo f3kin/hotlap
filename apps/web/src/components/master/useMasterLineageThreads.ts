@@ -26,8 +26,11 @@ export function useMasterLineageThreads(
   // Arrivals need no refetch: live rows already win over archived ones.
   const previousLiveKeysRef = useRef<ReadonlySet<string> | null>(null);
   useEffect(() => {
+    const watched = new Set<string>(environmentIds);
     const liveKeys = new Set<string>();
-    for (const thread of liveThreads) liveKeys.add(`${thread.environmentId}:${thread.id}`);
+    for (const thread of liveThreads) {
+      if (watched.has(thread.environmentId)) liveKeys.add(`${thread.environmentId}:${thread.id}`);
+    }
     const previous = previousLiveKeysRef.current;
     previousLiveKeysRef.current = liveKeys;
     if (previous === null) return;
@@ -37,7 +40,7 @@ export function useMasterLineageThreads(
         return;
       }
     }
-  }, [liveThreads, refresh]);
+  }, [environmentIds, liveThreads, refresh]);
 
   return useMemo(() => {
     const archived: EnvironmentThreadShell[] = [];
