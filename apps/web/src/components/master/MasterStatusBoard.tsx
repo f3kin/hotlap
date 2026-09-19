@@ -45,16 +45,22 @@ function cardStatus(
 ): {
   readonly label: string;
   readonly dot: string;
+  readonly needsYou: boolean;
 } {
-  // Same precedence as the sidebar shelves: snooze outranks settlement.
+  // Same precedence as the sidebar shelves: snooze outranks settlement, and a
+  // parked Card never counts as needing you, whatever its runtime status.
   if (effectiveSnoozed(thread, { now })) {
-    return { label: "Snoozed", dot: "bg-muted-foreground/60" };
+    return { label: "Snoozed", dot: "bg-muted-foreground/60", needsYou: false };
   }
   if (thread.settledOverride === "settled") {
-    return { label: "Completed", dot: "bg-muted-foreground" };
+    return { label: "Completed", dot: "bg-muted-foreground", needsYou: false };
   }
   const status = resolveSidebarThreadStatus(thread);
-  return { label: STATUS_LABEL[status], dot: STATUS_DOT[status] };
+  return {
+    label: STATUS_LABEL[status],
+    dot: STATUS_DOT[status],
+    needsYou: status === "approval" || status === "input" || status === "failed",
+  };
 }
 
 function shortTitle(title: string): string {
@@ -111,10 +117,7 @@ function MasterStatusBoard(props: { readonly activeThread: Thread }) {
 
   if (board === null) return null;
 
-  const attentionCount = board.cards.filter((thread) => {
-    const status = resolveSidebarThreadStatus(thread);
-    return status === "approval" || status === "input" || status === "failed";
-  }).length;
+  const attentionCount = board.cards.filter((thread) => cardStatus(thread, now).needsYou).length;
   const openThread = (thread: EnvironmentThreadShell) => {
     void navigate({
       to: "/$environmentId/$threadId",

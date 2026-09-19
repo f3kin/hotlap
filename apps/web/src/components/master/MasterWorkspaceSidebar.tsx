@@ -70,6 +70,8 @@ import {
 } from "../ThreadStatusIndicators";
 import {
   deriveMasterWorkspace,
+  isMasterThreadTitle,
+  navigableRows,
   type MasterShelf,
   type MasterWorkspaceProject,
 } from "./MasterStatusBoard.logic";
@@ -96,15 +98,6 @@ function projectWorkSummary(group: ProjectGroup) {
   if (group.oneOffs.length) return `${group.oneOffs.length} Chats`;
   if (group.orphanCards.length) return `${group.orphanCards.length} Orphan Cards`;
   return "No threads";
-}
-
-/** A project's threads in the order they render; drives mod+1..9 and traversal. */
-function groupRowsInOrder(group: ProjectGroup): ThreadRow[] {
-  return [
-    ...group.masters.flatMap((board) => [board.master, ...board.cards]),
-    ...group.oneOffs,
-    ...group.orphanCards,
-  ];
 }
 
 /**
@@ -186,6 +179,17 @@ function ThreadRowButton({
     );
   }
 
+  // An archived Master is only here as the owner of live Cards: a heading, not
+  // a navigable thread (it isn't in the live stream).
+  if (archived) {
+    return (
+      <div className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-2 text-xs text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">{shortTitle(thread.title)}</span>
+        <span className="shrink-0 text-[10px]">Archived</span>
+      </div>
+    );
+  }
+
   const openMenuAtElement = (element: HTMLElement) => {
     const rect = element.getBoundingClientRect();
     context.onMenu(thread, { x: rect.left, y: rect.bottom + 4 });
@@ -200,18 +204,16 @@ function ThreadRowButton({
           // to the actions and pin buttons beside it.
           "min-h-11 min-w-0 flex-1 shrink justify-start gap-2 px-2 text-xs font-normal",
           nested && "pl-4 text-muted-foreground",
-          (archived || snoozedUntil) && "text-muted-foreground",
+          snoozedUntil && "text-muted-foreground",
           (active || selected) && "bg-sidebar-row-active text-sidebar-foreground",
         )}
         aria-current={active ? "page" : undefined}
         onClick={() => context.onOpen(thread)}
         onContextMenu={(event: MouseEvent) => {
-          if (archived) return;
           event.preventDefault();
           context.onMenu(thread, { x: event.clientX, y: event.clientY });
         }}
         onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
-          if (archived) return;
           if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
             event.preventDefault();
             openMenuAtElement(event.currentTarget);
@@ -221,7 +223,6 @@ function ThreadRowButton({
         {pinned ? <PinIcon className="size-3 shrink-0 text-muted-foreground" /> : null}
         <ThreadRowLeadingStatus thread={thread} />
         <span className="min-w-0 flex-1 truncate text-left">{shortTitle(thread.title)}</span>
-        {archived ? <span className="shrink-0 text-[10px]">Archived</span> : null}
         {snoozedUntil ? (
           <span className="shrink-0 text-[10px]">
             {snoozeWakeLabel(snoozedUntil, { now: context.now })}
@@ -238,22 +239,20 @@ function ThreadRowButton({
           {jumpLabel}
         </span>
       ) : null}
-      {archived ? null : (
-        <Button
-          variant="ghost"
-          className={cn(
-            "min-h-11 min-w-8 shrink-0 px-0 text-muted-foreground",
-            // Hover-revealed on desktop; always reachable on touch.
-            !context.isMobile &&
-              "opacity-0 focus-visible:opacity-100 group-hover/master-row:opacity-100",
-            context.isMobile && "min-w-11",
-          )}
-          aria-label={`Thread actions for ${shortTitle(thread.title)}`}
-          onClick={(event: MouseEvent<HTMLButtonElement>) => openMenuAtElement(event.currentTarget)}
-        >
-          <EllipsisIcon className="size-3.5" />
-        </Button>
-      )}
+      <Button
+        variant="ghost"
+        className={cn(
+          "min-h-11 min-w-8 shrink-0 px-0 text-muted-foreground",
+          // Hover-revealed on desktop; always reachable on touch.
+          !context.isMobile &&
+            "opacity-0 focus-visible:opacity-100 group-hover/master-row:opacity-100",
+          context.isMobile && "min-w-11",
+        )}
+        aria-label={`Thread actions for ${shortTitle(thread.title)}`}
+        onClick={(event: MouseEvent<HTMLButtonElement>) => openMenuAtElement(event.currentTarget)}
+      >
+        <EllipsisIcon className="size-3.5" />
+      </Button>
       {trailing}
     </div>
   );
@@ -397,15 +396,20 @@ function MasterWorkspaceSidebar() {
       serverConfigs.get(environmentId)?.environment.capabilities[name] === true,
     [serverConfigs],
   );
-  // Same precedence as the default sidebar: snooze outranks settlement.
+  // Same precedence as the default sidebar: snooze, then settlement, then pin.
   const shelfOf = useCallback(
-    (thread: ThreadRow): MasterShelf =>
-      capability(thread.environmentId, "threadSnooze") && effectiveSnoozed(thread, { now })
-        ? "snoozed"
-        : capability(thread.environmentId, "threadSettlement") &&
-            thread.settledOverride === "settled"
-          ? "settled"
-          : "active",
+    (thread: ThreadRow): MasterShelf => {
+      if (capability(thread.environmentId, "threadSnooze") && effectiveSnoozed(thread, { now })) {
+        return "snoozed";
+      }
+      if (
+        capability(thread.environmentId, "threadSettlement") &&
+        thread.settledOverride === "settled"
+      ) {
+        return "settled";
+      }
+      return thread.pinnedAt != null ? "pinned" : "active";
+    },
     [capability, now],
   );
   const liveThreads = useMemo(
@@ -424,13 +428,13 @@ function MasterWorkspaceSidebar() {
       }),
     [projects, shelfOf, threads],
   );
-  const pinnedThreads = useMemo(
-    () =>
-      sortPinnedThreadsForSidebar(
-        liveThreads.filter((thread) => thread.pinnedAt != null && shelfOf(thread) === "active"),
-      ),
-    [liveThreads, shelfOf],
-  );
+  // Pinned order follows the shared pin sort, same as the default sidebar.
+  const pinnedEntries = useMemo(() => {
+    const entryByKey = new Map(workspace.pinned.map((entry) => [rowKey(entry.thread), entry]));
+    return sortPinnedThreadsForSidebar(workspace.pinned.map((entry) => entry.thread)).flatMap(
+      (thread) => entryByKey.get(rowKey(thread)) ?? [],
+    );
+  }, [workspace.pinned]);
   const searchResults = useMemo(
     () =>
       searchQuery.trim()
@@ -450,27 +454,26 @@ function MasterWorkspaceSidebar() {
   const isProjectOpen = useCallback(
     (group: ProjectGroup) =>
       openProjectKeys.has(`${group.environmentId}:${group.projectId}`) ||
-      (activeKey !== null &&
-        groupRowsInOrder(group).some((thread) => rowKey(thread) === activeKey)),
+      (activeKey !== null && navigableRows(group).some((thread) => rowKey(thread) === activeKey)),
     [activeKey, openProjectKeys],
   );
 
   // Rows in on-screen order, for mod+1..9 and next/previous thread.
   const orderedRows = useMemo(() => {
     if (searchQuery.trim()) return searchResults;
-    const rows: ThreadRow[] = [...pinnedThreads];
+    const rows: ThreadRow[] = pinnedEntries.flatMap((entry) => [entry.thread, ...entry.cards]);
     for (const group of workspace.activeProjects) {
-      if (projectOf(group) && isProjectOpen(group)) rows.push(...groupRowsInOrder(group));
+      if (projectOf(group) && isProjectOpen(group)) rows.push(...navigableRows(group));
     }
     // Only rows that actually render: shelf groups without a project record don't.
     const shelfRows = (groups: readonly ProjectGroup[]) =>
-      groups.filter((group) => projectOf(group)).flatMap(groupRowsInOrder);
+      groups.filter((group) => projectOf(group)).flatMap(navigableRows);
     if (snoozedExpanded) rows.push(...shelfRows(workspace.snoozedProjects));
     if (settledExpanded) rows.push(...shelfRows(workspace.settledProjects));
     return rows;
   }, [
     isProjectOpen,
-    pinnedThreads,
+    pinnedEntries,
     projectOf,
     searchQuery,
     searchResults,
@@ -478,17 +481,8 @@ function MasterWorkspaceSidebar() {
     snoozedExpanded,
     workspace,
   ]);
-  const orderedKeys = useMemo(() => {
-    const seen = new Set<string>();
-    const keys: string[] = [];
-    for (const thread of orderedRows) {
-      const key = rowKey(thread);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      keys.push(key);
-    }
-    return keys;
-  }, [orderedRows]);
+  // Shelves are exclusive, so every row key is unique.
+  const orderedKeys = useMemo(() => orderedRows.map(rowKey), [orderedRows]);
   const rowByKey = useMemo(
     () => new Map(orderedRows.map((thread) => [rowKey(thread), thread])),
     [orderedRows],
@@ -804,18 +798,28 @@ function MasterWorkspaceSidebar() {
               <p className="px-[var(--sidebar-row-content-inset)] pb-1 text-[11px] font-medium text-muted-foreground">
                 Pinned
               </p>
-              {pinnedThreads.length === 0 ? (
+              {pinnedEntries.length === 0 ? (
                 <p className="px-[var(--sidebar-row-content-inset)] py-2 text-xs text-muted-foreground">
                   Pin a Master to keep it here.
                 </p>
               ) : (
-                pinnedThreads.map((thread) => (
-                  <ThreadRowButton
-                    key={rowKey(thread)}
-                    thread={thread}
-                    context={rowContext}
-                    pinned
-                  />
+                pinnedEntries.map(({ thread, cards }) => (
+                  <div key={rowKey(thread)}>
+                    <ThreadRowButton
+                      thread={thread}
+                      context={rowContext}
+                      pinned
+                      trailing={isMasterThreadTitle(thread.title) ? pinControl(thread) : null}
+                    />
+                    {cards.map((card) => (
+                      <ThreadRowButton
+                        key={rowKey(card)}
+                        thread={card}
+                        context={rowContext}
+                        nested
+                      />
+                    ))}
+                  </div>
                 ))
               )}
             </SidebarGroup>

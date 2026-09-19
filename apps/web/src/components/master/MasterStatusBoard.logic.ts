@@ -14,8 +14,17 @@ export interface MasterBoardModel<T extends MasterBoardThread> {
   readonly peerMasters: readonly T[];
 }
 
-/** Which sidebar shelf a live thread sits on. */
-export type MasterShelf = "active" | "snoozed" | "settled";
+/**
+ * Which sidebar shelf a live thread sits on. Shelves are exclusive, as in the
+ * default sidebar: a thread renders in exactly one place.
+ */
+export type MasterShelf = "pinned" | "active" | "snoozed" | "settled";
+
+/** A pinned thread; a pinned Master carries its active Cards with it. */
+export interface MasterPinnedEntry<T extends MasterBoardThread> {
+  readonly thread: T;
+  readonly cards: readonly T[];
+}
 
 export interface MasterWorkspaceProject<T extends MasterBoardThread> {
   readonly environmentId: string;
@@ -27,6 +36,7 @@ export interface MasterWorkspaceProject<T extends MasterBoardThread> {
 }
 
 export interface MasterWorkspaceModel<T extends MasterBoardThread> {
+  readonly pinned: readonly MasterPinnedEntry<T>[];
   readonly activeProjects: readonly MasterWorkspaceProject<T>[];
   readonly snoozedProjects: readonly MasterWorkspaceProject<T>[];
   readonly settledProjects: readonly MasterWorkspaceProject<T>[];
@@ -104,8 +114,10 @@ export function resolveCardOwners<T extends MasterBoardThread>(
 
 /**
  * Projects the sidebar. Every known project gets an active row, even with no
- * threads yet. Snoozed and settled threads move to their own shelves; a Master
- * still owning Cards on a shelf (or archived) appears there as a header.
+ * threads yet. Pinned, snoozed and settled threads move to their own shelves.
+ * A pinned Master takes its active Cards into the Pinned shelf; on the other
+ * shelves, a Master owning Cards there (or an archived one) appears as a
+ * structural header.
  */
 export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
   readonly threads: readonly T[];
@@ -120,6 +132,14 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
   );
   const orderOf = (row: { environmentId: string; projectId: string }) =>
     projectOrder.get(`${row.environmentId}:${row.projectId}`) ?? Number.MAX_SAFE_INTEGER;
+  const pinnedCards = new Map<string, T[]>();
+  const pinned = live
+    .filter((thread) => shelfByKey.get(threadKey(thread)) === "pinned")
+    .map((thread) => {
+      const cards: T[] = [];
+      if (isMasterThreadTitle(thread.title)) pinnedCards.set(threadKey(thread), cards);
+      return { thread, cards };
+    });
 
   const build = (
     shelf: MasterShelf,
@@ -152,6 +172,11 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
         const owner = owners.get(threadKey(thread));
         if (!owner) {
           bucket(thread.environmentId, thread.projectId).orphanCards.push(thread);
+          continue;
+        }
+        const pinnedOwnerCards = shelf === "active" ? pinnedCards.get(threadKey(owner)) : undefined;
+        if (pinnedOwnerCards) {
+          pinnedOwnerCards.push(thread);
           continue;
         }
         mastersByKey.set(threadKey(owner), owner);
@@ -189,11 +214,29 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
       }));
   };
 
+  const activeProjects = build("active", true);
+  for (const cards of pinnedCards.values()) cards.sort(newestFirst);
   return {
-    activeProjects: build("active", true),
+    pinned,
+    activeProjects,
     snoozedProjects: build("snoozed", false),
     settledProjects: build("settled", false),
   };
+}
+
+/**
+ * A project group's rows in render order, minus archived Masters: those are
+ * structural headings for their live Cards, not navigable threads. Drives
+ * mod+1..9 and next/previous thread.
+ */
+export function navigableRows<T extends MasterBoardThread>(group: MasterWorkspaceProject<T>): T[] {
+  return [
+    ...group.masters.flatMap((board) =>
+      board.master.archivedAt == null ? [board.master, ...board.cards] : [...board.cards],
+    ),
+    ...group.oneOffs,
+    ...group.orphanCards,
+  ];
 }
 
 /**

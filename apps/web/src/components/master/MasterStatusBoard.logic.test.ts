@@ -6,6 +6,7 @@ import {
   isCardThreadTitle,
   isMasterThreadTitle,
   mergeLiveAndArchivedThreads,
+  navigableRows,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -111,6 +112,47 @@ describe("deriveMasterWorkspace", () => {
     expect(model.activeProjects[0]?.visibleCount).toBe(1);
     expect(model.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
     expect(model.activeProjects.flatMap((group) => group.orphanCards)).toEqual([]);
+  });
+});
+
+describe("exclusive shelves", () => {
+  it("moves a pinned Master and its active Cards to Pinned, so nothing renders twice", () => {
+    const master = thread("master", "Master: Harvest", { shelf: "pinned" });
+    const card = thread("card", "Card: Prune", { forkedFrom: { threadId: master.id } });
+    const snoozedCard = thread("snoozed", "Card: Later", {
+      shelf: "snoozed",
+      forkedFrom: { threadId: master.id },
+    });
+    const pinnedCard = thread("pinned-card", "Card: Watch", {
+      shelf: "pinned",
+      forkedFrom: { threadId: master.id },
+    });
+
+    const model = workspace([master, card, snoozedCard, pinnedCard], ["orchard"]);
+
+    expect(model.pinned).toEqual([
+      { thread: master, cards: [card] },
+      { thread: pinnedCard, cards: [] },
+    ]);
+    expect(model.activeProjects[0]).toMatchObject({ masters: [], visibleCount: 0 });
+    // A parked Card stays on its own shelf under a structural header.
+    expect(model.snoozedProjects[0]?.masters[0]).toMatchObject({
+      master,
+      cards: [snoozedCard],
+    });
+  });
+
+  it("never offers an archived Master as a navigable row, only its live Cards", () => {
+    const archivedMaster = thread("master", "Master: Archived", { archivedAt: ARCHIVED });
+    const card = thread("card", "Card: Still running", {
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const chat = thread("chat", "Quick question");
+
+    const group = workspace([archivedMaster, card, chat]).activeProjects[0];
+
+    expect(group?.masters[0]?.master).toBe(archivedMaster);
+    expect(group ? navigableRows(group) : []).toEqual([card, chat]);
   });
 });
 
