@@ -6676,7 +6676,10 @@ describe("ProviderCommandReactor", () => {
       const restart = harness.startSession.mock.calls[1];
       expect(restart?.[1]).toMatchObject({ providerInstanceId: work });
       expect(restart?.[1]).not.toHaveProperty("resumeCursor");
-      expect(restart?.[2]).toEqual({ allowIncompatibleUnstartedReplacement: true });
+      // The mock is typed with two parameters; the start options ride third.
+      expect((restart as ReadonlyArray<unknown> | undefined)?.[2]).toEqual({
+        allowIncompatibleUnstartedReplacement: true,
+      });
       expect(carriedOverInput(harness)).toContain(
         "This conversation moved to a new provider session",
       );
