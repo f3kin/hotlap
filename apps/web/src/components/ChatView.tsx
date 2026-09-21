@@ -5699,6 +5699,10 @@ export default function ChatView(props: ChatViewProps) {
             input: {
               threadId: input.threadId,
               ...metadataUpdate,
+              // A switch made elsewhere since this view loaded wins over it.
+              ...(metadataUpdate.modelSelection !== undefined
+                ? { expectedModelSelection: serverThread.modelSelection }
+                : {}),
             },
           }),
           () => undefined,
@@ -7644,6 +7648,7 @@ export default function ChatView(props: ChatViewProps) {
                 threadId,
                 message: { messageId, role: "user", text: "/compact", attachments: [] },
                 modelSelection: context.selectedModelSelection,
+                expectedModelSelection: context.selectedModelSelection,
                 runtimeMode,
                 interactionMode: context.interactionMode,
                 ...providerAccountRoutingConsentForSubmission({
@@ -8913,6 +8918,8 @@ export default function ChatView(props: ChatViewProps) {
             })(),
           },
           modelSelection: ctxSelectedModelSelection,
+          // Only a selection persisted above is asserted, matching that condition.
+          ...(ctxSelectedModel ? { expectedModelSelection: ctxSelectedModelSelection } : {}),
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
@@ -9549,6 +9556,7 @@ export default function ChatView(props: ChatViewProps) {
               attachments: [],
             },
             modelSelection: ctxSelectedModelSelection,
+            expectedModelSelection: ctxSelectedModelSelection,
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
