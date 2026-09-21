@@ -6473,4 +6473,115 @@ describe("ProviderCommandReactor", () => {
       expect(thread?.session?.status).toBe("ready");
     }),
   );
+
+  // The incident: a queued turn start was still inside its (slow) session start
+  // when pending-turn reconciliation found it unclaimed, replayed it, and
+  // restarted the session underneath it. The command's createdAt is the
+  // client's queue time, so reconciliation treats it as stuck at once.
+  it("does not let reconciliation replay a turn start that is still starting its session", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const firstStartGate = Effect.runSync(Deferred.make<void>());
+    let startCalls = 0;
+    const harness = await createHarness({
+      startSessionEffect: (session) => {
+        startCalls += 1;
+        return startCalls === 1
+          ? Deferred.await(firstStartGate).pipe(Effect.as(session))
+          : Effect.succeed(session);
+      },
+    });
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-queued-turn-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-queued-while-switching"),
+          role: "user",
+          text: "continue on the personal account",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+
+    // Runs to completion while the first start is still parked.
+    await harness.runEffect(harness.reactor.reconcilePendingTurns(threadId));
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    await Effect.runPromise(Deferred.succeed(firstStartGate, undefined));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers a session restart until the provider's running turn ends", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness();
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-running"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-running"),
+          role: "user",
+          text: "long task",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const running = harness.runtimeSessions.find((session) => session.threadId === threadId);
+    expect(running).toBeDefined();
+    harness.runtimeSessions.splice(harness.runtimeSessions.indexOf(running!), 1, {
+      ...running!,
+      status: "running",
+      activeTurnId: asTurnId("turn-1"),
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-turn-running-admitted"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    // A runtime-mode change needs a restart; mid-turn it must wait.
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("cmd-runtime-mode-mid-turn"),
+        threadId,
+        runtimeMode: "full-access",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    expect(harness.stopSession).not.toHaveBeenCalled();
+  });
 });
