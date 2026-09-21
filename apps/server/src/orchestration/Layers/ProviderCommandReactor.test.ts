@@ -6480,16 +6480,18 @@ describe("ProviderCommandReactor", () => {
   // client's queue time, so reconciliation treats it as stuck at once.
   it("does not let reconciliation replay a turn start that is still starting its session", async () => {
     const threadId = ThreadId.make("thread-1");
-    const firstStartGate = Effect.runSync(Deferred.make<void>());
+    // Assigned before the first start can run: nothing starts until the dispatch below.
+    let firstStartGate: Deferred.Deferred<void> | undefined;
     let startCalls = 0;
     const harness = await createHarness({
       startSessionEffect: (session) => {
         startCalls += 1;
-        return startCalls === 1
+        return startCalls === 1 && firstStartGate !== undefined
           ? Deferred.await(firstStartGate).pipe(Effect.as(session))
           : Effect.succeed(session);
       },
     });
+    firstStartGate = await harness.runEffect(Deferred.make<void>());
 
     await harness.runEffect(
       harness.engine.dispatch({
@@ -6514,7 +6516,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.sendTurn).not.toHaveBeenCalled();
 
-    await Effect.runPromise(Deferred.succeed(firstStartGate, undefined));
+    await harness.runEffect(Deferred.succeed(firstStartGate, undefined));
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     await harness.drain();
     expect(harness.startSession).toHaveBeenCalledTimes(1);
