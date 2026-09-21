@@ -6,7 +6,7 @@
  *
  * @module turnFailure
  */
-import type { TurnFailureReason } from "@t3tools/contracts";
+import { type TurnFailureReason, turnFailureReasonForSession } from "@t3tools/contracts";
 
 const RESET_TIME = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
 
@@ -31,4 +31,12 @@ export function turnFailureHeadline(
     case "unknown":
       return "The turn failed";
   }
+}
+
+/** The headline for a session's current error, whatever wrote it. */
+export function turnFailureHeadlineForSession(
+  session: Parameters<typeof turnFailureReasonForSession>[0],
+): string {
+  const reason = turnFailureReasonForSession(session);
+  return reason ? turnFailureHeadline(reason) : "The turn failed";
 }

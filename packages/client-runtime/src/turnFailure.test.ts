@@ -1,7 +1,7 @@
 import { ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { turnFailureHeadline } from "./turnFailure.ts";
+import { turnFailureHeadline, turnFailureHeadlineForSession } from "./turnFailure.ts";
 
 // A fixed formatter keeps the assertion independent of the machine's locale.
 const utcClock = (epochMs: number) =>
@@ -42,5 +42,15 @@ describe("turnFailureHeadline", () => {
       "The provider stopped unexpectedly",
     );
     expect(turnFailureHeadline({ kind: "unknown", message: "x" })).toBe("The turn failed");
+  });
+
+  it("headlines a session's own error, never a reason left over from an earlier one", () => {
+    const earlier = { kind: "usage_limit" as const, message: "Codex usage limit reached." };
+    expect(
+      turnFailureHeadlineForSession({ lastError: "401 Unauthorized", lastErrorReason: earlier }),
+    ).toBe("The turn failed");
+    expect(
+      turnFailureHeadlineForSession({ lastError: earlier.message, lastErrorReason: earlier }),
+    ).toBe("Usage limit reached");
   });
 });

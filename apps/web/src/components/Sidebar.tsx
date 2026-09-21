@@ -22,7 +22,7 @@ import {
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
 import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thread-sort";
-import { turnFailureHeadline } from "@t3tools/client-runtime/turn-failure";
+import { turnFailureHeadlineForSession } from "@t3tools/client-runtime/turn-failure";
 import {
   threadSearchMatchKey,
   type EnvironmentThreadSearchMatch,
@@ -423,9 +423,7 @@ function SidebarThreadTooltip({
             <div className="flex min-w-0 items-center gap-2 text-red-600 dark:text-red-400">
               <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
               <div className="min-w-0 truncate">
-                {thread.latestTurn?.state === "error" && thread.latestTurn.error
-                  ? turnFailureHeadline(thread.latestTurn.error)
-                  : "Error occurred"}
+                {turnFailureHeadlineForSession(thread.session)}
               </div>
             </div>
           ) : null}
