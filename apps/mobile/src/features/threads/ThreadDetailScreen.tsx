@@ -90,6 +90,7 @@ import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
+import { TurnFailedNotice } from "./TurnFailedNotice";
 import {
   FLOATING_WORKING_CONTROL_COVERAGE,
   FloatingWorkingControl,
@@ -991,6 +992,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       environmentId={props.environmentId}
                       onClose={dismissUsageLimits}
                     />
+                  </Animated.View>
+                ) : null}
+                {props.selectedThread.latestTurn?.state === "error" &&
+                props.selectedThread.latestTurn.error &&
+                props.creationState?.kind !== "failed" ? (
+                  <Animated.View
+                    className="shrink-0 px-4 pb-3"
+                    entering={FadeInDown.duration(220)}
+                    exiting={FadeOut.duration(140)}
+                  >
+                    <TurnFailedNotice reason={props.selectedThread.latestTurn.error} />
                   </Animated.View>
                 ) : null}
                 {props.creationState?.kind === "failed" ? (

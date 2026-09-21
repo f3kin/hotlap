@@ -2004,6 +2004,11 @@ export default function ChatView(props: ChatViewProps) {
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
+  // Only the persisted error is the failed turn's; a local dispatch error has no typed reason.
+  const threadErrorReason =
+    isServerThread && localServerError == null && activeServerThread?.latestTurn?.state === "error"
+      ? (activeServerThread.latestTurn.error ?? null)
+      : null;
   // Dismissals can only mask the shown error, never clear it: a server thread
   // keeps its error in session.lastError, so clearing the local shadow would
   // just fall through to the persisted one. Mask the current error until a
@@ -10425,6 +10430,7 @@ export default function ChatView(props: ChatViewProps) {
               />
               <ThreadErrorBanner
                 error={visibleThreadError}
+                reason={threadErrorReason}
                 onDismiss={() => {
                   setThreadError(activeThread.id, null);
                   dismissThreadErrorBannerForSession(threadErrorBannerKey);
