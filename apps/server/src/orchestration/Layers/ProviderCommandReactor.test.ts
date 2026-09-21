@@ -5179,7 +5179,15 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.admitTurn();
+    // Wait for the reactor's own admission rather than racing admitTurn(): its
+    // hard-coded approval-required mode, landing after the admission, made the
+    // switch below a no-op and this test fail about half the time.
+    await waitFor(async () => {
+      const session = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      )?.session;
+      return session?.status === "running" && session.runtimeMode === "full-access";
+    });
 
     await Effect.runPromise(
       harness.engine.dispatch({
