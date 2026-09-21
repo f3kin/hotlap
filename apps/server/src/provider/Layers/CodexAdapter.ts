@@ -74,7 +74,7 @@ import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
   type CodexRateLimitSnapshot,
   codexRateLimitsToUpdate,
-  codexUsageLimitMessage,
+  codexUsageLimitReason,
   mergeCodexRateLimits,
 } from "./codexUsageLimits.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -2391,7 +2391,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
 
             let usageLimitError: ProviderRuntimeEvent | undefined;
-            let usageLimitMessage: string | undefined;
+            let usageLimitReason: ReturnType<typeof codexUsageLimitReason> | undefined;
             if (event.method === "turn/completed") {
               const completedPayload = readPayload(
                 EffectCodexSchema.V2TurnCompletedNotification,
@@ -2402,13 +2402,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ? completedPayload.turn.error
                   : undefined;
               if (turnError?.codexErrorInfo === "usageLimitExceeded") {
-                usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
+                usageLimitReason = codexUsageLimitReason(rateLimits, event.createdAt);
                 usageLimitError = {
                   ...runtimeEventBase(event, event.threadId),
                   type: "runtime.error",
                   payload: {
-                    message: usageLimitMessage,
+                    message: usageLimitReason.message,
                     class: "provider_error",
+                    reason: usageLimitReason,
                     ...(turnError.message ? { detail: turnError.message } : {}),
                   },
                 };
@@ -2421,7 +2422,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ...runtimeEvent,
                   payload: {
                     ...runtimeEvent.payload,
-                    ...(usageLimitMessage ? { errorMessage: usageLimitMessage } : {}),
+                    ...(usageLimitReason
+                      ? { errorMessage: usageLimitReason.message, errorReason: usageLimitReason }
+                      : {}),
                     tokenUsage: completeCodexTurnTokenUsage(
                       turnTokenUsage,
                       String(runtimeEvent.turnId),

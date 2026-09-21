@@ -12,6 +12,7 @@ import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
+  type TurnFailureReason,
   OrchestrationThread,
   WORKTREE_SETUP_ACTIVITY_KIND,
 } from "@t3tools/contracts";
@@ -85,6 +86,19 @@ function retainThreadActivities(activities: OrchestrationThread["activities"]) {
       // setup script can outlast a chatty first turn.
       activity.kind === WORKTREE_SETUP_ACTIVITY_KIND,
   );
+}
+
+/**
+ * The typed reason an errored turn shows. Ingestion classifies every failure it
+ * records, so the untyped branch only covers sessions written before the field
+ * existed; a turn in `error` state still never renders without a reason.
+ */
+function failureReasonForSession(
+  session: OrchestrationSession | null | undefined,
+): TurnFailureReason | null {
+  if (!session) return null;
+  if (session.lastErrorReason != null) return session.lastErrorReason;
+  return session.lastError ? { kind: "unknown", message: session.lastError } : null;
 }
 
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
@@ -859,6 +873,9 @@ export function projectEvent(
                       thread.latestTurn?.turnId === session.activeTurnId
                         ? thread.latestTurn.assistantMessageId
                         : null,
+                    // A turn that is running carries no failure; a retry after
+                    // a usage limit must not keep showing the old reason.
+                    error: null,
                   }
                 : thread.latestTurn !== null &&
                     thread.latestTurn.state === "running" &&
@@ -870,6 +887,7 @@ export function projectEvent(
                       // placeholder checkpoint timestamp — the session leaving
                       // "running" is the authoritative turn end.
                       completedAt: session.updatedAt,
+                      error: settledTurnState === "error" ? failureReasonForSession(session) : null,
                     }
                   : thread.latestTurn,
             updatedAt: event.occurredAt,
@@ -958,6 +976,10 @@ export function projectEvent(
         // checkpoint, but don't settle a turn its session is still running.
         const turnStillRunning =
           thread.session?.status === "running" && thread.session.activeTurnId === payload.turnId;
+        const checkpointedTurnState =
+          thread.latestTurn?.turnId === payload.turnId && thread.latestTurn.state === "interrupted"
+            ? ("interrupted" as const)
+            : checkpointStatusToLatestTurnState(payload.status);
 
         return {
           ...nextBase,
@@ -967,11 +989,7 @@ export function projectEvent(
               ? thread.latestTurn
               : {
                   turnId: payload.turnId,
-                  state:
-                    thread.latestTurn?.turnId === payload.turnId &&
-                    thread.latestTurn.state === "interrupted"
-                      ? "interrupted"
-                      : checkpointStatusToLatestTurnState(payload.status),
+                  state: checkpointedTurnState,
                   requestedAt:
                     thread.latestTurn?.turnId === payload.turnId
                       ? thread.latestTurn.requestedAt
@@ -982,6 +1000,10 @@ export function projectEvent(
                       : payload.completedAt,
                   completedAt: payload.completedAt,
                   assistantMessageId: payload.assistantMessageId,
+                  error:
+                    checkpointedTurnState === "error"
+                      ? failureReasonForSession(thread.session)
+                      : null,
                 },
             updatedAt: event.occurredAt,
           }),

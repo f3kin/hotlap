@@ -24,6 +24,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { TurnFailureReason } from "./turnFailure.ts";
 import {
   PullRequestActor,
   PullRequestChecksState,
@@ -637,6 +638,9 @@ export const OrchestrationSession = Schema.Struct({
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   activeTurnId: Schema.NullOr(TurnId),
   lastError: Schema.NullOr(TrimmedNonEmptyString),
+  /** Typed companion to `lastError`. Optional: events persisted before it
+      replay without one, and a client that has not shipped support ignores it. */
+  lastErrorReason: Schema.optional(Schema.NullOr(TurnFailureReason)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationSession = typeof OrchestrationSession.Type;
@@ -699,6 +703,9 @@ export const OrchestrationLatestTurn = Schema.Struct({
   completedAt: Schema.NullOr(IsoDateTime),
   assistantMessageId: Schema.NullOr(MessageId),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  /** Why the turn ended in `error`. A turn that failed always has one; every
+      other state has none. Optional so historical payloads still decode. */
+  error: Schema.optional(Schema.NullOr(TurnFailureReason)),
 });
 export type OrchestrationLatestTurn = typeof OrchestrationLatestTurn.Type;
 
