@@ -450,7 +450,8 @@ function mapSessionRow(
     runtimeMode: row.runtimeMode,
     activeTurnId: row.activeTurnId,
     lastError: row.lastError,
-    lastErrorReason: row.lastErrorReason,
+    // Omitted when absent so a healthy session's payload is unchanged on the wire.
+    ...(row.lastErrorReason !== null ? { lastErrorReason: row.lastErrorReason } : {}),
     updatedAt: row.updatedAt,
   };
 }

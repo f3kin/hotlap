@@ -318,7 +318,7 @@ describe("codexUsageLimitReason", () => {
       kind: "usage_limit",
       message:
         "Codex usage limit reached. The weekly limit resets in 32m. Send the message again once the limit resets.",
-      resetsAt: new Date(resetsAtSeconds * 1000).toISOString(),
+      resetsAt: "2026-09-21T01:42:00.000Z",
     });
   });
 

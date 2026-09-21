@@ -1285,6 +1285,13 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   regenerateTitle: Schema.optional(Schema.Literal(true)),
   modelSelection: Schema.optional(ModelSelection),
+  /**
+   * Compare-and-set basis for `modelSelection`: the thread selection the sender
+   * saw when it built this command. When the thread has been switched since,
+   * the switch wins and this command's selection is dropped (a turn still
+   * runs, on the thread's selection). Absent means an unconditional write.
+   */
+  expectedModelSelection: Schema.optional(ModelSelection),
   providerRoutingMode: Schema.optional(ProviderRoutingMode),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1370,6 +1377,13 @@ export const ThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  /**
+   * Compare-and-set basis for `modelSelection`: the thread selection the sender
+   * saw when it built this command. When the thread has been switched since,
+   * the switch wins and this command's selection is dropped (a turn still
+   * runs, on the thread's selection). Absent means an unconditional write.
+   */
+  expectedModelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -1393,6 +1407,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  expectedModelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,

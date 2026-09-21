@@ -817,6 +817,27 @@ const make = Effect.gen(function* () {
         return existingSessionThreadId;
       }
 
+      // Restarting tears down the provider process and any turn still running
+      // on it. A switch that lands mid-turn waits for the turn boundary: the
+      // next turn start comes back through here with the thread's selection.
+      if (activeSession?.activeTurnId != null) {
+        yield* Effect.logInfo(
+          "provider command reactor deferring provider session restart until the running turn ends",
+          {
+            threadId,
+            activeTurnId: activeSession.activeTurnId,
+            currentInstanceId,
+            desiredInstanceId,
+            runtimeModeChanged,
+            cwdChanged,
+            modelChanged,
+            instanceChanged,
+          },
+        );
+        yield* refreshWorkspaceSnapshot;
+        return existingSessionThreadId;
+      }
+
       const resumeCursor = allowIncompatibleUnstartedReplacement
         ? undefined
         : shouldRestartForModelChange
@@ -1860,6 +1881,17 @@ const make = Effect.gen(function* () {
       turnsAfterCompaction.set(event.payload.threadId, queued);
       return;
     }
+    // Claim the turn before the session work, not after it. Starting a session
+    // on another instance takes seconds, and pending-turn reconciliation replays
+    // any start it finds unclaimed; without the claim it restarts the session
+    // underneath this one and the turn dies mid-switch.
+    const pendingSendKey = `${event.payload.threadId}:${event.payload.messageId}`;
+    if (pendingTurnSends.has(pendingSendKey) || admittedPendingTurns.has(pendingSendKey)) {
+      return;
+    }
+    pendingTurnSends.add(pendingSendKey);
+    const releaseTurnClaim = Effect.sync(() => void pendingTurnSends.delete(pendingSendKey));
+
     const routedModelSelection = yield* maybeRouteProviderAccount({
       thread,
       ...(event.payload.modelSelection !== undefined
@@ -1869,8 +1901,9 @@ const make = Effect.gen(function* () {
       createdAt: event.payload.createdAt,
       resumed: resumed !== undefined,
       allow: event.payload.allowProviderAccountRouting === true,
-    });
+    }).pipe(Effect.onError(() => releaseTurnClaim));
     if (routedModelSelection === PROVIDER_ACCOUNT_ROUTING_BLOCKED) {
+      yield* releaseTurnClaim;
       return;
     }
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
@@ -1897,6 +1930,7 @@ const make = Effect.gen(function* () {
     );
 
     if (Option.isNone(sendTurnRequest)) {
+      yield* releaseTurnClaim;
       return;
     }
 
@@ -1910,14 +1944,10 @@ const make = Effect.gen(function* () {
       Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(false))),
     );
     if (!placementPersisted) {
+      yield* releaseTurnClaim;
       return;
     }
 
-    const pendingSendKey = `${event.payload.threadId}:${event.payload.messageId}`;
-    if (pendingTurnSends.has(pendingSendKey) || admittedPendingTurns.has(pendingSendKey)) {
-      return;
-    }
-    pendingTurnSends.add(pendingSendKey);
     const send = providerService.sendTurn(sendTurnRequest.value).pipe(
       Effect.tap((turn) =>
         associatePendingTurnAdmission({

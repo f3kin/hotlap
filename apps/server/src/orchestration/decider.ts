@@ -9,6 +9,7 @@ import {
   UserInputRequestedPayload,
   isImportedAgentSessionMessageId,
   isReadOnlyHistoryMessageId,
+  type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -155,6 +156,26 @@ function forkHasStarted(
         (message) => message.role === "user" && !isReadOnlyHistoryMessageId(message.id),
       ))
   );
+}
+
+function modelSelectionsEqual(left: ModelSelection, right: ModelSelection): boolean {
+  return (
+    left.instanceId === right.instanceId &&
+    left.model === right.model &&
+    JSON.stringify(left.options ?? null) === JSON.stringify(right.options ?? null)
+  );
+}
+
+/**
+ * True when a command's compare-and-set basis no longer matches the thread:
+ * the thread was switched after the command was built, so the switch is the
+ * later write and wins. A command without a basis is unconditional.
+ */
+function isStaleModelSelectionBasis(
+  current: ModelSelection,
+  expected: ModelSelection | undefined,
+): boolean {
+  return expected !== undefined && !modelSelectionsEqual(current, expected);
 }
 
 function findPullRequestLink(
@@ -1056,6 +1077,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       if (
         command.modelSelection !== undefined &&
+        isStaleModelSelectionBasis(thread.modelSelection, command.expectedModelSelection)
+      ) {
+        // A stale selection write loses to the switch that landed since it was
+        // built. The routing mode it carries was derived from the same stale
+        // view, so it goes too; everything else in the update still applies.
+        const {
+          modelSelection: _staleSelection,
+          expectedModelSelection: _staleBasis,
+          providerRoutingMode: _staleRoutingMode,
+          ...rest
+        } = command;
+        return yield* decideOrchestrationCommand({ command: rest, readModel });
+      }
+      if (
+        command.modelSelection !== undefined &&
         command.modelSelection.instanceId !== thread.modelSelection.instanceId &&
         forkHasStarted(thread)
       ) {
@@ -1552,10 +1588,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // A turn built against a selection the thread has since switched away
+      // from (a queued outbox entry, an app instance that missed the switch)
+      // still runs, on the thread's selection: the switch is the later write.
+      // Resolving it here puts the winner on the event, so the reactor, its
+      // recovery path, and replay all start the same session.
+      const staleModelSelection =
+        command.modelSelection !== undefined &&
+        isStaleModelSelectionBasis(targetThread.modelSelection, command.expectedModelSelection)
+          ? command.modelSelection
+          : undefined;
+      const turnModelSelection =
+        staleModelSelection !== undefined ? targetThread.modelSelection : command.modelSelection;
       if (
         targetThread.forkedFrom !== undefined &&
-        command.modelSelection !== undefined &&
-        command.modelSelection.instanceId !== targetThread.modelSelection.instanceId
+        turnModelSelection !== undefined &&
+        turnModelSelection.instanceId !== targetThread.modelSelection.instanceId
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -1632,9 +1680,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
-          ...(command.modelSelection !== undefined
-            ? { modelSelection: command.modelSelection }
-            : {}),
+          ...(turnModelSelection !== undefined ? { modelSelection: turnModelSelection } : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
@@ -1708,10 +1754,38 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
+      const staleSelectionNoticeEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        staleModelSelection !== undefined
+          ? {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.threadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.activity-appended",
+              payload: {
+                threadId: command.threadId,
+                activity: {
+                  id: EventId.make(`model-selection-superseded:${command.commandId}`),
+                  tone: "info",
+                  kind: "thread.model-selection.superseded",
+                  summary: `Sent with ${targetThread.modelSelection.model} on ${targetThread.modelSelection.instanceId}: the thread was switched after this message was written`,
+                  payload: {
+                    requested: staleModelSelection,
+                    applied: targetThread.modelSelection,
+                  },
+                  turnId: null,
+                  createdAt: command.createdAt,
+                },
+              },
+            }
+          : null;
       return [
         ...lifecycleResetEvents,
         ...(userMessageEvent ? [userMessageEvent] : []),
         ...(forkContextTruncatedEvent === null ? [] : [forkContextTruncatedEvent]),
+        ...(staleSelectionNoticeEvent === null ? [] : [staleSelectionNoticeEvent]),
         turnStartRequestedEvent,
       ];
     }
