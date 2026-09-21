@@ -158,24 +158,44 @@ function forkHasStarted(
   );
 }
 
+/** Key-order independent, so an equal selection serialised differently still matches. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .toSorted()
+      .map(
+        (key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`,
+      )
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
 function modelSelectionsEqual(left: ModelSelection, right: ModelSelection): boolean {
   return (
     left.instanceId === right.instanceId &&
     left.model === right.model &&
-    JSON.stringify(left.options ?? null) === JSON.stringify(right.options ?? null)
+    canonicalJson(left.options) === canonicalJson(right.options)
   );
 }
 
 /**
- * True when a command's compare-and-set basis no longer matches the thread:
- * the thread was switched after the command was built, so the switch is the
- * later write and wins. A command without a basis is unconditional.
+ * True when a command's selection would undo a switch that landed after it was
+ * built: its basis no longer matches the thread, and it asks for something the
+ * thread is not on. A command without a basis is unconditional, and one that
+ * already agrees with the thread has nothing to lose.
  */
 function isStaleModelSelectionBasis(
   current: ModelSelection,
+  requested: ModelSelection,
   expected: ModelSelection | undefined,
 ): boolean {
-  return expected !== undefined && !modelSelectionsEqual(current, expected);
+  return (
+    expected !== undefined &&
+    !modelSelectionsEqual(current, expected) &&
+    !modelSelectionsEqual(current, requested)
+  );
 }
 
 function findPullRequestLink(
@@ -1077,7 +1097,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
       if (
         command.modelSelection !== undefined &&
-        isStaleModelSelectionBasis(thread.modelSelection, command.expectedModelSelection)
+        isStaleModelSelectionBasis(
+          thread.modelSelection,
+          command.modelSelection,
+          command.expectedModelSelection,
+        )
       ) {
         // A stale selection write loses to the switch that landed since it was
         // built. The routing mode it carries was derived from the same stale
@@ -1595,7 +1619,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // recovery path, and replay all start the same session.
       const staleModelSelection =
         command.modelSelection !== undefined &&
-        isStaleModelSelectionBasis(targetThread.modelSelection, command.expectedModelSelection)
+        isStaleModelSelectionBasis(
+          targetThread.modelSelection,
+          command.modelSelection,
+          command.expectedModelSelection,
+        )
           ? command.modelSelection
           : undefined;
       const turnModelSelection =

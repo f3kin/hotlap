@@ -62,9 +62,16 @@ export function turnFailureReasonForSession(
     | null
     | undefined,
 ): TurnFailureReason | null {
-  if (!session) return null;
-  if (session.lastErrorReason != null) return session.lastErrorReason;
-  return session.lastError ? { kind: "unknown", message: session.lastError } : null;
+  if (!session?.lastError) return null;
+  // A writer that replaces lastError but spreads the old session keeps the old
+  // reason; trusting it would show a previous failure's reason for this one.
+  if (
+    session.lastErrorReason != null &&
+    session.lastErrorReason.message === session.lastError.trim()
+  ) {
+    return session.lastErrorReason;
+  }
+  return { kind: "unknown", message: session.lastError };
 }
 
 export function turnFailureReasonsEqual(

@@ -360,7 +360,11 @@ import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSki
 import { vcsEnvironment } from "../state/vcs";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useProjectClone } from "../state/projectClones";
-import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
+import {
+  projectCloneDisplayName,
+  projectCloneProgressSummary,
+  turnFailureReasonForSession,
+} from "@t3tools/contracts";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   useProject,
@@ -2004,10 +2008,11 @@ export default function ChatView(props: ChatViewProps) {
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
-  // Only the persisted error is the failed turn's; a local dispatch error has no typed reason.
+  // The banner shows session.lastError, so its reason is that session's; a local
+  // dispatch error has none. Covers turn-start failures, which never settle a turn.
   const threadErrorReason =
-    isServerThread && localServerError == null && activeServerThread?.latestTurn?.state === "error"
-      ? (activeServerThread.latestTurn.error ?? null)
+    isServerThread && localServerError == null
+      ? turnFailureReasonForSession(activeServerThread?.session)
       : null;
   // Dismissals can only mask the shown error, never clear it: a server thread
   // keeps its error in session.lastError, so clearing the local shadow would

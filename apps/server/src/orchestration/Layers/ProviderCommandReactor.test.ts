@@ -6594,6 +6594,154 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.stopSession).not.toHaveBeenCalled();
   });
+  it("classifies a turn-start failure afresh instead of keeping the previous turn's reason", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const now = "2026-09-21T01:40:00.000Z";
+    const harness = await createHarness({
+      startSessionEffect: () =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "thread/start",
+            detail: "401 Unauthorized: please log in to Codex again.",
+          }),
+        ),
+    });
+    const usageLimit = {
+      kind: "usage_limit" as const,
+      message: "Codex usage limit reached.",
+      resetsAt: "2026-09-21T01:42:00.000Z",
+    };
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-previous-usage-limit"),
+        threadId,
+        session: {
+          threadId,
+          status: "error",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: usageLimit.message,
+          lastErrorReason: usageLimit,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-after-limit"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-after-limit"),
+          role: "user",
+          text: "try again",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const session = (await harness.readModel()).threads[0]?.session;
+      return session?.lastError === "401 Unauthorized: please log in to Codex again.";
+    });
+    const session = (await harness.readModel()).threads[0]?.session;
+    expect(session?.lastErrorReason).toMatchObject({
+      kind: "auth",
+      message: "401 Unauthorized: please log in to Codex again.",
+    });
+  });
+
+  it("holds a turn that needs another account until the running turn ends, then runs it there", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const now = "2026-01-01T00:00:00.000Z";
+    const personal = {
+      instanceId: ProviderInstanceId.make("codex_personal"),
+      model: "gpt-5-codex",
+    };
+    const harness = await createHarness();
+    const turnStart = (id: string, text: string, modelSelection?: ModelSelection) =>
+      harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-${id}`),
+          threadId,
+          message: { messageId: asMessageId(`message-${id}`), role: "user", text, attachments: [] },
+          ...(modelSelection ? { modelSelection, expectedModelSelection: modelSelection } : {}),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+    const setProviderTurn = (activeTurnId: TurnId | undefined) => {
+      const index = harness.runtimeSessions.findIndex((entry) => entry.threadId === threadId);
+      const { activeTurnId: _previous, ...session } = harness.runtimeSessions[index]!;
+      harness.runtimeSessions.splice(index, 1, {
+        ...session,
+        status: activeTurnId ? "running" : "ready",
+        ...(activeTurnId ? { activeTurnId } : {}),
+      });
+    };
+    const threadSession = (status: "running" | "ready") =>
+      harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-first-turn-${status}`),
+          threadId,
+          session: {
+            threadId,
+            status,
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: status === "running" ? asTurnId("turn-1") : null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+
+    await turnStart("first", "long task");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    setProviderTurn(asTurnId("turn-1"));
+    await threadSession("running");
+
+    // The user switches account and sends while the first turn still runs.
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-switch-to-personal"),
+        threadId,
+        modelSelection: personal,
+      }),
+    );
+    await turnStart("second", "continue on personal", personal);
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.startSession).toHaveBeenCalledTimes(1);
+    const kinds = (await harness.readModel()).threads[0]?.activities.map((a) => a.kind) ?? [];
+    expect(kinds).not.toContain("provider.turn.start.failed");
+
+    // The first turn ends; the held turn now runs on the account it asked for.
+    setProviderTurn(undefined);
+    await threadSession("ready");
+    await harness.runEffect(harness.reactor.reconcilePendingTurns(threadId));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+      providerInstanceId: personal.instanceId,
+    });
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ input: "continue on personal" });
+  });
+
   describe("resume fallback", () => {
     const personal = ProviderInstanceId.make("claude-personal");
     const work = ProviderInstanceId.make("claude-work");
@@ -6762,6 +6910,49 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession.mock.calls[2]?.[1]).not.toHaveProperty("resumeCursor");
       expect(carriedOverInput(harness)).toContain("first question about the orchard");
       expect(await activityKinds(harness)).toContain("provider.session.carried-over");
+    });
+
+    // A restart between the carry-over and the next send empties the reactor's
+    // memory; the persisted notice alone must still bring the conversation along.
+    it.each([
+      [
+        "imports history after a restart while the carried-over turn is still the latest",
+        "turn-1",
+        true,
+      ],
+      ["does not import again once a turn has run since the carry-over", "turn-0", false],
+    ] as const)("%s", async (_name, afterTurnId, imports) => {
+      const harness = await createHarness();
+      await withSettledFirstTurn(harness, {
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("cmd-carried-over-before-restart"),
+          threadId: ThreadId.make("thread-1"),
+          activity: {
+            id: EventId.make("activity-carried-over"),
+            tone: "info",
+            kind: "provider.session.carried-over",
+            summary: "Continued in a new codex session",
+            payload: { providerInstanceId: "codex", reason: "resume-declined", afterTurnId },
+            turnId: null,
+            createdAt: "2026-09-21T01:31:00.000Z",
+          },
+          createdAt: "2026-09-21T01:31:00.000Z",
+        }),
+      );
+
+      await harness.runEffect(
+        harness.engine.dispatch(
+          secondTurn({ instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" }),
+        ),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+      expect(carriedOverInput(harness).includes("first question about the orchard")).toBe(imports);
     });
 
     it("does not abandon a resumable session over a failure that is not a resume", async () => {

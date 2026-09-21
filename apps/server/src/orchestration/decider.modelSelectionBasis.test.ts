@@ -150,6 +150,42 @@ it.layer(NodeServices.layer)("model selection compare-and-set", (it) => {
     }),
   );
 
+  it.effect("says nothing when a stale sender already asks for the thread's selection", () =>
+    Effect.gen(function* () {
+      const events = yield* decide(
+        turnStart({ modelSelection: PERSONAL, expectedModelSelection: SHARED }),
+      );
+      expect(events.some((event) => event.type === "thread.activity-appended")).toBe(false);
+    }),
+  );
+
+  it.effect("matches a basis whose options were serialised in another key order", () =>
+    Effect.gen(function* () {
+      const withOptions = (order: "ab" | "ba") =>
+        ({
+          ...PERSONAL,
+          options:
+            order === "ab"
+              ? { reasoningEffort: "high", fastMode: true }
+              : { fastMode: true, reasoningEffort: "high" },
+        }) as unknown as ModelSelection;
+      const events = yield* decideOrchestrationCommand({
+        command: turnStart({ modelSelection: SHARED, expectedModelSelection: withOptions("ba") }),
+        readModel: {
+          ...switchedThread(),
+          threads: switchedThread().threads.map((thread) => ({
+            ...thread,
+            modelSelection: withOptions("ab"),
+          })),
+        },
+      }).pipe(Effect.map((decided) => (Array.isArray(decided) ? decided : [decided])));
+      const requested = events.find((event) => event.type === "thread.turn-start-requested");
+      expect(requested?.type === "thread.turn-start-requested" && requested.payload).toMatchObject({
+        modelSelection: SHARED,
+      });
+    }),
+  );
+
   it.effect("leaves a turn without a basis exactly as sent, for older clients", () =>
     Effect.gen(function* () {
       const events = yield* decide(turnStart({ modelSelection: SHARED }));

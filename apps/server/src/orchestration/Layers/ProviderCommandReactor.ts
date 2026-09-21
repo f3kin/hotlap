@@ -55,7 +55,10 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
-import { classifyTurnFailureKind } from "../../provider/turnFailureReason.ts";
+import {
+  classifyTurnFailureKind,
+  resolveTurnFailureReason,
+} from "../../provider/turnFailureReason.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -142,6 +145,23 @@ const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const PROVIDER_ACCOUNT_ROUTING_BLOCKED = Symbol("provider-account-routing-blocked");
 const MIN_PROVIDER_USAGE_FRESHNESS = Duration.minutes(10);
 const STARTING_SESSION_RECOVERY_TIMEOUT = Duration.seconds(5);
+
+/**
+ * A turn start that needs a session restart while the provider is still running
+ * a turn. It is not a failure: the start stays pending, and reconciliation
+ * replays it on the thread's selection once the running turn ends.
+ */
+const PROVIDER_SESSION_CARRIED_OVER = "provider.session.carried-over";
+
+class TurnStartDeferredError extends Schema.TaggedError<TurnStartDeferredError>()(
+  "TurnStartDeferredError",
+  { threadId: ThreadId },
+) {}
+const isTurnStartDeferredError = Schema.is(TurnStartDeferredError);
+const isTurnStartDeferred = (cause: Cause.Cause<unknown>) =>
+  cause.reasons.some(
+    (reason) => Cause.isFailReason(reason) && isTurnStartDeferredError(reason.error),
+  );
 const TERMINAL_TURN_STATES = new Set(["completed", "error", "interrupted"]);
 
 function providerErrorLabel(value: string | undefined): string {
@@ -464,6 +484,11 @@ const make = Effect.gen(function* () {
         status: session?.status === "stopped" ? "stopped" : "error",
         activeTurnId: null,
         lastError: input.detail,
+        lastErrorReason:
+          resolveTurnFailureReason({
+            message: input.detail,
+            providerInstanceId: session?.providerInstanceId ?? thread.modelSelection.instanceId,
+          }) ?? null,
         updatedAt: input.createdAt,
       },
       createdAt: input.createdAt,
@@ -788,9 +813,15 @@ const make = Effect.gen(function* () {
               activity: {
                 id: yield* serverEventId(),
                 tone: "info",
-                kind: "provider.session.carried-over",
+                kind: PROVIDER_SESSION_CARRIED_OVER,
                 summary: `Continued in a new ${desiredInstanceId} session: the previous one could not be resumed, so the conversation was carried over`,
-                payload: { providerInstanceId: desiredInstanceId, reason },
+                // The durable marker: history is imported while this is still the
+                // thread's latest turn, so a restart before the next send keeps it.
+                payload: {
+                  providerInstanceId: desiredInstanceId,
+                  reason,
+                  afterTurnId: thread.latestTurn?.turnId ?? null,
+                },
                 turnId: null,
                 createdAt,
               },
@@ -896,6 +927,10 @@ const make = Effect.gen(function* () {
             instanceChanged,
           },
         );
+        // A new turn sent now would run on the old session; keep it pending instead.
+        if (options?.pendingTurnStart === true) {
+          return yield* new TurnStartDeferredError({ threadId });
+        }
         yield* refreshWorkspaceSnapshot;
         return existingSessionThreadId;
       }
@@ -1212,7 +1247,18 @@ const make = Effect.gen(function* () {
     messageId: MessageId,
     messageText: string,
   ) {
-    const detail = yield* resolveThreadDetail(threadId);
+    const detail = yield* projectionSnapshotQuery
+      .getThreadDetailById(threadId, { activityKinds: [PROVIDER_SESSION_CARRIED_OVER] })
+      .pipe(Effect.map(Option.getOrUndefined));
+    const latestCarryOver = detail?.activities
+      .filter((activity) => activity.kind === PROVIDER_SESSION_CARRIED_OVER)
+      .at(-1);
+    const afterTurnId = (latestCarryOver?.payload as { afterTurnId?: unknown } | undefined)
+      ?.afterTurnId;
+    const awaitingImport =
+      threadsAwaitingHistoryImport.has(threadId) ||
+      (latestCarryOver !== undefined && afterTurnId === (detail?.latestTurn?.turnId ?? null));
+    if (!awaitingImport) return messageText;
     const earlier = (detail?.messages ?? []).filter((message) => message.id !== messageId);
     const imported = buildForkProviderInput({
       messages: projectReadableThreadMessages(earlier),
@@ -1253,9 +1299,11 @@ const make = Effect.gen(function* () {
     if (sessionModelSelection !== undefined) {
       threadModelSelections.set(input.threadId, sessionModelSelection);
     }
-    const messageText = threadsAwaitingHistoryImport.delete(input.threadId)
-      ? yield* withImportedHistory(input.threadId, input.messageId, input.messageText)
-      : input.messageText;
+    const messageText = yield* withImportedHistory(
+      input.threadId,
+      input.messageId,
+      input.messageText,
+    );
     const normalizedInput = toNonEmptyProviderInput(messageText);
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
@@ -2013,7 +2061,14 @@ const make = Effect.gen(function* () {
       reconcileDurableSelection: options?.recovery === true,
     }).pipe(
       Effect.map(Option.some),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
+      Effect.catchCause((cause) =>
+        isTurnStartDeferred(cause)
+          ? Effect.logInfo("provider command reactor queued a turn start behind the running turn", {
+              threadId: event.payload.threadId,
+              messageId: event.payload.messageId,
+            }).pipe(Effect.as(Option.none()))
+          : handleTurnStartFailure(cause).pipe(Effect.as(Option.none())),
+      ),
     );
 
     if (Option.isNone(sendTurnRequest)) {
@@ -2044,7 +2099,13 @@ const make = Effect.gen(function* () {
           settled: false,
         }),
       ),
-      Effect.tap(() => Effect.sync(() => void admittedPendingTurns.add(pendingSendKey))),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          admittedPendingTurns.add(pendingSendKey);
+          // The transcript reached the provider; later sends need no import.
+          threadsAwaitingHistoryImport.delete(event.payload.threadId);
+        }),
+      ),
       Effect.asVoid,
       Effect.catchCause(recoverTurnStartFailure),
       Effect.ensuring(Effect.sync(() => void pendingTurnSends.delete(pendingSendKey))),
