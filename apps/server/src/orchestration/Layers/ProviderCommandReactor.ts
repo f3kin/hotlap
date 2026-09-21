@@ -818,6 +818,7 @@ const make = Effect.gen(function* () {
                 // The durable marker: history is imported while this is still the
                 // thread's latest turn, so a restart before the next send keeps it.
                 payload: {
+                  threadId,
                   providerInstanceId: desiredInstanceId,
                   reason,
                   afterTurnId: thread.latestTurn?.turnId ?? null,
@@ -1247,18 +1248,8 @@ const make = Effect.gen(function* () {
     messageId: MessageId,
     messageText: string,
   ) {
-    const detail = yield* projectionSnapshotQuery
-      .getThreadDetailById(threadId, { activityKinds: [PROVIDER_SESSION_CARRIED_OVER] })
-      .pipe(Effect.map(Option.getOrUndefined));
-    const latestCarryOver = detail?.activities
-      .filter((activity) => activity.kind === PROVIDER_SESSION_CARRIED_OVER)
-      .at(-1);
-    const afterTurnId = (latestCarryOver?.payload as { afterTurnId?: unknown } | undefined)
-      ?.afterTurnId;
-    const awaitingImport =
-      threadsAwaitingHistoryImport.has(threadId) ||
-      (latestCarryOver !== undefined && afterTurnId === (detail?.latestTurn?.turnId ?? null));
-    if (!awaitingImport) return messageText;
+    if (!threadsAwaitingHistoryImport.has(threadId)) return messageText;
+    const detail = yield* resolveThreadDetail(threadId);
     const earlier = (detail?.messages ?? []).filter((message) => message.id !== messageId);
     const imported = buildForkProviderInput({
       messages: projectReadableThreadMessages(earlier),
@@ -2789,6 +2780,35 @@ const make = Effect.gen(function* () {
         )
     ).pipe(Effect.andThen(pendingTurnReconciliationWorker.drain));
 
+  // A restart between a carry-over and the next send empties the marker set;
+  // the persisted notice records the turn it follows, so rebuild it from there.
+  const restoreHistoryImports = Effect.gen(function* () {
+    const notices = yield* projectionSnapshotQuery.listActivitiesByKind(
+      PROVIDER_SESSION_CARRIED_OVER,
+    );
+    const latestByThread = new Map<string, unknown>();
+    for (const notice of notices) {
+      const payload = notice.payload as { threadId?: unknown; afterTurnId?: unknown } | null;
+      if (typeof payload?.threadId === "string") {
+        latestByThread.set(payload.threadId, payload.afterTurnId ?? null);
+      }
+    }
+    for (const [rawThreadId, afterTurnId] of latestByThread) {
+      const thread = yield* resolveThreadShell(ThreadId.make(rawThreadId));
+      if (thread && (thread.latestTurn?.turnId ?? null) === afterTurnId) {
+        threadsAwaitingHistoryImport.add(thread.id);
+      }
+    }
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning("provider command reactor failed to restore pending history imports", {
+            cause: Cause.pretty(cause),
+          }),
+    ),
+  );
+
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const pendingTitles = yield* findPendingThreadTitles().pipe(
       Effect.catchCause((cause) => {
@@ -2828,6 +2848,9 @@ const make = Effect.gen(function* () {
       }
     });
 
+    // Only fills an in-memory set, so it is safe before activation, and it must
+    // land before the first send is processed.
+    yield* restoreHistoryImports;
     // Subscribe before returning, even while event handling waits for server activation.
     const domainEvents = yield* orchestrationEngine.subscribeDomainEvents;
     yield* forkParked(Stream.runForEach(domainEvents, processEvent));

@@ -6913,7 +6913,8 @@ describe("ProviderCommandReactor", () => {
     });
 
     // A restart between the carry-over and the next send empties the reactor's
-    // memory; the persisted notice alone must still bring the conversation along.
+    // memory. The state is written before the reactor starts, as after a
+    // restart, so only the persisted notice can bring the conversation along.
     it.each([
       [
         "imports history after a restart while the carried-over turn is still the latest",
@@ -6922,37 +6923,74 @@ describe("ProviderCommandReactor", () => {
       ],
       ["does not import again once a turn has run since the carry-over", "turn-0", false],
     ] as const)("%s", async (_name, afterTurnId, imports) => {
-      const harness = await createHarness();
-      await withSettledFirstTurn(harness, {
-        providerName: "codex",
-        providerInstanceId: ProviderInstanceId.make("codex"),
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-09-21T01:30:00.000Z";
+      const harness = await createHarness({
+        beforeReactorStart: async ({ engine }) => {
+          const run = (command: Parameters<typeof engine.dispatch>[0]) =>
+            Effect.runPromise(engine.dispatch(command));
+          await run({
+            type: "thread.message.user.append",
+            commandId: CommandId.make("cmd-history-message"),
+            threadId,
+            message: {
+              messageId: asMessageId("message-history"),
+              text: "first question about the orchard",
+              attachments: [],
+            },
+            createdAt: now,
+          });
+          for (const status of ["running", "ready"] as const) {
+            await run({
+              type: "thread.session.set",
+              commandId: CommandId.make(`cmd-history-turn-${status}`),
+              threadId,
+              session: {
+                threadId,
+                status,
+                providerName: "codex",
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                runtimeMode: "approval-required",
+                activeTurnId: status === "running" ? asTurnId("turn-1") : null,
+                lastError: null,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
+          }
+          await run({
+            type: "thread.activity.append",
+            commandId: CommandId.make("cmd-carried-over-before-restart"),
+            threadId,
+            activity: {
+              id: EventId.make("activity-carried-over"),
+              tone: "info",
+              kind: "provider.session.carried-over",
+              summary: "Continued in a new codex session",
+              payload: {
+                threadId,
+                providerInstanceId: "codex",
+                reason: "resume-declined",
+                afterTurnId,
+              },
+              turnId: null,
+              createdAt: now,
+            },
+            createdAt: now,
+          });
+        },
       });
-      await harness.runEffect(
-        harness.engine.dispatch({
-          type: "thread.activity.append",
-          commandId: CommandId.make("cmd-carried-over-before-restart"),
-          threadId: ThreadId.make("thread-1"),
-          activity: {
-            id: EventId.make("activity-carried-over"),
-            tone: "info",
-            kind: "provider.session.carried-over",
-            summary: "Continued in a new codex session",
-            payload: { providerInstanceId: "codex", reason: "resume-declined", afterTurnId },
-            turnId: null,
-            createdAt: "2026-09-21T01:31:00.000Z",
-          },
-          createdAt: "2026-09-21T01:31:00.000Z",
-        }),
-      );
 
       await harness.runEffect(
         harness.engine.dispatch(
           secondTurn({ instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" }),
         ),
       );
-      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
-
-      expect(carriedOverInput(harness).includes("first question about the orchard")).toBe(imports);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const input = String(
+        (harness.sendTurn.mock.calls[0]?.[0] as { input?: string } | undefined)?.input,
+      );
+      expect(input.includes("first question about the orchard")).toBe(imports);
     });
 
     it("does not abandon a resumable session over a failure that is not a resume", async () => {
