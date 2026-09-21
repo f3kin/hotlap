@@ -186,38 +186,7 @@ it.layer(NodeServices.layer)("model selection compare-and-set", (it) => {
     }),
   );
 
-  // The incident without a basis: an API client or an older app, holding the old
-  // account, sends while the thread's switch has not yet restarted the session.
-  it.effect("runs a basis-less turn back to the still-bound account on the switch instead", () =>
-    Effect.gen(function* () {
-      const readModel = switchedThread();
-      const events = yield* decideOrchestrationCommand({
-        command: turnStart({ modelSelection: SHARED }),
-        readModel: {
-          ...readModel,
-          threads: readModel.threads.map((thread) => ({
-            ...thread,
-            session: thread.session && { ...thread.session, providerInstanceId: SHARED.instanceId },
-          })),
-        },
-      }).pipe(Effect.map((decided) => (Array.isArray(decided) ? decided : [decided])));
-      const requested = events.find((event) => event.type === "thread.turn-start-requested");
-      expect(requested?.type === "thread.turn-start-requested" && requested.payload).toMatchObject({
-        modelSelection: PERSONAL,
-      });
-      expect(
-        events.some(
-          (event) =>
-            event.type === "thread.activity-appended" &&
-            event.payload.activity.kind === "thread.model-selection.superseded",
-        ),
-      ).toBe(true);
-    }),
-  );
-
-  // turn.start may still switch a thread (T3 Code's contract): any other
-  // basis-less selection is a deliberate write.
-  it.effect("leaves any other basis-less turn exactly as sent, for older clients", () =>
+  it.effect("leaves a turn without a basis exactly as sent, for older clients", () =>
     Effect.gen(function* () {
       const events = yield* decide(turnStart({ modelSelection: SHARED }));
       const requested = events.find((event) => event.type === "thread.turn-start-requested");
