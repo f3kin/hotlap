@@ -24,6 +24,11 @@ describe("classifyTurnFailureKind", () => {
       "session_resume",
     ],
     ["Codex could not resume the conversation: thread not found", "session_resume"],
+    ["no rollout found for thread id 019fdf74-aaa9-7950-b252-7cc7a8650470", "session_resume"],
+    ["No conversation found with session ID 4f1c", "session_resume"],
+    // A turn-level failure that mentions resuming is not a session resume: the
+    // fallback acts on this kind, and must not abandon a resumable session.
+    ["Claude could not resume a deferred tool call: the tool is no longer available.", "unknown"],
     ["Codex exited before it could report usage.", "provider_crash"],
     ["cursor-agent crashed with signal SIGSEGV", "provider_crash"],
     ["Claude API is overloaded (529). Try again shortly.", "unknown"],

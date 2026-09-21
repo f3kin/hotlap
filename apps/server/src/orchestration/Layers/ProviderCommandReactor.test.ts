@@ -6584,4 +6584,208 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.stopSession).not.toHaveBeenCalled();
   });
+  describe("resume fallback", () => {
+    const personal = ProviderInstanceId.make("claude-personal");
+    const work = ProviderInstanceId.make("claude-work");
+
+    /** Runs and settles one turn so the thread has history and a live session. */
+    async function withSettledFirstTurn(
+      harness: Awaited<ReturnType<typeof createHarness>>,
+      bound: { readonly providerName: string; readonly providerInstanceId: ProviderInstanceId },
+    ) {
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-09-21T01:30:00.000Z";
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-first-turn"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-first"),
+            role: "user",
+            text: "first question about the orchard",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const session = (status: "running" | "ready") => ({
+        threadId,
+        status,
+        ...bound,
+        runtimeMode: "approval-required" as const,
+        activeTurnId: status === "running" ? asTurnId("turn-1") : null,
+        lastError: null,
+        updatedAt: now,
+      });
+      for (const status of ["running", "ready"] as const) {
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`cmd-first-turn-${status}`),
+            threadId,
+            session: session(status),
+            createdAt: now,
+          }),
+        );
+      }
+    }
+
+    const secondTurn = (modelSelection: ModelSelection) =>
+      ({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-second-turn"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("message-second"),
+          role: "user",
+          text: "second question",
+          attachments: [],
+        },
+        modelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-09-21T01:44:21.000Z",
+      }) as const;
+
+    const carriedOverInput = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+      String((harness.sendTurn.mock.calls[1]?.[0] as { input?: string } | undefined)?.input);
+
+    async function activityKinds(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const thread = (await harness.readModel()).threads[0];
+      return thread?.activities.map((activity) => activity.kind) ?? [];
+    }
+
+    it("starts fresh with the conversation when the new account cannot resume the old one", async () => {
+      const harness = await createHarness({
+        threadModelSelection: { instanceId: personal, model: "claude-sonnet-5" },
+      });
+      await withSettledFirstTurn(harness, {
+        providerName: "claudeAgent",
+        providerInstanceId: personal,
+      });
+
+      await harness.runEffect(
+        harness.engine.dispatch(secondTurn({ instanceId: work, model: "claude-sonnet-5" })),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+      const restart = harness.startSession.mock.calls[1];
+      expect(restart?.[1]).toMatchObject({ providerInstanceId: work });
+      expect(restart?.[1]).not.toHaveProperty("resumeCursor");
+      expect(restart?.[2]).toEqual({ allowIncompatibleUnstartedReplacement: true });
+      expect(carriedOverInput(harness)).toContain(
+        "This conversation moved to a new provider session",
+      );
+      expect(carriedOverInput(harness)).toContain("first question about the orchard");
+      expect(carriedOverInput(harness)).toMatch(/second question$/);
+      const kinds = await activityKinds(harness);
+      expect(kinds).toContain("provider.session.carried-over");
+      expect(kinds).not.toContain("provider.turn.start.failed");
+    });
+
+    it("carries the conversation over when the provider quietly declines a resume", async () => {
+      let starts = 0;
+      const harness = await createHarness({
+        startSessionEffect: (session) =>
+          Effect.succeed(
+            (starts += 1) === 2 ? { ...session, resumeDeclined: true as const } : session,
+          ),
+      });
+      await withSettledFirstTurn(harness, {
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+
+      await harness.runEffect(
+        harness.engine.dispatch(
+          secondTurn({
+            instanceId: ProviderInstanceId.make("codex_personal"),
+            model: "gpt-5-codex",
+          }),
+        ),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+      expect(harness.startSession.mock.calls[1]?.[1]).toHaveProperty("resumeCursor");
+      expect(carriedOverInput(harness)).toContain("first question about the orchard");
+      expect(await activityKinds(harness)).toContain("provider.session.carried-over");
+    });
+
+    it("retries fresh when the provider rejects the resume cursor", async () => {
+      let starts = 0;
+      const harness = await createHarness({
+        startSessionEffect: (session) =>
+          (starts += 1) === 2
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "thread/resume",
+                  detail: "no rollout found for thread id 019fdf74-aaa9-7950-b252-7cc7a8650470",
+                }),
+              )
+            : Effect.succeed(session),
+      });
+      await withSettledFirstTurn(harness, {
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+
+      await harness.runEffect(
+        harness.engine.dispatch(
+          secondTurn({
+            instanceId: ProviderInstanceId.make("codex_personal"),
+            model: "gpt-5-codex",
+          }),
+        ),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+      expect(harness.startSession).toHaveBeenCalledTimes(3);
+      expect(harness.startSession.mock.calls[1]?.[1]).toHaveProperty("resumeCursor");
+      expect(harness.startSession.mock.calls[2]?.[1]).not.toHaveProperty("resumeCursor");
+      expect(carriedOverInput(harness)).toContain("first question about the orchard");
+      expect(await activityKinds(harness)).toContain("provider.session.carried-over");
+    });
+
+    it("does not abandon a resumable session over a failure that is not a resume", async () => {
+      let starts = 0;
+      const harness = await createHarness({
+        startSessionEffect: (session) =>
+          (starts += 1) === 2
+            ? Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "thread/resume",
+                  detail:
+                    "Codex usage limit reached. Send the message again once the limit resets.",
+                }),
+              )
+            : Effect.succeed(session),
+      });
+      await withSettledFirstTurn(harness, {
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+
+      await harness.runEffect(
+        harness.engine.dispatch(
+          secondTurn({
+            instanceId: ProviderInstanceId.make("codex_personal"),
+            model: "gpt-5-codex",
+          }),
+        ),
+      );
+      await waitFor(async () =>
+        (await activityKinds(harness)).includes("provider.turn.start.failed"),
+      );
+
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(await activityKinds(harness)).not.toContain("provider.session.carried-over");
+    });
+  });
 });

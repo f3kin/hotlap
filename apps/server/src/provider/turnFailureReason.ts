@@ -26,7 +26,7 @@ const KIND_PATTERNS: ReadonlyArray<readonly [TurnFailureKind, RegExp]> = [
   ],
   [
     "session_resume",
-    /\b(could not resume|cannot resume|failed to resume|resume (failed|is unavailable)|resume state is incompatible|(session|conversation|thread) not found|unknown (session|conversation|thread))\b/i,
+    /\b((could not|cannot|failed to) resume (the |this )?(session|conversation|thread)|resume state is incompatible|(session|conversation|thread) (was )?not found|no (session|conversation|thread) found|no rollout found|unknown (session|conversation|thread))\b/i,
   ],
   [
     "provider_crash",

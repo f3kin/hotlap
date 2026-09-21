@@ -12,6 +12,7 @@ import {
   type ProjectId,
   type OrchestrationSession,
   ThreadId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ProviderSession,
   type RuntimeMode,
   TurnId,
@@ -19,6 +20,10 @@ import {
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
+import {
+  buildForkProviderInput,
+  projectReadableThreadMessages,
+} from "@t3tools/shared/readableThreadTranscript";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -50,6 +55,7 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { classifyTurnFailureKind } from "../../provider/turnFailureReason.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -267,6 +273,9 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  // Threads whose provider session could not resume the conversation; the
+  // next send carries it as a transcript. Consumed by that send.
+  const threadsAwaitingHistoryImport = new Set<ThreadId>();
   const compactingThreadIds = new Set<ThreadId>();
   type QueuedTurnStart = Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
   // Turn starts received while a thread compacts, replayed in order once its session is restored.
@@ -714,18 +723,17 @@ const make = Effect.gen(function* () {
           detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
         });
       }
-      if (
-        !allowIncompatibleUnstartedReplacement &&
-        currentInfo.continuationIdentity.continuationKey !==
-          desiredInfo.continuationIdentity.continuationKey
-      ) {
-        return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
-          method: "thread.turn.start",
-          detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
-        });
-      }
     }
+    // Another account's native session cannot be resumed here (its resume state
+    // lives in that account's store). Start fresh and carry the conversation
+    // over instead of failing the turn.
+    const resumeIncompatible =
+      !allowIncompatibleUnstartedReplacement &&
+      thread.session !== null &&
+      requestedModelSelection !== undefined &&
+      requestedModelSelection.instanceId !== currentInstanceId &&
+      currentInfo.continuationIdentity.continuationKey !==
+        desiredInfo.continuationIdentity.continuationKey;
     const project = yield* resolveProject(thread.projectId);
     const effectiveCwd = resolveThreadWorkspaceCwd({
       thread,
@@ -737,7 +745,10 @@ const make = Effect.gen(function* () {
           .pipe(Effect.forkDetach)
       : Effect.void;
 
-    const startProviderSession = (input?: { readonly resumeCursor?: unknown }) => {
+    const startProviderSession = (input?: {
+      readonly resumeCursor?: unknown;
+      readonly fresh?: true;
+    }) => {
       const startInput = {
         threadId,
         ...(preferredProvider ? { provider: preferredProvider } : {}),
@@ -748,13 +759,64 @@ const make = Effect.gen(function* () {
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
       };
-      const start = allowIncompatibleUnstartedReplacement
-        ? providerService.startSession(threadId, startInput, {
-            allowIncompatibleUnstartedReplacement: true,
-          })
-        : providerService.startSession(threadId, startInput);
+      const start =
+        allowIncompatibleUnstartedReplacement || input?.fresh === true
+          ? providerService.startSession(threadId, startInput, {
+              allowIncompatibleUnstartedReplacement: true,
+            })
+          : providerService.startSession(threadId, startInput);
       return start.pipe(Effect.tap(() => refreshWorkspaceSnapshot));
     };
+
+    // Resume when the provider can; otherwise start fresh and carry the
+    // conversation over. Only a resume-shaped failure falls back: a usage limit
+    // or a crash would fail the fresh start too, and must not throw away a
+    // session that is still resumable.
+    const carryConversationOver = (reason: string) =>
+      thread.latestTurn === null
+        ? Effect.void
+        : Effect.gen(function* () {
+            threadsAwaitingHistoryImport.add(threadId);
+            yield* Effect.logWarning(
+              "provider command reactor started a fresh provider session and will import history",
+              { threadId, desiredInstanceId, reason },
+            );
+            yield* orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: yield* serverCommandId("provider-session-carried-over"),
+              threadId,
+              activity: {
+                id: yield* serverEventId(),
+                tone: "info",
+                kind: "provider.session.carried-over",
+                summary: `Continued in a new ${desiredInstanceId} session: the previous one could not be resumed, so the conversation was carried over`,
+                payload: { providerInstanceId: desiredInstanceId, reason },
+                turnId: null,
+                createdAt,
+              },
+              createdAt,
+            });
+          });
+    const startWithResumeFallback = (resumeCursor: unknown) =>
+      (resumeIncompatible
+        ? startProviderSession({ fresh: true }).pipe(
+            Effect.tap(() => carryConversationOver("incompatible-resume-state")),
+          )
+        : startProviderSession(resumeCursor !== undefined ? { resumeCursor } : undefined).pipe(
+            Effect.catchCause((cause) =>
+              !Cause.hasInterruptsOnly(cause) &&
+              classifyTurnFailureKind(formatFailureDetail(cause)) === "session_resume"
+                ? startProviderSession({ fresh: true }).pipe(
+                    Effect.tap(() => carryConversationOver("resume-rejected")),
+                  )
+                : Effect.failCause(cause),
+            ),
+          )
+      ).pipe(
+        Effect.tap((session) =>
+          session.resumeDeclined === true ? carryConversationOver("resume-declined") : Effect.void,
+        ),
+      );
 
     const bindSessionToThread = (session: ProviderSession) =>
       Effect.gen(function* () {
@@ -838,11 +900,12 @@ const make = Effect.gen(function* () {
         return existingSessionThreadId;
       }
 
-      const resumeCursor = allowIncompatibleUnstartedReplacement
-        ? undefined
-        : shouldRestartForModelChange
+      const resumeCursor =
+        allowIncompatibleUnstartedReplacement || resumeIncompatible
           ? undefined
-          : (activeSession?.resumeCursor ?? undefined);
+          : shouldRestartForModelChange
+            ? undefined
+            : (activeSession?.resumeCursor ?? undefined);
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -862,9 +925,7 @@ const make = Effect.gen(function* () {
         shouldRestartForModelSelectionChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
-      const restartedSession = yield* startProviderSession(
-        resumeCursor !== undefined ? { resumeCursor } : undefined,
-      );
+      const restartedSession = yield* startWithResumeFallback(resumeCursor);
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
         previousSessionId: existingSessionThreadId,
@@ -877,7 +938,7 @@ const make = Effect.gen(function* () {
       return restartedSession.threadId;
     }
 
-    const startedSession = yield* startProviderSession(undefined);
+    const startedSession = yield* startWithResumeFallback(undefined);
     yield* bindSessionToThread(startedSession);
     return startedSession.threadId;
   });
@@ -1140,6 +1201,29 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /**
+   * The provider input for the first turn on a session that could not resume:
+   * the thread's conversation before this message as a transcript, then the
+   * message. Falls back to the bare message when even the newest exchange will
+   * not fit; the carry-over notice has already told the user.
+   */
+  const withImportedHistory = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    messageId: MessageId,
+    messageText: string,
+  ) {
+    const detail = yield* resolveThreadDetail(threadId);
+    const earlier = (detail?.messages ?? []).filter((message) => message.id !== messageId);
+    const imported = buildForkProviderInput({
+      messages: projectReadableThreadMessages(earlier),
+      continuation: messageText,
+      maxChars: PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+      intro:
+        "This conversation moved to a new provider session that could not resume the previous one. Continue from the transcript below, which may omit older messages, using the newest workspace state.\n\n",
+    });
+    return imported?.text ?? messageText;
+  });
+
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageId: MessageId;
@@ -1169,7 +1253,10 @@ const make = Effect.gen(function* () {
     if (sessionModelSelection !== undefined) {
       threadModelSelections.set(input.threadId, sessionModelSelection);
     }
-    const normalizedInput = toNonEmptyProviderInput(input.messageText);
+    const messageText = threadsAwaitingHistoryImport.delete(input.threadId)
+      ? yield* withImportedHistory(input.threadId, input.messageId, input.messageText)
+      : input.messageText;
+    const normalizedInput = toNonEmptyProviderInput(messageText);
     const normalizedAttachments = input.attachments ?? [];
     const activeSession = yield* providerService
       .listSessions()
