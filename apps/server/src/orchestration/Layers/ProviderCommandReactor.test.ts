@@ -6925,61 +6925,61 @@ describe("ProviderCommandReactor", () => {
     ] as const)("%s", async (_name, afterTurnId, imports) => {
       const threadId = ThreadId.make("thread-1");
       const now = "2026-09-21T01:30:00.000Z";
-      const harness = await createHarness({
-        beforeReactorStart: async ({ engine }) => {
-          const run = (command: Parameters<typeof engine.dispatch>[0]) =>
-            Effect.runPromise(engine.dispatch(command));
+      const harness = await createHarness({ deferReactorStart: true });
+      const run = (command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        harness.runEffect(harness.engine.dispatch(command));
+      {
+        await run({
+          type: "thread.message.user.append",
+          commandId: CommandId.make("cmd-history-message"),
+          threadId,
+          message: {
+            messageId: asMessageId("message-history"),
+            text: "first question about the orchard",
+            attachments: [],
+          },
+          createdAt: now,
+        });
+        for (const status of ["running", "ready"] as const) {
           await run({
-            type: "thread.message.user.append",
-            commandId: CommandId.make("cmd-history-message"),
+            type: "thread.session.set",
+            commandId: CommandId.make(`cmd-history-turn-${status}`),
             threadId,
-            message: {
-              messageId: asMessageId("message-history"),
-              text: "first question about the orchard",
-              attachments: [],
-            },
-            createdAt: now,
-          });
-          for (const status of ["running", "ready"] as const) {
-            await run({
-              type: "thread.session.set",
-              commandId: CommandId.make(`cmd-history-turn-${status}`),
+            session: {
               threadId,
-              session: {
-                threadId,
-                status,
-                providerName: "codex",
-                providerInstanceId: ProviderInstanceId.make("codex"),
-                runtimeMode: "approval-required",
-                activeTurnId: status === "running" ? asTurnId("turn-1") : null,
-                lastError: null,
-                updatedAt: now,
-              },
-              createdAt: now,
-            });
-          }
-          await run({
-            type: "thread.activity.append",
-            commandId: CommandId.make("cmd-carried-over-before-restart"),
-            threadId,
-            activity: {
-              id: EventId.make("activity-carried-over"),
-              tone: "info",
-              kind: "provider.session.carried-over",
-              summary: "Continued in a new codex session",
-              payload: {
-                threadId,
-                providerInstanceId: "codex",
-                reason: "resume-declined",
-                afterTurnId,
-              },
-              turnId: null,
-              createdAt: now,
+              status,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: status === "running" ? asTurnId("turn-1") : null,
+              lastError: null,
+              updatedAt: now,
             },
             createdAt: now,
           });
-        },
-      });
+        }
+        await run({
+          type: "thread.activity.append",
+          commandId: CommandId.make("cmd-carried-over-before-restart"),
+          threadId,
+          activity: {
+            id: EventId.make("activity-carried-over"),
+            tone: "info",
+            kind: "provider.session.carried-over",
+            summary: "Continued in a new codex session",
+            payload: {
+              threadId,
+              providerInstanceId: "codex",
+              reason: "resume-declined",
+              afterTurnId,
+            },
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        });
+      }
+      await harness.startReactor();
 
       await harness.runEffect(
         harness.engine.dispatch(
