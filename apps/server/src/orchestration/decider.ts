@@ -1617,13 +1617,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // still runs, on the thread's selection: the switch is the later write.
       // Resolving it here puts the winner on the event, so the reactor, its
       // recovery path, and replay all start the same session.
+      // Without a basis a selection may be a deliberate switch (turn.start is
+      // allowed to switch a thread), so only the one shape that can only be a
+      // stale snapshot loses: asking for the instance the session is still bound
+      // to after the thread was switched away from it, before the switch applied.
+      const bound = targetThread.session?.providerInstanceId;
+      const revertsPendingSwitch =
+        command.modelSelection !== undefined &&
+        command.expectedModelSelection === undefined &&
+        bound !== undefined &&
+        command.modelSelection.instanceId === bound &&
+        targetThread.modelSelection.instanceId !== bound;
       const staleModelSelection =
         command.modelSelection !== undefined &&
-        isStaleModelSelectionBasis(
-          targetThread.modelSelection,
-          command.modelSelection,
-          command.expectedModelSelection,
-        )
+        (revertsPendingSwitch ||
+          isStaleModelSelectionBasis(
+            targetThread.modelSelection,
+            command.modelSelection,
+            command.expectedModelSelection,
+          ))
           ? command.modelSelection
           : undefined;
       const turnModelSelection =

@@ -40,7 +40,9 @@ and removal must respect those leases instead of replacing executables under a r
 The thread's `modelSelection` is authoritative, and a switch is a compare-and-set.
 `thread.meta.update` and `thread.turn.start` carry `expectedModelSelection`: the selection the
 sender built against. When the thread moved since, the [decider](../../apps/server/src/orchestration/decider.ts)
-keeps the thread's selection and runs a stale turn on it, with a notice. A client that persists a
+keeps the thread's selection and runs a stale turn on it, with a notice. Without a basis a turn
+start may still switch the thread, except when it asks for the account its session is still bound
+to after the thread moved away: that can only be a stale snapshot. A client that persists a
 selection and then sends must use that persisted selection as the turn's basis; the pre-persist
 value makes every deliberate switch look stale. Queued messages keep the basis from queue time.
 
