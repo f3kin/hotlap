@@ -1888,6 +1888,10 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" ||
         isTerminalTurn
       ) {
+        const providerCrashedMidTurn =
+          event.type === "session.exited" &&
+          event.payload.exitKind === "error" &&
+          activeTurnId !== null;
         const status = (() => {
           switch (event.type) {
             case "session.state.changed": {
@@ -1897,7 +1901,9 @@ const make = Effect.gen(function* () {
             case "turn.started":
               return "running";
             case "session.exited":
-              return "stopped";
+              // A provider that died under a running turn failed that turn;
+              // an idle exit only ends the session.
+              return providerCrashedMidTurn ? "error" : "stopped";
             case "turn.aborted":
               return "interrupted";
             case "turn.completed":
@@ -1925,12 +1931,14 @@ const make = Effect.gen(function* () {
         const lastError =
           event.type === "session.state.changed" && event.payload.state === "error"
             ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-            : event.type === "turn.completed" &&
-                normalizeRuntimeTurnState(event.payload.state) === "failed"
-              ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
-              : status === "ready" || status === "interrupted"
-                ? null
-                : (thread.session?.lastError ?? null);
+            : providerCrashedMidTurn
+              ? (event.payload.reason ?? "The provider exited unexpectedly.")
+              : event.type === "turn.completed" &&
+                  normalizeRuntimeTurnState(event.payload.state) === "failed"
+                ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
+                : status === "ready" || status === "interrupted"
+                  ? null
+                  : (thread.session?.lastError ?? null);
         // An event that only carries the session's existing message forward
         // must not downgrade the classification that came with it.
         const inheritedErrorReason =
@@ -1938,7 +1946,11 @@ const make = Effect.gen(function* () {
             ? (thread.session.lastErrorReason ?? undefined)
             : undefined;
         const adapterErrorReason =
-          event.type === "turn.completed" ? event.payload.errorReason : undefined;
+          event.type === "turn.completed"
+            ? event.payload.errorReason
+            : providerCrashedMidTurn && lastError !== null
+              ? { kind: "provider_crash" as const, message: lastError }
+              : undefined;
         const lastErrorReason =
           lastError === null
             ? null

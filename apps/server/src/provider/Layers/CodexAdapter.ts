@@ -1499,7 +1499,9 @@ function mapToRuntimeEvents(
         type: "session.exited",
         payload: {
           ...(event.message ? { reason: event.message } : {}),
-          ...(event.method === "session/closed" ? { exitKind: "graceful" } : {}),
+          // session/exited is only emitted when the process ended without T3
+          // closing it, so from the thread's view it is always a crash.
+          exitKind: event.method === "session/closed" ? "graceful" : "error",
         },
       },
     ];

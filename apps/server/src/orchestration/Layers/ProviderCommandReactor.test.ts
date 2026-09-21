@@ -6993,6 +6993,91 @@ describe("ProviderCommandReactor", () => {
       expect(input.includes("first question about the orchard")).toBe(imports);
     });
 
+    // The server died after the provider admitted the carried-over turn: the
+    // restored marker must clear when reconciliation finds that admission.
+    it("does not import again after a restart once the carried-over turn was admitted", async () => {
+      const threadId = ThreadId.make("thread-1");
+      const admittedMessageId = MessageId.make("message-carried-and-admitted");
+      const then = "2025-12-31T23:59:00.000Z";
+      const harness = await createHarness({ deferReactorStart: true });
+      const run = (command: Parameters<typeof harness.engine.dispatch>[0]) =>
+        harness.runEffect(harness.engine.dispatch(command));
+      await run({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-carried-and-admitted"),
+        threadId,
+        message: {
+          messageId: admittedMessageId,
+          role: "user",
+          text: "first question about the orchard",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: then,
+      });
+      await run({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-carried-and-admitted-starting"),
+        threadId,
+        session: {
+          threadId,
+          status: "starting",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: then,
+        },
+        createdAt: then,
+      });
+      await run({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-carried-and-admitted-notice"),
+        threadId,
+        activity: {
+          id: EventId.make("activity-carried-and-admitted"),
+          tone: "info",
+          kind: "provider.session.carried-over",
+          summary: "Continued in a new codex session",
+          payload: {
+            threadId,
+            providerInstanceId: "codex",
+            reason: "resume-declined",
+            afterTurnId: null,
+          },
+          turnId: null,
+          createdAt: then,
+        },
+        createdAt: then,
+      });
+      await harness.runEffect(
+        harness.directory.upsert({
+          threadId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "running",
+          runtimePayload: {
+            activeTurnId: null,
+            lastAdmittedMessageId: admittedMessageId,
+            lastAdmittedTurnId: TurnId.make("turn-carried-and-admitted"),
+          },
+        }),
+      );
+      await harness.startReactor();
+      await harness.runEffect(harness.reactor.reconcilePendingTurns(threadId));
+      await harness.drain();
+
+      await harness.runEffect(
+        harness.engine.dispatch(
+          secondTurn({ instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" }),
+        ),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ input: "second question" });
+    });
+
     it("does not abandon a resumable session over a failure that is not a resume", async () => {
       let starts = 0;
       const harness = await createHarness({

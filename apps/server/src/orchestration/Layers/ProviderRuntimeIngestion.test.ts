@@ -5336,6 +5336,45 @@ describe("ProviderRuntimeIngestion", () => {
     expect((await harness.readThreadShell()).latestTurn?.error ?? null).toBeNull();
   });
 
+  it.each([
+    ["fails the running turn as a provider crash when the provider dies under it", true],
+    ["only ends the session when the provider exits while idle", false],
+  ] as const)("%s", async (_name, midTurn) => {
+    const harness = await createHarness();
+    if (midTurn) {
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("evt-crash-mid-turn-started"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-09-21T01:00:00.000Z",
+        turnId: asTurnId("turn-mid"),
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.status === "running");
+    }
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-provider-exited"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-09-21T01:00:05.000Z",
+      payload: { reason: "Codex App Server exited with code 1.", exitKind: "error" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      midTurn ? entry.latestTurn?.state === "error" : entry.session?.status === "stopped",
+    );
+    if (midTurn) {
+      expect((await harness.readThreadShell()).latestTurn?.error).toMatchObject({
+        kind: "provider_crash",
+        message: "Codex App Server exited with code 1.",
+      });
+    } else {
+      expect(thread.session?.status).toBe("stopped");
+      expect(thread.latestTurn?.error ?? null).toBeNull();
+    }
+  });
+
   it("classifies a failed turn that only carried a sentence, so it is never reasonless", async () => {
     const harness = await createHarness();
     harness.emit({

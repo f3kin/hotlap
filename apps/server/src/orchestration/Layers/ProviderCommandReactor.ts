@@ -2164,6 +2164,9 @@ const make = Effect.gen(function* () {
         providerService.getPersistedTurnAdmission?.(threadId) ?? Effect.succeed(null)
       );
       if (persistedAdmission?.messageId === pending.value.messageId) {
+        // The provider already has this turn, transcript included; a marker
+        // restored at startup must not import it again on the next send.
+        threadsAwaitingHistoryImport.delete(threadId);
         const liveSessions = yield* providerService.listSessions();
         const providerStillRunsAdmission = liveSessions.some(
           (session) =>
