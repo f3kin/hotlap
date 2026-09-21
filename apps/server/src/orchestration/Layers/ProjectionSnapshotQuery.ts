@@ -21,6 +21,7 @@ import {
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
+  turnFailureReasonForSession,
   type OrchestrationMessage,
   type OrchestrationProjectShell,
   type OrchestrationProposedPlan,
@@ -469,10 +470,7 @@ function withLatestTurnFailure(
   if (latestTurn.state !== "error") {
     return latestTurn.error == null ? latestTurn : { ...latestTurn, error: null };
   }
-  const reason =
-    session?.lastErrorReason ??
-    (session?.lastError ? ({ kind: "unknown", message: session.lastError } as const) : null);
-  return { ...latestTurn, error: reason };
+  return { ...latestTurn, error: turnFailureReasonForSession(session) };
 }
 
 function mapProjectShellRow(
@@ -2821,6 +2819,7 @@ pending_approval_requests AS (
                   runtimeMode: row.runtimeMode,
                   activeTurnId: row.activeTurnId,
                   lastError: row.lastError,
+                  ...(row.lastErrorReason !== null ? { lastErrorReason: row.lastErrorReason } : {}),
                   updatedAt: row.updatedAt,
                 });
               }

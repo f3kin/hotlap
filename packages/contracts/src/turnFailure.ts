@@ -45,3 +45,37 @@ export const TurnFailureReason = Schema.Struct({
   providerInstanceId: Schema.optional(ProviderInstanceId),
 });
 export type TurnFailureReason = typeof TurnFailureReason.Type;
+
+/**
+ * The reason an errored turn shows, read from the session that recorded the
+ * failure: the turn keeps the state, the session keeps the why. The untyped
+ * branch covers sessions written before `lastErrorReason` existed, so a turn in
+ * `error` state never renders without a reason. Shared by the server's
+ * projections and the clients' reducer so they cannot disagree.
+ */
+export function turnFailureReasonForSession(
+  session:
+    | {
+        readonly lastError: string | null;
+        readonly lastErrorReason?: TurnFailureReason | null | undefined;
+      }
+    | null
+    | undefined,
+): TurnFailureReason | null {
+  if (!session) return null;
+  if (session.lastErrorReason != null) return session.lastErrorReason;
+  return session.lastError ? { kind: "unknown", message: session.lastError } : null;
+}
+
+export function turnFailureReasonsEqual(
+  left: TurnFailureReason | null | undefined,
+  right: TurnFailureReason | null | undefined,
+): boolean {
+  if (left == null || right == null) return (left ?? null) === (right ?? null);
+  return (
+    left.kind === right.kind &&
+    left.message === right.message &&
+    left.resetsAt === right.resetsAt &&
+    left.providerInstanceId === right.providerInstanceId
+  );
+}

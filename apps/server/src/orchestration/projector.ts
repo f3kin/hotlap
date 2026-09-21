@@ -12,7 +12,7 @@ import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
   OrchestrationSession,
-  type TurnFailureReason,
+  turnFailureReasonForSession,
   OrchestrationThread,
   WORKTREE_SETUP_ACTIVITY_KIND,
 } from "@t3tools/contracts";
@@ -86,19 +86,6 @@ function retainThreadActivities(activities: OrchestrationThread["activities"]) {
       // setup script can outlast a chatty first turn.
       activity.kind === WORKTREE_SETUP_ACTIVITY_KIND,
   );
-}
-
-/**
- * The typed reason an errored turn shows. Ingestion classifies every failure it
- * records, so the untyped branch only covers sessions written before the field
- * existed; a turn in `error` state still never renders without a reason.
- */
-function failureReasonForSession(
-  session: OrchestrationSession | null | undefined,
-): TurnFailureReason | null {
-  if (!session) return null;
-  if (session.lastErrorReason != null) return session.lastErrorReason;
-  return session.lastError ? { kind: "unknown", message: session.lastError } : null;
 }
 
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
@@ -887,7 +874,8 @@ export function projectEvent(
                       // placeholder checkpoint timestamp — the session leaving
                       // "running" is the authoritative turn end.
                       completedAt: session.updatedAt,
-                      error: settledTurnState === "error" ? failureReasonForSession(session) : null,
+                      error:
+                        settledTurnState === "error" ? turnFailureReasonForSession(session) : null,
                     }
                   : thread.latestTurn,
             updatedAt: event.occurredAt,
@@ -1002,7 +990,7 @@ export function projectEvent(
                   assistantMessageId: payload.assistantMessageId,
                   error:
                     checkpointedTurnState === "error"
-                      ? failureReasonForSession(thread.session)
+                      ? turnFailureReasonForSession(thread.session)
                       : null,
                 },
             updatedAt: event.occurredAt,
