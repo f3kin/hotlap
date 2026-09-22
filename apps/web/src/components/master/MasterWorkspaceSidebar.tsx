@@ -9,9 +9,9 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { effectiveSnoozed, snoozeWakeLabel } from "@t3tools/client-runtime/state/thread-settled";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { ChevronDownIcon, EllipsisIcon, PinIcon } from "lucide-react";
+import { ChevronDownIcon, EllipsisIcon } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -55,7 +55,6 @@ import { buildThreadRouteParams, resolveThreadRouteRef } from "~/threadRoutes";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
 import { useNowMinute } from "~/hooks/useNowMinute";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
-import { useThreadActions } from "~/hooks/useThreadActions";
 import { startNewThreadFromContext } from "~/lib/chatThreadActions";
 import { resolveRenameCommit } from "../chat/ChatHeader";
 import { Button } from "../ui/button";
@@ -77,7 +76,6 @@ import {
 } from "../ThreadStatusIndicators";
 import {
   deriveMasterWorkspace,
-  isMasterThreadTitle,
   navigableRows,
   nextUnparkedKey,
   type MasterShelf,
@@ -134,14 +132,10 @@ function ThreadRowButton({
   thread,
   context,
   nested,
-  pinned,
-  trailing,
 }: {
   thread: ThreadRow;
   context: RowContext;
   nested?: boolean;
-  pinned?: boolean;
-  trailing?: ReactNode;
 }) {
   const key = rowKey(thread);
   const active = context.activeKey === key;
@@ -216,7 +210,6 @@ function ThreadRowButton({
           }
         }}
       >
-        {pinned ? <PinIcon className="size-3 shrink-0 text-muted-foreground" /> : null}
         <ThreadRowLeadingStatus thread={thread} />
         <span className="min-w-0 flex-1 truncate text-left">{shortTitle(thread.title)}</span>
         {snoozedUntil ? (
@@ -249,7 +242,6 @@ function ThreadRowButton({
       >
         <EllipsisIcon className="size-3.5" />
       </Button>
-      {trailing}
     </div>
   );
 }
@@ -267,15 +259,7 @@ function MasterHeading({ thread }: { thread: ThreadRow }) {
   );
 }
 
-function ProjectGroupRows({
-  group,
-  context,
-  pinControl,
-}: {
-  group: ProjectGroup;
-  context: RowContext;
-  pinControl: (thread: ThreadRow) => ReactNode;
-}) {
+function ProjectGroupRows({ group, context }: { group: ProjectGroup; context: RowContext }) {
   if (group.masters.length === 0 && group.oneOffs.length === 0 && group.orphanCards.length === 0) {
     return (
       <p className="px-2 py-2 text-[11px] text-muted-foreground">
@@ -290,11 +274,7 @@ function ProjectGroupRows({
           {board.structural ? (
             <MasterHeading thread={board.master} />
           ) : (
-            <ThreadRowButton
-              thread={board.master}
-              context={context}
-              trailing={pinControl(board.master)}
-            />
+            <ThreadRowButton thread={board.master} context={context} />
           )}
           {board.cards.map((card) => (
             <ThreadRowButton key={rowKey(card)} thread={card} context={context} nested />
@@ -366,18 +346,19 @@ function MasterWorkspaceSidebar() {
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
-  // Logical project groups (worktrees fold into their repo), the same count the
-  // chat.new shortcut uses to decide between the picker and a direct create.
-  const projectGroupCount = useMemo(
+  // Logical project groups carry the same representative title and icon as the
+  // standard sidebar, so worktrees inherit their parent project's presentation.
+  const projectGroups = useMemo(
     () =>
       buildSidebarProjectSnapshots({
         projects,
         settings: projectGroupingSettings,
         primaryEnvironmentId,
         resolveEnvironmentLabel: () => null,
-      }).length,
+      }),
     [primaryEnvironmentId, projectGroupingSettings, projects],
   );
+  const projectGroupCount = projectGroups.length;
   const environmentIds = useMemo(
     () => [...new Set(projects.map((project) => project.environmentId))] as EnvironmentId[],
     [projects],
@@ -392,7 +373,6 @@ function MasterWorkspaceSidebar() {
   const activeKey = activeRef ? scopedThreadKey(activeRef) : null;
   const { isMobile, setOpenMobile } = useSidebar();
   const newThreadContext = useHandleNewThread();
-  const { pinThread, confirmAndUnpinThread } = useThreadActions();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -405,7 +385,7 @@ function MasterWorkspaceSidebar() {
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
 
   const capability = useCallback(
-    (environmentId: EnvironmentId, name: "threadSnooze" | "threadSettlement" | "threadPinning") =>
+    (environmentId: EnvironmentId, name: "threadSnooze" | "threadSettlement") =>
       serverConfigs.get(environmentId)?.environment.capabilities[name] === true,
     [serverConfigs],
   );
@@ -459,10 +439,30 @@ function MasterWorkspaceSidebar() {
     () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
     [projects],
   );
+  const projectPresentationByKey = useMemo(() => {
+    const presentations = new Map<
+      string,
+      { project: (typeof projectGroups)[number]; title: string }
+    >();
+    for (const group of projectGroups) {
+      for (const project of group.memberProjects) {
+        presentations.set(`${project.environmentId}:${project.id}`, {
+          project: group,
+          title: group.displayName,
+        });
+      }
+    }
+    return presentations;
+  }, [projectGroups]);
   const projectOf = useCallback(
-    (group: { environmentId: string; projectId: string }) =>
-      projectByKey.get(`${group.environmentId}:${group.projectId}`),
-    [projectByKey],
+    (group: { environmentId: string; projectId: string }) => {
+      const key = `${group.environmentId}:${group.projectId}`;
+      const presentation = projectPresentationByKey.get(key);
+      if (presentation) return presentation;
+      const project = projectByKey.get(key);
+      return project ? { project, title: project.title } : null;
+    },
+    [projectByKey, projectPresentationByKey],
   );
   const isProjectOpen = useCallback(
     (group: ProjectGroup) =>
@@ -653,7 +653,7 @@ function MasterWorkspaceSidebar() {
       const next = nextKey ? rowByKey.get(nextKey) : undefined;
       openMenu(position, {
         threadRef: scopeThreadRef(thread.environmentId, thread.id),
-        projectCwd: projectOf(thread)?.workspaceRoot ?? null,
+        projectCwd: projectOf(thread)?.project.workspaceRoot ?? null,
         onParked: () => {
           // A navigation made while the command ran wins over ours.
           if (activeKeyRef.current !== key) return;
@@ -692,42 +692,6 @@ function MasterWorkspaceSidebar() {
     },
     [updateThreadMetadata],
   );
-
-  const togglePin = useCallback(
-    (thread: ThreadRow) => {
-      const ref: ScopedThreadRef = scopeThreadRef(thread.environmentId, thread.id);
-      void (thread.pinnedAt != null ? confirmAndUnpinThread(ref) : pinThread(ref)).then(
-        (result) => {
-          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-            const error = squashAtomCommandFailure(result);
-            toastManager.add({
-              type: "error",
-              title: thread.pinnedAt != null ? "Failed to unpin thread" : "Failed to pin thread",
-              description: error instanceof Error ? error.message : "An error occurred.",
-            });
-          }
-        },
-      );
-    },
-    [confirmAndUnpinThread, pinThread],
-  );
-  const pinControl = (thread: ThreadRow) => {
-    if (thread.archivedAt != null || !capability(thread.environmentId, "threadPinning")) {
-      return null;
-    }
-    const pinned = thread.pinnedAt != null;
-    return (
-      <Button
-        variant="ghost"
-        className="min-h-11 min-w-11 shrink-0"
-        aria-label={pinned ? "Unpin Master" : "Pin Master"}
-        aria-pressed={pinned}
-        onClick={() => togglePin(thread)}
-      >
-        <PinIcon className={cn("size-3", pinned && "fill-current")} />
-      </Button>
-    );
-  };
 
   const rowContext: RowContext = {
     activeKey,
@@ -775,18 +739,16 @@ function MasterWorkspaceSidebar() {
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
 
   const shelfProjectTitle = (group: ProjectGroup) => {
-    const project = projectOf(group);
-    return project ? (
+    const presentation = projectOf(group);
+    return presentation ? (
       <div className="flex items-center gap-2 px-2 text-[11px] text-muted-foreground">
-        <ProjectFavicon project={project} className="size-3.5" />
-        {project.title}
+        <ProjectFavicon project={presentation.project} className="size-3.5" />
+        {presentation.title}
       </div>
     ) : null;
   };
   const renderShelfGroup = (group: ProjectGroup) =>
-    projectOf(group) ? (
-      <ProjectGroupRows group={group} context={rowContext} pinControl={pinControl} />
-    ) : null;
+    projectOf(group) ? <ProjectGroupRows group={group} context={rowContext} /> : null;
 
   return (
     <>
@@ -847,12 +809,7 @@ function MasterWorkspaceSidebar() {
               ) : (
                 pinnedEntries.map(({ thread, cards }) => (
                   <div key={rowKey(thread)}>
-                    <ThreadRowButton
-                      thread={thread}
-                      context={rowContext}
-                      pinned
-                      trailing={isMasterThreadTitle(thread.title) ? pinControl(thread) : null}
-                    />
+                    <ThreadRowButton thread={thread} context={rowContext} />
                     {cards.map((card) => (
                       <ThreadRowButton
                         key={rowKey(card)}
@@ -871,8 +828,8 @@ function MasterWorkspaceSidebar() {
               </p>
               {workspace.activeProjects.map((group) => {
                 const projectKey = `${group.environmentId}:${group.projectId}`;
-                const project = projectOf(group);
-                if (!project) return null;
+                const presentation = projectOf(group);
+                if (!presentation) return null;
                 const open = isProjectOpen(group);
                 return (
                   <Collapsible
@@ -894,18 +851,14 @@ function MasterWorkspaceSidebar() {
                           !open && "-rotate-90",
                         )}
                       />
-                      <ProjectFavicon project={project} className="size-4 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">{project.title}</span>
+                      <ProjectFavicon project={presentation.project} className="size-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">{presentation.title}</span>
                       <span className="text-[10px] text-muted-foreground">
                         {projectWorkSummary(group)}
                       </span>
                     </CollapsibleTrigger>
                     <CollapsiblePanel className="pl-3">
-                      <ProjectGroupRows
-                        group={group}
-                        context={rowContext}
-                        pinControl={pinControl}
-                      />
+                      <ProjectGroupRows group={group} context={rowContext} />
                     </CollapsiblePanel>
                   </Collapsible>
                 );

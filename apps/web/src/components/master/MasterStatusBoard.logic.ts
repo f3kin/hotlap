@@ -124,11 +124,11 @@ export function resolveCardOwners<T extends MasterBoardThread>(
 }
 
 /**
- * Projects the sidebar. Every known project gets an active row, even with no
- * threads yet. Pinned, snoozed and settled threads move to their own shelves.
- * A pinned Master takes its active Cards into the Pinned shelf; on the other
- * shelves, a Master owning Cards there (or an archived one) appears as a
- * structural header.
+ * Projects the sidebar. Only projects with threads on a shelf get a row.
+ * Pinned, snoozed and settled threads move to their own shelves. A pinned
+ * Master takes its active Cards into the Pinned shelf; on the other shelves,
+ * a Master owning Cards there (or an archived one) appears as a structural
+ * header.
  */
 export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
   readonly threads: readonly T[];
@@ -152,10 +152,7 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
       return { thread, cards };
     });
 
-  const build = (
-    shelf: MasterShelf,
-    seedProjects: boolean,
-  ): readonly MasterWorkspaceProject<T>[] => {
+  const build = (shelf: MasterShelf): readonly MasterWorkspaceProject<T>[] => {
     const rows = new Map<
       string,
       { environmentId: string; projectId: string; masters: T[]; oneOffs: T[]; orphanCards: T[] }
@@ -169,9 +166,6 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
       }
       return entry;
     };
-    if (seedProjects) {
-      for (const project of input.projects) bucket(project.environmentId, project.id);
-    }
     const members = live.filter((thread) => shelfByKey.get(threadKey(thread)) === shelf);
     const memberKeys = new Set(members.map(threadKey));
     const cardsByOwner = new Map<string, T[]>();
@@ -225,13 +219,13 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
       }));
   };
 
-  const activeProjects = build("active", true);
+  const activeProjects = build("active");
   for (const cards of pinnedCards.values()) cards.sort(newestFirst);
   return {
     pinned,
     activeProjects,
-    snoozedProjects: build("snoozed", false),
-    settledProjects: build("settled", false),
+    snoozedProjects: build("snoozed"),
+    settledProjects: build("settled"),
   };
 }
 

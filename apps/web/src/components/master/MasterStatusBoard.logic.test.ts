@@ -38,21 +38,12 @@ function workspace(threads: readonly TestThread[], projectIds: readonly string[]
 }
 
 describe("deriveMasterWorkspace", () => {
-  it("gives every known project a row, including one with no threads", () => {
+  it("omits known projects that have no threads", () => {
     const master = thread("master", "Master: Harvest", { projectId: "orchard" });
 
     const model = workspace([master], ["orchard", "empty-greenhouse"]);
 
-    expect(model.activeProjects.map((group) => group.projectId)).toEqual([
-      "orchard",
-      "empty-greenhouse",
-    ]);
-    expect(model.activeProjects[1]).toMatchObject({
-      masters: [],
-      oneOffs: [],
-      orphanCards: [],
-      visibleCount: 0,
-    });
+    expect(model.activeProjects.map((group) => group.projectId)).toEqual(["orchard"]);
   });
 
   it("files work under its shelf, keeping a Card with its Master across worktrees", () => {
@@ -135,7 +126,7 @@ describe("exclusive shelves", () => {
       { thread: master, cards: [card] },
       { thread: pinnedCard, cards: [] },
     ]);
-    expect(model.activeProjects[0]).toMatchObject({ masters: [], visibleCount: 0 });
+    expect(model.activeProjects).toEqual([]);
     // A parked Card stays on its own shelf under an inert structural header,
     // so the pinned Master is navigable exactly once.
     const snoozedGroup = model.snoozedProjects[0];
