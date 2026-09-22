@@ -158,12 +158,16 @@ function claudeAuthMetadata(input: {
 }
 
 function hasClaudeAuthenticationEvidence(capabilities: ClaudeCapabilitiesProbe): boolean {
-  return [
-    capabilities.email,
-    capabilities.subscriptionType,
-    capabilities.tokenSource,
-    capabilities.apiProvider,
-  ].some((value) => value?.trim().length);
+  // The logged-out SDK sentinel is `tokenSource: "none"` with
+  // `apiProvider: "firstParty"`. The latter identifies the default backend,
+  // rather than an authenticated account. Bedrock is the external-credentials
+  // exception because it does not expose a subscription or token to the SDK.
+  return Boolean(
+    capabilities.email?.trim() ||
+    capabilities.subscriptionType?.trim() ||
+    (capabilities.tokenSource?.trim() && capabilities.tokenSource.trim() !== "none") ||
+    capabilities.apiProvider?.trim() === "bedrock",
+  );
 }
 
 function apiProviderAuthMetadata(
