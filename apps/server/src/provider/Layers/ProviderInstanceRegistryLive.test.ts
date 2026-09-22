@@ -216,7 +216,7 @@ const makeTildeProviderFixtures = Effect.fn(
   };
 });
 
-describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
+describe("ProviderInstanceRegistryLive — multi-instance provider slices", () => {
   // `ServerConfig.layerTest` needs `FileSystem` to materialize its scratch
   // directory. `Layer.merge` just unions requirements, so we have to push
   // `NodeServices.layer` through `Layer.provideMerge` to satisfy that
@@ -309,6 +309,58 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
       // Nothing goes to the unavailable bucket — both drivers are registered.
       const unavailable = yield* registry.listUnavailable;
       expect(unavailable).toEqual([]);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.live("boots separately selectable Claude subscriptions with isolated config homes", () =>
+    Effect.gen(function* () {
+      const personalId = ProviderInstanceId.make("claude_personal");
+      const teamId = ProviderInstanceId.make("claude_team");
+      const claudeDriverKind = ProviderDriverKind.make("claudeAgent");
+      const configMap: ProviderInstanceConfigMap = {
+        [personalId]: {
+          driver: claudeDriverKind,
+          displayName: "Personal",
+          enabled: false,
+          config: makeClaudeConfig({ homePath: "/home/julius/.claude-personal" }),
+        },
+        [teamId]: {
+          driver: claudeDriverKind,
+          displayName: "Team",
+          enabled: false,
+          config: makeClaudeConfig({ homePath: "/home/julius/.claude-team" }),
+        },
+      };
+
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [ClaudeDriver],
+        configMap,
+      });
+      const [personal, team] = yield* Effect.all([
+        registry.getInstance(personalId),
+        registry.getInstance(teamId),
+      ]);
+
+      expect(personal?.displayName).toBe("Personal");
+      expect(team?.displayName).toBe("Team");
+      expect(personal?.driverKind).toBe(claudeDriverKind);
+      expect(team?.driverKind).toBe(claudeDriverKind);
+      expect(personal?.adapter).not.toBe(team?.adapter);
+      expect(personal?.textGeneration).not.toBe(team?.textGeneration);
+
+      const path = yield* Path.Path;
+      const [personalSnapshot, teamSnapshot] = yield* Effect.all([
+        personal!.snapshot.getSnapshot,
+        team!.snapshot.getSnapshot,
+      ]);
+      expect(personalSnapshot.instanceId).toBe(personalId);
+      expect(teamSnapshot.instanceId).toBe(teamId);
+      expect(personalSnapshot.continuation?.groupKey).toBe(
+        `claude:home:${path.resolve("/home/julius/.claude-personal")}`,
+      );
+      expect(teamSnapshot.continuation?.groupKey).toBe(
+        `claude:home:${path.resolve("/home/julius/.claude-team")}`,
+      );
     }).pipe(Effect.provide(testLayer)),
   );
 

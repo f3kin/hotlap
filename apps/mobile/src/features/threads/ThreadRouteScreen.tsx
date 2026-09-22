@@ -1015,6 +1015,7 @@ function ThreadRouteContent(
       const env = projectScriptRuntimeEnv({
         project: { cwd: selectedThreadProject.workspaceRoot },
         worktreePath: preferredWorktreePath,
+        threadId: selectedThread.id,
       });
       stagePendingTerminalLaunch({
         target: {
