@@ -4682,6 +4682,7 @@ export default function ChatView(props: ChatViewProps) {
           cwd: activeProject.workspaceRoot,
         },
         worktreePath: targetWorktreePath,
+        threadId: activeThreadId,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
       const targetTerminalId = shouldCreateNewTerminal
