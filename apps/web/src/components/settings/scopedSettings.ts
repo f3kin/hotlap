@@ -2,12 +2,14 @@ import {
   ClientSettingsSchema,
   type ClientSettingsPatch,
   type EnvironmentId,
+  isNullableProjectSettingsOverride,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
   type ProviderRoutingPolicy,
   ServerSettings,
+  type T3ProjectFile,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
@@ -96,6 +98,9 @@ export interface ScopedSettingsTarget {
 export function resolveScopedSettingsTargets(
   scope: ResolvedSettingsScope,
   connectedEnvironments: readonly ScopedSettingsEnvironment[],
+  // Each member's decoded t3.json, keyed by physical project key, once read.
+  // A member absent here has no file tier yet; null is a missing or invalid file.
+  projectFiles?: ReadonlyMap<string, T3ProjectFile | null>,
 ): readonly ScopedSettingsTarget[] {
   const byId = new Map(
     connectedEnvironments.map((environment) => [environment.environmentId, environment]),
@@ -104,7 +109,11 @@ export function resolveScopedSettingsTargets(
     return scope.members.flatMap((member) => {
       const environment = byId.get(member.environmentId);
       if (!environment?.serverConfig) return [];
-      const resolved = resolveProjectSettings(environment.serverConfig.settings, member.id);
+      const projectFile = projectFiles?.get(member.physicalProjectKey);
+      const resolved =
+        projectFile === undefined
+          ? resolveProjectSettings(environment.serverConfig.settings, member.id)
+          : resolveProjectSettings(environment.serverConfig.settings, member.id, null, projectFile);
       return [
         {
           environmentId: member.environmentId,
@@ -154,7 +163,13 @@ export function scopedSettingsSource(
   const scoped = keys.filter(isProjectScopedSettingKey);
   if (scoped.length === 0 || targets.length === 0) return "environment";
   const sources = new Set(targets.flatMap((target) => scoped.map((key) => target.sources[key])));
-  return sources.size > 1 ? "mixed" : sources.has("project") ? "project" : "environment";
+  return sources.size > 1
+    ? "mixed"
+    : sources.has("project")
+      ? "project"
+      : sources.has("t3.json")
+        ? "t3.json"
+        : "environment";
 }
 
 interface ScopedServerWrite {
@@ -261,6 +276,15 @@ function planScopedSettingsServerPatch(
                       ...serverPatch.worktreeCleanup.rules,
                     },
                   };
+                  continue;
+                }
+                // A picker's "Inherit" sends null; for keys whose override
+                // cannot store null that means remove the override.
+                if (
+                  value === null &&
+                  !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
+                ) {
+                  delete next[key];
                   continue;
                 }
                 const base = effective[key as keyof ServerSettings];
