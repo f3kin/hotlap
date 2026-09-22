@@ -2658,11 +2658,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
     // ── checkClaudeProviderStatus tests ──────────────────────────
 
     describe("checkClaudeProviderStatus", () => {
-      it.effect("returns ready when claude is installed and authenticated", () =>
+      it.effect("returns ready when Claude initialization includes authentication evidence", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
             defaultClaudeSettings,
-            claudeCapabilities(),
+            claudeCapabilities({ subscriptionType: "maxplan" }),
           );
           assert.strictEqual(status.status, "ready");
           assert.strictEqual(status.installed, true);
@@ -2805,7 +2805,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ),
       );
 
-      it.effect("runs Claude status probes with the configured CLAUDE_CONFIG_DIR", () => {
+      it.effect("reports an empty configured Claude home as signed out", () => {
         const claudeConfigDir = "/tmp/t3code-claude-home";
         const recorded = recordingMockSpawnerLayer((args) => {
           const joined = args.join(" ");
@@ -2827,7 +2827,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             },
             claudeCapabilities(),
           );
-          assert.strictEqual(status.status, "ready");
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+          assert.match(status.message ?? "", /claude auth login/);
+          assert.match(status.message ?? "", new RegExp(claudeConfigDir));
           // The home is resolved through the host Path before it reaches the env.
           assert.deepStrictEqual(
             recorded.commands.map((command) => command.env?.CLAUDE_CONFIG_DIR),

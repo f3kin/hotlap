@@ -33,7 +33,7 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { makeUnavailableUsageLimits } from "../providerUsageLimits.ts";
 import {
@@ -155,6 +155,15 @@ function claudeAuthMetadata(input: {
   }
 
   return undefined;
+}
+
+function hasClaudeAuthenticationEvidence(capabilities: ClaudeCapabilitiesProbe): boolean {
+  return [
+    capabilities.email,
+    capabilities.subscriptionType,
+    capabilities.tokenSource,
+    capabilities.apiProvider,
+  ].some((value) => value?.trim().length);
 }
 
 function apiProviderAuthMetadata(
@@ -551,6 +560,27 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         status: "warning",
         auth: { status: "unknown" },
         message: "Could not verify Claude authentication status from initialization result.",
+      },
+    });
+  }
+
+  if (!hasClaudeAuthenticationEvidence(capabilities)) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      slashCommands: dedupedSlashCommands,
+      skills,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unauthenticated" },
+        message: claudeSignedOutMessage({
+          configDir: claudeSettings.homePath.trim() || undefined,
+          cwd: cwd ?? process.cwd(),
+        }),
       },
     });
   }
