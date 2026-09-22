@@ -101,7 +101,7 @@ export function mergeLiveAndArchivedThreads<T extends MasterBoardThread>(
  * archived records too, since lineage is durable data, not a visibility
  * concern. Both the sidebar and the board read ownership from here.
  */
-export function resolveCardOwners<T extends MasterBoardThread>(
+function resolveCardOwners<T extends MasterBoardThread>(
   threads: readonly T[],
 ): ReadonlyMap<string, T> {
   const byKey = new Map(threads.map((thread) => [threadKey(thread), thread]));
