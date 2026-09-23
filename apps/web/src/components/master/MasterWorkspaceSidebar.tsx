@@ -7,12 +7,21 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import type {
+  EnvironmentProject,
+  EnvironmentThreadShell,
+} from "@t3tools/client-runtime/state/shell";
 import { effectiveSnoozed, snoozeWakeLabel } from "@t3tools/client-runtime/state/thread-settled";
-import type { EnvironmentId } from "@t3tools/contracts";
-import { useAtomValue } from "@effect/atom-react";
-import { ChevronDownIcon, EllipsisIcon } from "lucide-react";
 import {
+  resolveEnvironmentMachineKind,
+  type EnvironmentId,
+  type EnvironmentMachineKind,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
+import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { useAtomValue } from "@effect/atom-react";
+import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -25,7 +34,6 @@ import {
 } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 
-import { cn } from "~/lib/utils";
 import { isElectron } from "~/env";
 import { isCommandPaletteOpen, openCommandPalette } from "~/commandPaletteBus";
 import {
@@ -44,9 +52,13 @@ import { isPreviewFocused } from "~/lib/previewFocus";
 import { selectActiveRightPanel, useRightPanelStore } from "~/rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminalUiStateStore";
 import { useProjects, useServerConfigs } from "~/state/entities";
-import { usePrimaryEnvironmentId } from "~/state/environments";
+import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useClientSettings } from "~/hooks/useSettings";
 import { selectProjectGroupingSettings } from "~/logicalProject";
+import {
+  deriveProviderEntriesByEnvironment,
+  type ProviderInstanceEntry,
+} from "~/providerInstances";
 import { buildSidebarProjectSnapshots } from "~/sidebarProjectGrouping";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
@@ -57,23 +69,18 @@ import { useNowMinute } from "~/hooks/useNowMinute";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
 import { startNewThreadFromContext } from "~/lib/chatThreadActions";
 import { resolveRenameCommit } from "../chat/ChatHeader";
-import { Button } from "../ui/button";
-import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { SidebarContent, SidebarGroup, useSidebar } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
+import { TooltipProvider } from "../ui/tooltip";
 import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChrome";
 import { SidebarThreadHeader } from "../sidebar/SidebarThreadHeader";
+import { EMPTY_PROVIDER_ENTRIES, SidebarSectionHeader, SidebarThreadRow } from "../Sidebar";
 import {
   resolveAdjacentThreadId,
   sortPinnedThreadsForSidebar,
   useThreadJumpHintVisibility,
 } from "../Sidebar.logic";
 import { ProjectFavicon } from "../ProjectFavicon";
-import {
-  ThreadRowLeadingStatus,
-  ThreadRowTrailingStatus,
-  ThreadWorktreeIndicator,
-} from "../ThreadStatusIndicators";
 import {
   deriveMasterWorkspace,
   navigableRows,
@@ -91,8 +98,8 @@ function rowKey(thread: ThreadRow): string {
   return scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
 }
 
-function shortTitle(title: string) {
-  return title.replace(/^(master|card)\s*:\s*/i, "");
+function projectKeyOf(thread: { environmentId: string; projectId: string }): string {
+  return `${thread.environmentId}:${thread.projectId}`;
 }
 
 function matchesSearch(title: string, query: string) {
@@ -121,181 +128,178 @@ interface RowContext {
   readonly renaming: { readonly key: string; readonly title: string } | null;
   readonly now: string;
   readonly isMobile: boolean;
+  // Inside a project group, whose header already names the project: rows of
+  // that project drop their project icon, rows of another project keep it.
+  readonly groupTitle?: string;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly timestampFormat: TimestampFormat;
+  readonly projectByKey: ReadonlyMap<string, EnvironmentProject>;
+  readonly projectTitleByKey: ReadonlyMap<string, string>;
+  readonly environmentLabelById: ReadonlyMap<string, string>;
+  readonly environmentMachineById: ReadonlyMap<string, EnvironmentMachineKind>;
+  readonly providerEntriesByEnvironment: ReadonlyMap<
+    string,
+    ReadonlyMap<string, ProviderInstanceEntry>
+  >;
   readonly onOpen: (thread: ThreadRow) => void;
   readonly onMenu: (thread: ThreadRow, position: { x: number; y: number }) => void;
+  readonly onRenameStart: (thread: ThreadRow) => void;
   readonly onRenameChange: (title: string) => void;
   readonly onRenameCommit: (thread: ThreadRow, title: string) => void;
   readonly onRenameCancel: () => void;
 }
 
-function ThreadRowButton({
-  thread,
-  context,
-  nested,
-}: {
-  thread: ThreadRow;
-  context: RowContext;
-  nested?: boolean;
-}) {
+// Settle, snooze, wake and unpin go through the row's action menu, where
+// parking the open thread moves on to the next Master-workspace row, so the
+// standard row's inline lifecycle buttons stay off.
+const noLifecycleAction = () => {};
+
+/** One thread, rendered by the standard sidebar's slim row. */
+function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowContext }) {
   const key = rowKey(thread);
-  const active = context.activeKey === key;
-  const selected = context.selectedKey === key;
+  const projectKey = projectKeyOf(thread);
   const snoozedUntil =
     thread.snoozedUntil != null && effectiveSnoozed(thread, { now: context.now })
       ? thread.snoozedUntil
       : null;
-  const jumpLabel = context.jumpLabelByKey.get(key) ?? null;
   const renamingTitle = context.renaming?.key === key ? context.renaming.title : null;
-  const committedRef = useRef(false);
-
-  if (renamingTitle !== null) {
-    return (
-      <div className={cn("flex min-h-11 items-center px-2", nested && "pl-4")}>
-        <input
-          autoFocus
-          aria-label="Thread title"
-          className="h-7 w-full min-w-0 rounded-md border border-input bg-background px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          value={renamingTitle}
-          onFocus={(event) => {
-            committedRef.current = false;
-            event.currentTarget.select();
-          }}
-          onChange={(event) => context.onRenameChange(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              committedRef.current = true;
-              context.onRenameCommit(thread, event.currentTarget.value);
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              committedRef.current = true;
-              context.onRenameCancel();
-            }
-          }}
-          onBlur={(event) => {
-            if (!committedRef.current) context.onRenameCommit(thread, event.currentTarget.value);
-          }}
-        />
-      </div>
-    );
-  }
-
-  const openMenuAtElement = (element: HTMLElement) => {
-    const rect = element.getBoundingClientRect();
-    context.onMenu(thread, { x: rect.left, y: rect.bottom + 4 });
-  };
-
   return (
-    <div className="group/master-row relative flex min-w-0 flex-1 items-center">
-      <Button
-        variant="ghost"
-        className={cn(
-          // Button's base classes include shrink-0; this row must yield space
-          // to the actions and pin buttons beside it.
-          "min-h-11 min-w-0 flex-1 shrink justify-start gap-2 px-2 text-xs font-normal",
-          nested && "pl-4 text-muted-foreground",
-          snoozedUntil && "text-muted-foreground",
-          (active || selected) && "bg-sidebar-row-active text-sidebar-foreground",
-        )}
-        aria-current={active ? "page" : undefined}
-        onClick={() => context.onOpen(thread)}
-        onContextMenu={(event: MouseEvent) => {
-          event.preventDefault();
-          context.onMenu(thread, { x: event.clientX, y: event.clientY });
-        }}
-        onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
-          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-            event.preventDefault();
-            openMenuAtElement(event.currentTarget);
-          }
-        }}
-      >
-        <ThreadRowLeadingStatus thread={thread} />
-        <span className="min-w-0 flex-1 truncate text-left">{shortTitle(thread.title)}</span>
-        {snoozedUntil ? (
-          <span className="shrink-0 text-[10px]">
-            {snoozeWakeLabel(snoozedUntil, { now: context.now })}
-          </span>
-        ) : null}
-        <ThreadWorktreeIndicator thread={thread} />
-        <ThreadRowTrailingStatus thread={thread} />
-      </Button>
-      {jumpLabel ? (
-        <span
-          aria-hidden
-          className="pointer-events-none absolute right-1.5 top-1/2 z-10 inline-flex h-5 -translate-y-1/2 items-center rounded-full border border-border/80 bg-background/95 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"
-        >
-          {jumpLabel}
-        </span>
-      ) : null}
-      <Button
-        variant="ghost"
-        className={cn(
-          "min-h-11 min-w-8 shrink-0 px-0 text-muted-foreground",
-          // Hover-revealed on desktop; always reachable on touch.
-          !context.isMobile &&
-            "opacity-0 focus-visible:opacity-100 group-hover/master-row:opacity-100",
-          context.isMobile && "min-w-11",
-        )}
-        aria-label={`Thread actions for ${shortTitle(thread.title)}`}
-        onClick={(event: MouseEvent<HTMLButtonElement>) => openMenuAtElement(event.currentTarget)}
-      >
-        <EllipsisIcon className="size-3.5" />
-      </Button>
-    </div>
+    <SidebarThreadRow
+      thread={thread}
+      variant="slim"
+      variantAction={
+        snoozedUntil ? "unsnooze" : thread.settledOverride === "settled" ? "unsettle" : "settle"
+      }
+      settlementSupported={false}
+      snoozeSupported={false}
+      pinningSupported={false}
+      isPinned={thread.pinnedAt != null}
+      dropVerb={null}
+      dragOverPinned={false}
+      snoozeWakeLabelText={
+        snoozedUntil ? snoozeWakeLabel(snoozedUntil, { now: context.now }) : null
+      }
+      wokeAt={null}
+      isActive={context.activeKey === key || context.selectedKey === key}
+      openPullRequestsInRightPanel={context.activeKey !== null}
+      jumpLabel={context.jumpLabelByKey.get(key) ?? null}
+      currentEnvironmentId={context.primaryEnvironmentId}
+      environmentLabel={context.environmentLabelById.get(thread.environmentId) ?? null}
+      environmentMachine={context.environmentMachineById.get(thread.environmentId) ?? "server"}
+      project={context.projectByKey.get(projectKey) ?? null}
+      projectDisplayName={context.projectTitleByKey.get(projectKey) ?? null}
+      providerEntryByInstanceId={
+        context.providerEntriesByEnvironment.get(thread.environmentId) ?? EMPTY_PROVIDER_ENTRIES
+      }
+      timestampFormat={context.timestampFormat}
+      onThreadClick={() => context.onOpen(thread)}
+      onThreadActivate={() => context.onOpen(thread)}
+      onStartRename={() => context.onRenameStart(thread)}
+      onRenameTitleChange={context.onRenameChange}
+      onCommitRename={(_ref: ScopedThreadRef, title: string) =>
+        context.onRenameCommit(thread, title)
+      }
+      onCancelRename={context.onRenameCancel}
+      isRenaming={renamingTitle !== null}
+      renamingTitle={renamingTitle ?? ""}
+      onContextMenu={(_ref: ScopedThreadRef, position: { x: number; y: number }) =>
+        context.onMenu(thread, position)
+      }
+      onSettle={noLifecycleAction}
+      onUnsettle={noLifecycleAction}
+      onSnooze={noLifecycleAction}
+      onUnsnooze={noLifecycleAction}
+      onUnpin={noLifecycleAction}
+      onAcknowledgeWoke={noLifecycleAction}
+      hideProjectIcon={
+        context.groupTitle !== undefined &&
+        context.projectTitleByKey.get(projectKey) === context.groupTitle
+      }
+      showStatusIcon
+      actionsButton={context.isMobile ? "always" : "on-hover"}
+    />
   );
 }
 
 /**
- * A Master that only heads its Cards on this shelf: it is archived, or its own
- * row lives on another shelf. Inert, so each thread stays navigable once.
+ * A Master and its Cards, flat like the default sidebar: lineage order and
+ * the "Master:" / "Card:" titles carry the hierarchy. A structural Master only heads its Cards on this
+ * shelf: it is archived, or its own row lives on another shelf. It renders as
+ * an inert heading, so each thread stays navigable once.
  */
-function MasterHeading({ thread }: { thread: ThreadRow }) {
+function MasterBoard({
+  master,
+  cards,
+  structural,
+  context,
+}: {
+  master: ThreadRow;
+  cards: readonly ThreadRow[];
+  structural?: boolean;
+  context: RowContext;
+}) {
   return (
-    <div className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-2 text-xs text-muted-foreground">
-      <span className="min-w-0 flex-1 truncate">{shortTitle(thread.title)}</span>
-      {thread.archivedAt != null ? <span className="shrink-0 text-[10px]">Archived</span> : null}
-    </div>
+    <>
+      {structural ? (
+        <SidebarSectionHeader
+          label={master.title}
+          {...(master.archivedAt != null ? { detail: "Archived" } : {})}
+        />
+      ) : (
+        <MasterThreadRow thread={master} context={context} />
+      )}
+      {cards.map((card) => (
+        <MasterThreadRow key={rowKey(card)} thread={card} context={context} />
+      ))}
+    </>
   );
 }
 
-function ProjectGroupRows({ group, context }: { group: ProjectGroup; context: RowContext }) {
+function ProjectGroupRows({
+  group,
+  title,
+  context: outerContext,
+}: {
+  group: ProjectGroup;
+  title: string;
+  context: RowContext;
+}) {
+  const context = { ...outerContext, groupTitle: title };
   if (group.masters.length === 0 && group.oneOffs.length === 0 && group.orphanCards.length === 0) {
     return (
-      <p className="px-2 py-2 text-[11px] text-muted-foreground">
-        No threads yet. Start one with New thread.
-      </p>
+      <li className="list-none">
+        <p className="px-2 py-2 text-[11px] text-muted-foreground">
+          No threads yet. Start one with New thread.
+        </p>
+      </li>
     );
   }
   return (
     <>
       {group.masters.map((board) => (
-        <div key={rowKey(board.master)} className="mb-1">
-          {board.structural ? (
-            <MasterHeading thread={board.master} />
-          ) : (
-            <ThreadRowButton thread={board.master} context={context} />
-          )}
-          {board.cards.map((card) => (
-            <ThreadRowButton key={rowKey(card)} thread={card} context={context} nested />
-          ))}
-        </div>
+        <MasterBoard
+          key={rowKey(board.master)}
+          master={board.master}
+          cards={board.cards}
+          structural={board.structural}
+          context={context}
+        />
       ))}
       {group.oneOffs.length ? (
-        <div className="mt-1 border-t border-sidebar-border pt-1">
-          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">Chats</p>
+        <>
+          <SidebarSectionHeader label="Chats" />
           {group.oneOffs.map((thread) => (
-            <ThreadRowButton key={rowKey(thread)} thread={thread} context={context} />
+            <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
           ))}
-        </div>
+        </>
       ) : null}
       {group.orphanCards.length ? (
-        <div className="mt-1 border-t border-sidebar-border pt-1">
-          <p className="px-2 py-1 text-[10px] font-medium text-muted-foreground">Orphan Cards</p>
+        <>
+          <SidebarSectionHeader label="Orphan Cards" />
           {group.orphanCards.map((thread) => (
-            <ThreadRowButton key={rowKey(thread)} thread={thread} context={context} nested />
+            <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
           ))}
-        </div>
+        </>
       ) : null}
     </>
   );
@@ -303,6 +307,7 @@ function ProjectGroupRows({ group, context }: { group: ProjectGroup; context: Ro
 
 function ShelfGroup({
   label,
+  tone,
   groups,
   expanded,
   onExpandedChange,
@@ -310,6 +315,7 @@ function ShelfGroup({
   renderGroup,
 }: {
   label: string;
+  tone?: "snoozed";
   groups: readonly ProjectGroup[];
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
@@ -320,24 +326,21 @@ function ShelfGroup({
   const count = groups.reduce((total, group) => total + group.visibleCount, 0);
   return (
     <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
-      <Collapsible open={expanded} onOpenChange={onExpandedChange}>
-        <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 rounded-md px-[var(--sidebar-row-content-inset)] text-left text-xs hover:bg-sidebar-accent">
-          <ChevronDownIcon
-            className={cn("size-3 shrink-0 transition-transform", !expanded && "-rotate-90")}
-          />
-          <span className="min-w-0 flex-1 truncate">
-            {label} ({count})
-          </span>
-        </CollapsibleTrigger>
-        <CollapsiblePanel className="pl-3">
-          {groups.map((group) => (
-            <div key={`${group.environmentId}:${group.projectId}`} className="py-1">
-              {projectTitle(group)}
-              {renderGroup(group)}
-            </div>
-          ))}
-        </CollapsiblePanel>
-      </Collapsible>
+      <ul role="list" className="flex flex-col gap-px">
+        <SidebarSectionHeader
+          label={`${label} (${count})`}
+          {...(tone ? { tone } : {})}
+          toggle={{ expanded, onToggle: () => onExpandedChange(!expanded) }}
+        />
+        {expanded
+          ? groups.map((group) => (
+              <Fragment key={`${group.environmentId}:${group.projectId}`}>
+                {projectTitle(group)}
+                {renderGroup(group)}
+              </Fragment>
+            ))
+          : null}
+      </ul>
     </SidebarGroup>
   );
 }
@@ -365,6 +368,38 @@ function MasterWorkspaceSidebar() {
   );
   const threads = useMasterLineageThreads(environmentIds);
   const serverConfigs = useServerConfigs();
+  const { environments } = useEnvironments();
+  const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
+  // The same row inputs the default sidebar derives for its thread rows.
+  const environmentLabelById = useMemo(
+    () =>
+      new Map(
+        environments.map((environment) => [environment.environmentId, environment.label] as const),
+      ),
+    [environments],
+  );
+  const environmentMachineById = useMemo(
+    () =>
+      new Map(
+        environments.map(
+          (environment) =>
+            [
+              environment.environmentId,
+              resolveEnvironmentMachineKind(environment.serverConfig),
+            ] as const,
+        ),
+      ),
+    [environments],
+  );
+  const providerEntriesByEnvironment = useMemo(
+    () =>
+      deriveProviderEntriesByEnvironment(
+        [...serverConfigs].map(
+          ([environmentId, config]) => [environmentId, config.providers] as const,
+        ),
+      ),
+    [serverConfigs],
+  );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const now = useNowMinute();
   const navigate = useNavigate();
@@ -454,6 +489,13 @@ function MasterWorkspaceSidebar() {
     }
     return presentations;
   }, [projectGroups]);
+  const projectTitleByKey = useMemo(
+    () =>
+      new Map(
+        [...projectPresentationByKey].map(([key, presentation]) => [key, presentation.title]),
+      ),
+    [projectPresentationByKey],
+  );
   const projectOf = useCallback(
     (group: { environmentId: string; projectId: string }) => {
       const key = `${group.environmentId}:${group.projectId}`;
@@ -699,8 +741,16 @@ function MasterWorkspaceSidebar() {
     renaming,
     now,
     isMobile,
+    primaryEnvironmentId,
+    timestampFormat,
+    projectByKey,
+    projectTitleByKey,
+    environmentLabelById,
+    environmentMachineById,
+    providerEntriesByEnvironment,
     onOpen: openThread,
     onMenu,
+    onRenameStart: (thread) => setRenaming({ key: rowKey(thread), title: thread.title }),
     onRenameChange: (title) => setRenaming((current) => (current ? { ...current, title } : null)),
     onRenameCommit: commitRename,
     onRenameCancel: () => setRenaming(null),
@@ -741,14 +791,18 @@ function MasterWorkspaceSidebar() {
   const shelfProjectTitle = (group: ProjectGroup) => {
     const presentation = projectOf(group);
     return presentation ? (
-      <div className="flex items-center gap-2 px-2 text-[11px] text-muted-foreground">
-        <ProjectFavicon project={presentation.project} className="size-3.5" />
-        {presentation.title}
-      </div>
+      <SidebarSectionHeader
+        icon={<ProjectFavicon project={presentation.project} className="size-4 shrink-0" />}
+        label={presentation.title}
+      />
     ) : null;
   };
-  const renderShelfGroup = (group: ProjectGroup) =>
-    projectOf(group) ? <ProjectGroupRows group={group} context={rowContext} /> : null;
+  const renderShelfGroup = (group: ProjectGroup) => {
+    const presentation = projectOf(group);
+    return presentation ? (
+      <ProjectGroupRows group={group} title={presentation.title} context={rowContext} />
+    ) : null;
+  };
 
   return (
     <>
@@ -778,110 +832,113 @@ function MasterWorkspaceSidebar() {
           </SidebarGroup>
         }
       >
-        {searchQuery.trim() ? (
-          <SidebarGroup
-            className="px-[var(--sidebar-content-inset)] py-2"
-            id="sidebar-thread-search-results"
-            role="listbox"
-          >
-            {searchResults.map((thread, index) => (
-              <ThreadRowButton
-                key={rowKey(thread)}
-                thread={thread}
-                context={{
-                  ...rowContext,
-                  activeKey: null,
-                  selectedKey: index === selectedSearchIndex ? rowKey(thread) : null,
-                }}
-              />
-            ))}
-          </SidebarGroup>
-        ) : (
-          <>
+        <TooltipProvider delay={150} closeDelay={0} timeout={400}>
+          {searchQuery.trim() ? (
             <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
-              <p className="px-[var(--sidebar-row-content-inset)] pb-1 text-[11px] font-medium text-muted-foreground">
-                Pinned
-              </p>
-              {pinnedEntries.length === 0 ? (
-                <p className="px-[var(--sidebar-row-content-inset)] py-2 text-xs text-muted-foreground">
-                  Pin a Master to keep it here.
-                </p>
-              ) : (
-                pinnedEntries.map(({ thread, cards }) => (
-                  <div key={rowKey(thread)}>
-                    <ThreadRowButton thread={thread} context={rowContext} />
-                    {cards.map((card) => (
-                      <ThreadRowButton
-                        key={rowKey(card)}
-                        thread={card}
+              <ul
+                id="sidebar-thread-search-results"
+                role="listbox"
+                aria-label="Thread search results"
+                className="flex flex-col gap-px"
+              >
+                {searchResults.map((thread, index) => (
+                  <MasterThreadRow
+                    key={rowKey(thread)}
+                    thread={thread}
+                    context={{
+                      ...rowContext,
+                      activeKey: null,
+                      selectedKey: index === selectedSearchIndex ? rowKey(thread) : null,
+                    }}
+                  />
+                ))}
+              </ul>
+            </SidebarGroup>
+          ) : (
+            <>
+              <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
+                <ul role="list" className="flex flex-col gap-px">
+                  <SidebarSectionHeader label="Pinned" />
+                  {pinnedEntries.length === 0 ? (
+                    <li className="list-none">
+                      <p className="px-[var(--sidebar-row-content-inset)] py-2 text-xs text-muted-foreground">
+                        Pin a Master to keep it here.
+                      </p>
+                    </li>
+                  ) : (
+                    pinnedEntries.map(({ thread, cards }) => (
+                      <MasterBoard
+                        key={rowKey(thread)}
+                        master={thread}
+                        cards={cards}
                         context={rowContext}
-                        nested
                       />
-                    ))}
-                  </div>
-                ))
-              )}
-            </SidebarGroup>
-            <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
-              <p className="px-[var(--sidebar-row-content-inset)] pb-1 text-[11px] font-medium text-muted-foreground">
-                Projects
-              </p>
-              {workspace.activeProjects.map((group) => {
-                const projectKey = `${group.environmentId}:${group.projectId}`;
-                const presentation = projectOf(group);
-                if (!presentation) return null;
-                const open = isProjectOpen(group);
-                return (
-                  <Collapsible
-                    key={projectKey}
-                    open={open}
-                    onOpenChange={(next) =>
-                      setOpenProjectKeys((current) => {
-                        const updated = new Set(current);
-                        if (next) updated.add(projectKey);
-                        else updated.delete(projectKey);
-                        return updated;
-                      })
-                    }
-                  >
-                    <CollapsibleTrigger className="flex min-h-11 w-full items-center gap-2 rounded-md px-[var(--sidebar-row-content-inset)] text-left text-xs hover:bg-sidebar-accent">
-                      <ChevronDownIcon
-                        className={cn(
-                          "size-3 shrink-0 transition-transform",
-                          !open && "-rotate-90",
-                        )}
-                      />
-                      <ProjectFavicon project={presentation.project} className="size-4 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">{presentation.title}</span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {projectWorkSummary(group)}
-                      </span>
-                    </CollapsibleTrigger>
-                    <CollapsiblePanel className="pl-3">
-                      <ProjectGroupRows group={group} context={rowContext} />
-                    </CollapsiblePanel>
-                  </Collapsible>
-                );
-              })}
-            </SidebarGroup>
-            <ShelfGroup
-              label="Snoozed"
-              groups={workspace.snoozedProjects}
-              expanded={snoozedExpanded}
-              onExpandedChange={setSnoozedExpanded}
-              projectTitle={shelfProjectTitle}
-              renderGroup={renderShelfGroup}
-            />
-            <ShelfGroup
-              label="Settled"
-              groups={workspace.settledProjects}
-              expanded={settledExpanded}
-              onExpandedChange={setSettledExpanded}
-              projectTitle={shelfProjectTitle}
-              renderGroup={renderShelfGroup}
-            />
-          </>
-        )}
+                    ))
+                  )}
+                </ul>
+              </SidebarGroup>
+              <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
+                <ul role="list" className="flex flex-col gap-px">
+                  <SidebarSectionHeader label="Projects" />
+                  {workspace.activeProjects.map((group) => {
+                    const projectKey = `${group.environmentId}:${group.projectId}`;
+                    const presentation = projectOf(group);
+                    if (!presentation) return null;
+                    const open = isProjectOpen(group);
+                    return (
+                      <Fragment key={projectKey}>
+                        <SidebarSectionHeader
+                          icon={
+                            <ProjectFavicon
+                              project={presentation.project}
+                              className="size-4 shrink-0"
+                            />
+                          }
+                          label={presentation.title}
+                          detail={projectWorkSummary(group)}
+                          toggle={{
+                            expanded: open,
+                            onToggle: () =>
+                              setOpenProjectKeys((current) => {
+                                const updated = new Set(current);
+                                if (open) updated.delete(projectKey);
+                                else updated.add(projectKey);
+                                return updated;
+                              }),
+                          }}
+                        />
+                        {open ? (
+                          <ProjectGroupRows
+                            group={group}
+                            title={presentation.title}
+                            context={rowContext}
+                          />
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
+                </ul>
+              </SidebarGroup>
+              <ShelfGroup
+                label="Snoozed"
+                tone="snoozed"
+                groups={workspace.snoozedProjects}
+                expanded={snoozedExpanded}
+                onExpandedChange={setSnoozedExpanded}
+                projectTitle={shelfProjectTitle}
+                renderGroup={renderShelfGroup}
+              />
+              <ShelfGroup
+                label="Settled"
+                groups={workspace.settledProjects}
+                expanded={settledExpanded}
+                onExpandedChange={setSettledExpanded}
+                projectTitle={shelfProjectTitle}
+                renderGroup={renderShelfGroup}
+              />
+            </>
+          )}
+        </TooltipProvider>
       </SidebarContent>
       <SidebarChromeFooter />
     </>
