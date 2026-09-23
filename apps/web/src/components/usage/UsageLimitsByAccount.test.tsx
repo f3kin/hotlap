@@ -11,6 +11,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 vi.mock("../../hooks/useSettings", () => ({
   usePrimarySettings: (select: (settings: { timestampFormat: string }) => unknown) =>
     select({ timestampFormat: "locale" }),
+  useClientSettings: (select: (settings: { revealSensitiveText: boolean }) => unknown) =>
+    select({ revealSensitiveText: false }),
 }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 
