@@ -448,6 +448,8 @@ export const ClientSettingsSchema = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed("queue")),
   ),
   proactivePanelsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Off keeps account emails and similar identifiers blurred until clicked.
+  revealSensitiveText: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   showSkillsInSlashMenu: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // The Master board is opt-in because it changes the chat layout for Master
   // threads. Keep it client-local so each profile chooses its own workflow.
@@ -1688,6 +1690,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sendShortcut: Schema.optionalKey(Schema.Literals(["enter", "mod-enter-multiline", "mod-enter"])),
   followUpBehavior: Schema.optionalKey(Schema.Literals(["queue", "steer"])),
   proactivePanelsEnabled: Schema.optionalKey(Schema.Boolean),
+  revealSensitiveText: Schema.optionalKey(Schema.Boolean),
   showSkillsInSlashMenu: Schema.optionalKey(Schema.Boolean),
   masterStatusBoardEnabled: Schema.optionalKey(Schema.Boolean),
   masterWorkspaceEnabled: Schema.optionalKey(Schema.Boolean),
