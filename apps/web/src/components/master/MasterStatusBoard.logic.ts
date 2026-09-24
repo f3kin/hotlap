@@ -51,6 +51,13 @@ export interface MasterWorkspaceModel<T extends MasterBoardThread> {
   readonly activeProjects: readonly MasterWorkspaceProject<T>[];
   readonly snoozedProjects: readonly MasterWorkspaceProject<T>[];
   readonly settledProjects: readonly MasterWorkspaceProject<T>[];
+  /**
+   * The Settled shelf as one flat list, newest first, the way the default
+   * sidebar's Settled shelf lists its rows: every settled thread plus each
+   * archived Master that still heads live Cards (those Cards stay on their
+   * shelf under the Master's heading).
+   */
+  readonly settled: readonly T[];
 }
 
 const MASTER_TITLE = /^master\s*:/i;
@@ -220,13 +227,67 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
   };
 
   const activeProjects = build("active");
+  const snoozedProjects = build("snoozed");
+  const settledProjects = build("settled");
   for (const cards of pinnedCards.values()) cards.sort(newestFirst);
+  const archivedMasters = new Map<string, T>();
+  for (const group of [...activeProjects, ...snoozedProjects, ...settledProjects]) {
+    for (const board of group.masters) {
+      if (board.master.archivedAt != null) {
+        archivedMasters.set(threadKey(board.master), board.master);
+      }
+    }
+  }
   return {
     pinned,
     activeProjects,
-    snoozedProjects: build("snoozed"),
-    settledProjects: build("settled"),
+    snoozedProjects,
+    settledProjects,
+    settled: [...settledProjects.flatMap(navigableRows), ...archivedMasters.values()].sort(
+      newestFirst,
+    ),
   };
+}
+
+/**
+ * Whether a collapsible group (a project, or a Master's Cards) is open. With
+ * no explicit toggle it follows navigation: open while it holds the active
+ * thread, closed otherwise. An explicit toggle wins, including collapsing the
+ * group that holds the active thread; only navigating to another thread inside
+ * a collapsed group opens it again.
+ */
+export interface DisclosureToggle {
+  readonly open: boolean;
+  // The active thread when the user toggled, so the choice sticks until they
+  // navigate somewhere else.
+  readonly activeKey: string | null;
+}
+
+/**
+ * Records an explicit open or close for several groups at once: one project
+ * header, or the Projects section header collapsing or expanding them all.
+ */
+export function withDisclosureToggles(
+  current: ReadonlyMap<string, DisclosureToggle>,
+  keys: readonly string[],
+  open: boolean,
+  activeKey: string | null,
+): ReadonlyMap<string, DisclosureToggle> {
+  const updated = new Map(current);
+  for (const key of keys) updated.set(key, { open, activeKey });
+  return updated;
+}
+
+export function isDisclosureOpen(input: {
+  readonly holdsActive: boolean;
+  readonly activeKey: string | null;
+  readonly toggle?: DisclosureToggle | undefined;
+  readonly defaultOpen?: boolean;
+}): boolean {
+  const { toggle } = input;
+  if (toggle === undefined) return input.holdsActive || input.defaultOpen === true;
+  if (toggle.open) return true;
+  return input.holdsActive && input.activeKey !== toggle.activeKey;
 }
 
 /**

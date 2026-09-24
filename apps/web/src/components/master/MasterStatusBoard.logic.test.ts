@@ -4,11 +4,13 @@ import {
   deriveMasterBoard,
   deriveMasterWorkspace,
   isCardThreadTitle,
+  isDisclosureOpen,
   isMasterThreadTitle,
   mergeLiveAndArchivedThreads,
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
+  withDisclosureToggles,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -134,6 +136,90 @@ describe("projectWorkSummary", () => {
     expect(projectWorkSummary(workspace([archivedMaster, card, ...chats]).activeProjects[0]!)).toBe(
       "1 card · 2 chats",
     );
+  });
+});
+
+describe("collapsible groups", () => {
+  const groupOpen = (
+    toggles: ReturnType<typeof withDisclosureToggles>,
+    key: string,
+    holdsActive: boolean,
+    activeKey: string | null,
+  ) => isDisclosureOpen({ holdsActive, activeKey, toggle: toggles.get(key) });
+
+  it("opens the project holding the active thread, but lets the user collapse it", () => {
+    const none = new Map();
+    expect(groupOpen(none, "orchard", true, "heater")).toBe(true);
+    expect(groupOpen(none, "lighthouse", false, "heater")).toBe(false);
+
+    const collapsed = withDisclosureToggles(none, ["orchard"], false, "heater");
+    expect(groupOpen(collapsed, "orchard", true, "heater")).toBe(false);
+    // Navigating to another thread inside it opens it again.
+    expect(groupOpen(collapsed, "orchard", true, "greenhouse")).toBe(true);
+    // Coming back to the thread it was collapsed on keeps the choice.
+    expect(groupOpen(collapsed, "orchard", true, "heater")).toBe(false);
+  });
+
+  it("collapses and expands every project at once", () => {
+    const keys = ["orchard", "lighthouse", "bakery"];
+    const collapsed = withDisclosureToggles(new Map(), keys, false, "heater");
+    expect(keys.map((key) => groupOpen(collapsed, key, key === "orchard", "heater"))).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    const expanded = withDisclosureToggles(collapsed, keys, true, "heater");
+    expect(keys.map((key) => groupOpen(expanded, key, false, "heater"))).toEqual([
+      true,
+      true,
+      true,
+    ]);
+  });
+
+  it("starts a Master open and lets it collapse its Cards while it is the active thread", () => {
+    const master = (toggles: ReturnType<typeof withDisclosureToggles>) =>
+      isDisclosureOpen({
+        holdsActive: false,
+        activeKey: "greenhouse",
+        toggle: toggles.get("greenhouse"),
+        defaultOpen: true,
+      });
+    expect(master(new Map())).toBe(true);
+    expect(master(withDisclosureToggles(new Map(), ["greenhouse"], false, "greenhouse"))).toBe(
+      false,
+    );
+  });
+});
+
+describe("settled shelf", () => {
+  it("lists settled threads and archived Masters flat, newest first, keeping live Cards on their shelf", () => {
+    const archivedMaster = thread("beacon", "Master: Beacon", {
+      projectId: "lighthouse",
+      archivedAt: ARCHIVED,
+      updatedAt: "2026-09-12T00:00:00.000Z",
+    });
+    const liveCard = thread("lens", "Card: Lens", {
+      projectId: "lighthouse",
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const settledChat = thread("oven", "Oven log", {
+      projectId: "bakery",
+      shelf: "settled",
+      updatedAt: "2026-09-14T00:00:00.000Z",
+    });
+    const settledMaster = thread("done", "Master: Done", {
+      shelf: "settled",
+      updatedAt: "2026-09-15T00:00:00.000Z",
+    });
+
+    const model = workspace([archivedMaster, liveCard, settledChat, settledMaster]);
+
+    expect(model.settled).toEqual([settledMaster, settledChat, archivedMaster]);
+    expect(model.activeProjects[0]?.masters[0]).toMatchObject({
+      master: archivedMaster,
+      cards: [liveCard],
+      structural: true,
+    });
   });
 });
 
