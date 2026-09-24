@@ -69,6 +69,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -678,11 +679,18 @@ export function SidebarDisclosureButton(props: {
       onKeyDown={(event) => event.stopPropagation()}
       className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/65 outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
     >
-      <ChevronDownIcon
-        aria-hidden
-        className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-180")}
-      />
+      <SidebarDisclosureChevron expanded={props.expanded} />
     </button>
+  );
+}
+
+// The one disclosure chevron: section headers and parent rows both turn it.
+function SidebarDisclosureChevron(props: { expanded: boolean }) {
+  return (
+    <ChevronDownIcon
+      aria-hidden
+      className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-180")}
+    />
   );
 }
 
@@ -704,17 +712,23 @@ export function SidebarSectionHeader(props: {
   // accent while the lifted row is over it.
   dragging?: boolean;
   isDropTarget?: boolean;
+  // A collapsed group holding the active thread takes the active row's surface.
+  active?: boolean;
   toggle?: { expanded: boolean; onToggle: () => void };
 }) {
   const snoozed = props.marker === "snoozed-header";
   const sub = props.level === "sub";
   const ruled = !sub && !props.icon;
   const className = cn(
-    "flex h-full w-full items-center gap-2 px-2 text-left text-xs",
+    // An icon header spaces its icon like a slim row, so its label shares the
+    // row titles' left edge.
+    "flex h-full w-full items-center px-2 text-left text-xs",
+    props.icon ? "gap-2.5" : "gap-2",
     sub ? "font-normal" : "font-medium",
     snoozed ? "text-blue-600 dark:text-blue-400" : "text-sidebar-muted-foreground/60",
     props.dragging && "text-sidebar-foreground/80",
     props.isDropTarget && "text-primary",
+    props.active && "rounded-md bg-sidebar-row-active text-sidebar-foreground",
   );
   const content = (
     <>
@@ -742,15 +756,7 @@ export function SidebarSectionHeader(props: {
           )}
         />
       )}
-      {props.toggle ? (
-        <ChevronDownIcon
-          aria-hidden
-          className={cn(
-            "size-3 shrink-0 transition-transform",
-            props.toggle.expanded && "rotate-180",
-          )}
-        />
-      ) : null}
+      {props.toggle ? <SidebarDisclosureChevron expanded={props.toggle.expanded} /> : null}
     </>
   );
   const header = props.toggle ? (
@@ -1577,6 +1583,9 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // the card's recede) and let the timestamp recede. Its settled and snoozed
   // rows keep the quiet slim treatment.
   const liveSlimRow = variant === "slim" && props.showStatusIcon && variantAction === "settle";
+  // A row with a disclosure names itself by its title alone, not by the
+  // chevron's label and every badge after it.
+  const titleId = useId();
   const cardTitleRecedes = variant === "card" && shouldRecede;
   const cardTitleColorClassName = cardTitleRecedes
     ? "text-secondary-label"
@@ -1600,6 +1609,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     />
   ) : (
     <span
+      id={props.toggle ? titleId : undefined}
       className={cn(
         "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
         liveSlimRow ? "font-medium" : shouldRecede ? "font-normal" : "font-medium",
@@ -1718,6 +1728,22 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     )
   ) : null;
 
+  // Settled history recedes: dimmed favicon at rest, restored on hover so the
+  // tail stays scannable when you're hunting. Live Master rows keep the icon at
+  // full strength, like card rows.
+  const projectIcon = (
+    <span
+      className={cn(
+        "shrink-0 transition-opacity",
+        !liveSlimRow &&
+          (!props.isActive || variantAction === "unsettle") &&
+          "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+      )}
+    >
+      {props.project ? <ProjectFavicon project={props.project} className="size-4" /> : null}
+    </span>
+  );
+
   if (variant === "slim") {
     const slimRowActionClassName =
       "pointer-events-none absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:opacity-100";
@@ -1740,6 +1766,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 role="button"
                 tabIndex={0}
                 data-testid="sidebar-row-slim"
+                aria-labelledby={props.toggle && !isRenaming ? titleId : undefined}
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
@@ -1749,26 +1776,37 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               />
             }
           >
-            {/* Settled history recedes: dimmed favicon at rest, restored on
-              hover so the tail stays scannable when you're hunting. Live
-              Master rows keep the icon at full strength, like card rows. */}
-            {props.toggle ? (
+            {props.toggle && !props.hideProjectIcon ? (
+              // A parent row that shows its project icon keeps it at rest and
+              // swaps in the chevron on hover or focus; collapsed, the chevron
+              // stays so the state is visible.
+              <span className="relative flex size-4 shrink-0 items-center justify-center">
+                <span
+                  className={cn(
+                    "flex transition-opacity",
+                    props.toggle.expanded
+                      ? "group-focus-within/sidebar-row:opacity-0 group-hover/sidebar-row:opacity-0"
+                      : "opacity-0",
+                  )}
+                >
+                  {projectIcon}
+                </span>
+                <span
+                  className={cn(
+                    "absolute inset-0 flex items-center justify-center transition-opacity",
+                    props.toggle.expanded &&
+                      "opacity-0 group-focus-within/sidebar-row:opacity-100 group-hover/sidebar-row:opacity-100",
+                  )}
+                >
+                  <SidebarDisclosureButton {...props.toggle} />
+                </span>
+              </span>
+            ) : props.toggle ? (
               <SidebarDisclosureButton {...props.toggle} />
             ) : props.hideProjectIcon ? (
               <span aria-hidden className="size-4 shrink-0" />
             ) : (
-              <span
-                className={cn(
-                  "shrink-0 transition-opacity",
-                  !liveSlimRow &&
-                    (!props.isActive || variantAction === "unsettle") &&
-                    "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
-                )}
-              >
-                {props.project ? (
-                  <ProjectFavicon project={props.project} className="size-4" />
-                ) : null}
-              </span>
+              projectIcon
             )}
             {draftIndicator}
             {title}
