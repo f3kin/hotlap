@@ -244,6 +244,31 @@ export function navigableRows<T extends MasterBoardThread>(group: MasterWorkspac
   ];
 }
 
+function countOf(count: number, noun: string): string {
+  return `${count} ${count === 1 ? noun : `${noun}s`}`;
+}
+
+/**
+ * The muted count beside a project header, e.g. "1 master · 3 cards · 1 chat".
+ * A structural Master (archived, or living on another shelf) is not counted,
+ * but its Cards are; orphan Cards count as cards, since their own heading
+ * already sets them apart.
+ */
+export function projectWorkSummary<T extends MasterBoardThread>(
+  group: MasterWorkspaceProject<T>,
+): string {
+  const masters = group.masters.filter((board) => !board.structural).length;
+  const cards =
+    group.masters.reduce((total, board) => total + board.cards.length, 0) +
+    group.orphanCards.length;
+  const parts = [
+    masters ? countOf(masters, "master") : null,
+    cards ? countOf(cards, "card") : null,
+    group.oneOffs.length ? countOf(group.oneOffs.length, "chat") : null,
+  ].filter((part) => part !== null);
+  return parts.length ? parts.join(" · ") : "No threads";
+}
+
 /**
  * Where to go after parking (settling or snoozing) the open thread: the next
  * row after it, wrapping around, that isn't parked. Null when the thread isn't

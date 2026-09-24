@@ -8,6 +8,7 @@ import {
   mergeLiveAndArchivedThreads,
   navigableRows,
   nextUnparkedKey,
+  projectWorkSummary,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -104,6 +105,35 @@ describe("deriveMasterWorkspace", () => {
     expect(model.activeProjects[0]?.visibleCount).toBe(1);
     expect(model.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
     expect(model.activeProjects.flatMap((group) => group.orphanCards)).toEqual([]);
+  });
+});
+
+describe("projectWorkSummary", () => {
+  it("counts masters, cards and chats in lower case with singular and plural nouns", () => {
+    const master = thread("master", "Master: Harvest");
+    const card = thread("card", "Card: Prune", { forkedFrom: { threadId: master.id } });
+    const chat = thread("chat", "Quick question");
+    const orphan = thread("orphan", "Card: Imported");
+    const other = thread("other", "Card: Irrigation", { forkedFrom: { threadId: master.id } });
+
+    expect(projectWorkSummary(workspace([master, card]).activeProjects[0]!)).toBe(
+      "1 master · 1 card",
+    );
+    expect(
+      projectWorkSummary(workspace([master, card, other, chat, orphan]).activeProjects[0]!),
+    ).toBe("1 master · 3 cards · 1 chat");
+  });
+
+  it("counts an archived Master's live Cards but not the archived Master", () => {
+    const archivedMaster = thread("master", "Master: Archived", { archivedAt: ARCHIVED });
+    const card = thread("card", "Card: Continuation", {
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const chats = [thread("a", "First question"), thread("b", "Second question")];
+
+    expect(projectWorkSummary(workspace([archivedMaster, card, ...chats]).activeProjects[0]!)).toBe(
+      "1 card · 2 chats",
+    );
   });
 });
 

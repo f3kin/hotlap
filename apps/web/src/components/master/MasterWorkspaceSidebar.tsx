@@ -85,6 +85,7 @@ import {
   deriveMasterWorkspace,
   navigableRows,
   nextUnparkedKey,
+  projectWorkSummary,
   type MasterShelf,
   type MasterWorkspaceProject,
 } from "./MasterStatusBoard.logic";
@@ -104,13 +105,6 @@ function projectKeyOf(thread: { environmentId: string; projectId: string }): str
 
 function matchesSearch(title: string, query: string) {
   return title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
-}
-
-function projectWorkSummary(group: ProjectGroup) {
-  if (group.masters.length) return `${group.masters.length} Masters`;
-  if (group.oneOffs.length) return `${group.oneOffs.length} Chats`;
-  if (group.orphanCards.length) return `${group.orphanCards.length} Orphan Cards`;
-  return "No threads";
 }
 
 /**
