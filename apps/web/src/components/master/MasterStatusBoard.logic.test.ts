@@ -10,7 +10,9 @@ import {
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
-  withDisclosureToggles,
+  revealDisclosure,
+  setDisclosure,
+  type Disclosure,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -140,54 +142,103 @@ describe("projectWorkSummary", () => {
 });
 
 describe("collapsible groups", () => {
-  const groupOpen = (
-    toggles: ReturnType<typeof withDisclosureToggles>,
-    key: string,
-    holdsActive: boolean,
-    activeKey: string | null,
-  ) => isDisclosureOpen({ holdsActive, activeKey, toggle: toggles.get(key) });
+  // orchard holds Greenhouse (a Master) and its Card Heater; lighthouse holds Keeper.
+  const PROJECT_OF: Record<string, string> = {
+    greenhouse: "project:orchard",
+    heater: "project:orchard",
+    keeper: "project:lighthouse",
+  };
+  const MASTER_OF: Record<string, string> = { heater: "master:greenhouse" };
 
-  it("opens the project holding the active thread, but lets the user collapse it", () => {
-    const none = new Map();
-    expect(groupOpen(none, "orchard", true, "heater")).toBe(true);
-    expect(groupOpen(none, "lighthouse", false, "heater")).toBe(false);
+  // Mirrors the sidebar: navigation opens the groups holding the new thread.
+  function sidebar() {
+    let disclosure: Disclosure = new Map();
+    let active = "";
+    const projectOpen = (key: string) =>
+      isDisclosureOpen(disclosure, key, PROJECT_OF[active] === key);
+    const api = {
+      navigate(thread: string) {
+        active = thread;
+        disclosure = revealDisclosure(
+          disclosure,
+          [PROJECT_OF[thread], MASTER_OF[thread]].filter((key) => key !== undefined),
+        );
+      },
+      toggle(key: string, open: boolean) {
+        disclosure = setDisclosure(disclosure, [key], open);
+      },
+      projectOpen,
+      visible(thread: string) {
+        const master = MASTER_OF[thread];
+        return (
+          projectOpen(PROJECT_OF[thread]!) &&
+          (master === undefined || isDisclosureOpen(disclosure, master, true))
+        );
+      },
+    };
+    return api;
+  }
 
-    const collapsed = withDisclosureToggles(none, ["orchard"], false, "heater");
-    expect(groupOpen(collapsed, "orchard", true, "heater")).toBe(false);
-    // Navigating to another thread inside it opens it again.
-    expect(groupOpen(collapsed, "orchard", true, "greenhouse")).toBe(true);
-    // Coming back to the thread it was collapsed on keeps the choice.
-    expect(groupOpen(collapsed, "orchard", true, "heater")).toBe(false);
+  it("keeps a project open after navigation reopened it, when a visible row inside is clicked", () => {
+    const view = sidebar();
+    view.navigate("greenhouse");
+    view.toggle("project:orchard", false);
+    expect(view.visible("greenhouse")).toBe(false);
+
+    view.navigate("heater");
+    expect(view.projectOpen("project:orchard")).toBe(true);
+
+    view.navigate("greenhouse");
+    expect(view.projectOpen("project:orchard")).toBe(true);
+    expect(view.visible("greenhouse")).toBe(true);
   });
 
-  it("collapses and expands every project at once", () => {
-    const keys = ["orchard", "lighthouse", "bakery"];
-    const collapsed = withDisclosureToggles(new Map(), keys, false, "heater");
-    expect(keys.map((key) => groupOpen(collapsed, key, key === "orchard", "heater"))).toEqual([
-      false,
-      false,
-      false,
-    ]);
-    const expanded = withDisclosureToggles(collapsed, keys, true, "heater");
-    expect(keys.map((key) => groupOpen(expanded, key, false, "heater"))).toEqual([
-      true,
-      true,
-      true,
-    ]);
+  it("opens a collapsed project when navigation returns to the thread it was collapsed on", () => {
+    const view = sidebar();
+    view.navigate("greenhouse");
+    view.toggle("project:orchard", false);
+
+    view.navigate("keeper");
+    expect(view.projectOpen("project:orchard")).toBe(false);
+
+    view.navigate("greenhouse");
+    expect(view.visible("greenhouse")).toBe(true);
   });
 
-  it("starts a Master open and lets it collapse its Cards while it is the active thread", () => {
-    const master = (toggles: ReturnType<typeof withDisclosureToggles>) =>
-      isDisclosureOpen({
-        holdsActive: false,
-        activeKey: "greenhouse",
-        toggle: toggles.get("greenhouse"),
-        defaultOpen: true,
-      });
-    expect(master(new Map())).toBe(true);
-    expect(master(withDisclosureToggles(new Map(), ["greenhouse"], false, "greenhouse"))).toBe(
+  it("keeps a Master's Cards open after navigating to one and back to the Master", () => {
+    const view = sidebar();
+    view.navigate("greenhouse");
+    view.toggle("master:greenhouse", false);
+    expect(view.visible("heater")).toBe(false);
+    expect(view.visible("greenhouse")).toBe(true);
+
+    view.navigate("heater");
+    expect(view.visible("heater")).toBe(true);
+
+    view.navigate("greenhouse");
+    expect(view.visible("heater")).toBe(true);
+  });
+
+  it("lets the user collapse the group holding the active thread, and collapse or expand all", () => {
+    const view = sidebar();
+    view.navigate("heater");
+    view.toggle("project:orchard", false);
+    expect(view.visible("heater")).toBe(false);
+
+    let all: Disclosure = setDisclosure(
+      new Map(),
+      ["project:orchard", "project:lighthouse"],
       false,
     );
+    expect(isDisclosureOpen(all, "project:orchard", true)).toBe(false);
+    expect(isDisclosureOpen(all, "project:lighthouse", false)).toBe(false);
+    all = setDisclosure(all, ["project:orchard", "project:lighthouse"], true);
+    expect(isDisclosureOpen(all, "project:lighthouse", false)).toBe(true);
+  });
+
+  it("leaves the map untouched when navigation lands in groups that are already open", () => {
+    const open = setDisclosure(new Map(), ["project:orchard"], true);
+    expect(revealDisclosure(open, ["project:orchard"])).toBe(open);
   });
 });
 

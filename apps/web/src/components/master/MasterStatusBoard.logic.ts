@@ -250,44 +250,40 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
 }
 
 /**
- * Whether a collapsible group (a project, or a Master's Cards) is open. With
- * no explicit toggle it follows navigation: open while it holds the active
- * thread, closed otherwise. An explicit toggle wins, including collapsing the
- * group that holds the active thread; only navigating to another thread inside
- * a collapsed group opens it again.
+ * Explicit disclosure choices for collapsible groups (projects, and a
+ * Master's Cards), keyed by group: true opened, false collapsed. A group with
+ * no entry falls back to its default (a project opens while it holds the
+ * active thread; a Master starts open).
+ *
+ * A collapse sticks until the user reopens the group or navigation lands on a
+ * thread inside it; that navigation records the group as open, so a later
+ * click inside never collapses it again and the active thread is never hidden
+ * by an older collapse. Clicking a row already on screen changes nothing.
  */
-export interface DisclosureToggle {
-  readonly open: boolean;
-  // The active thread when the user toggled, so the choice sticks until they
-  // navigate somewhere else.
-  readonly activeKey: string | null;
+export type Disclosure = ReadonlyMap<string, boolean>;
+
+export function isDisclosureOpen(disclosure: Disclosure, key: string, fallback: boolean): boolean {
+  return disclosure.get(key) ?? fallback;
 }
 
-/**
- * Records an explicit open or close for several groups at once: one project
- * header, or the Projects section header collapsing or expanding them all.
- */
-export function withDisclosureToggles(
-  current: ReadonlyMap<string, DisclosureToggle>,
+/** The user opened or collapsed these groups (one header, or all projects). */
+export function setDisclosure(
+  disclosure: Disclosure,
   keys: readonly string[],
   open: boolean,
-  activeKey: string | null,
-): ReadonlyMap<string, DisclosureToggle> {
-  const updated = new Map(current);
-  for (const key of keys) updated.set(key, { open, activeKey });
+): Disclosure {
+  const updated = new Map(disclosure);
+  for (const key of keys) updated.set(key, open);
   return updated;
 }
 
-export function isDisclosureOpen(input: {
-  readonly holdsActive: boolean;
-  readonly activeKey: string | null;
-  readonly toggle?: DisclosureToggle | undefined;
-  readonly defaultOpen?: boolean;
-}): boolean {
-  const { toggle } = input;
-  if (toggle === undefined) return input.holdsActive || input.defaultOpen === true;
-  if (toggle.open) return true;
-  return input.holdsActive && input.activeKey !== toggle.activeKey;
+/**
+ * Navigation landed on a thread inside these groups: open any collapsed one.
+ * Returns the same map when nothing changes.
+ */
+export function revealDisclosure(disclosure: Disclosure, keys: readonly string[]): Disclosure {
+  const collapsed = keys.filter((key) => disclosure.get(key) === false);
+  return collapsed.length ? setDisclosure(disclosure, collapsed, true) : disclosure;
 }
 
 /**
