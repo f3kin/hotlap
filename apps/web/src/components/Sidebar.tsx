@@ -658,6 +658,34 @@ function SidebarDragBoundary(props: {
   );
 }
 
+// A parent row's disclosure, sized to the leading icon slot so a Master row
+// and a structural Master heading put their chevron where rows show a project
+// icon. The chevron turns the way the section header's does.
+export function SidebarDisclosureButton(props: {
+  expanded: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={props.expanded}
+      aria-label={props.label}
+      onClick={(event) => {
+        event.stopPropagation();
+        props.onToggle();
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+      className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/65 outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <ChevronDownIcon
+        aria-hidden
+        className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-180")}
+      />
+    </button>
+  );
+}
+
 // Shelf headers stay visible and keep their measured height while dragging.
 // Without a marker the header sits outside the sortable thread list (the
 // Master workspace's sections and project groups): a plain list item that may
@@ -1084,9 +1112,15 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   showStatusIcon?: boolean;
   /**
    * Slim rows only. Drops the leading project icon where a surrounding
-   * project header already names the project.
+   * project header already names the project; the slot stays, so titles keep
+   * one left edge with the rows that show an icon.
    */
   hideProjectIcon?: boolean;
+  /**
+   * Slim rows only. A parent row's disclosure (a Master over its Cards): the
+   * section header's chevron, in the row's leading slot.
+   */
+  toggle?: { expanded: boolean; onToggle: () => void; label: string } | undefined;
   /**
    * Slim rows only. Replaces the lifecycle button in the trailing slot with
    * a button that opens the row's context menu: on hover, or always on touch.
@@ -1716,12 +1750,18 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             }
           >
             {/* Settled history recedes: dimmed favicon at rest, restored on
-              hover so the tail stays scannable when you're hunting. */}
-            {props.hideProjectIcon ? null : (
+              hover so the tail stays scannable when you're hunting. Live
+              Master rows keep the icon at full strength, like card rows. */}
+            {props.toggle ? (
+              <SidebarDisclosureButton {...props.toggle} />
+            ) : props.hideProjectIcon ? (
+              <span aria-hidden className="size-4 shrink-0" />
+            ) : (
               <span
                 className={cn(
                   "shrink-0 transition-opacity",
-                  (!props.isActive || variantAction === "unsettle") &&
+                  !liveSlimRow &&
+                    (!props.isActive || variantAction === "unsettle") &&
                     "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
                 )}
               >
