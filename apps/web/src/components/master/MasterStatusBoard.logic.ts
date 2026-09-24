@@ -250,40 +250,137 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
 }
 
 /**
- * Explicit disclosure choices for collapsible groups (projects, and a
- * Master's Cards), keyed by group: true opened, false collapsed. A group with
- * no entry falls back to its default (a project opens while it holds the
- * active thread; a Master starts open).
- *
- * A collapse sticks until the user reopens the group or navigation lands on a
- * thread inside it; that navigation records the group as open, so a later
- * click inside never collapses it again and the active thread is never hidden
- * by an older collapse. Clicking a row already on screen changes nothing.
+ * Which collapsible groups are open: projects, the Snoozed and Settled
+ * shelves, and each Master's Cards. Disclosure is a pure lookup of explicit
+ * records with one default that ignores navigation: a Master starts open,
+ * every other group starts collapsed. Nothing derives openness from the
+ * active thread at render time. Only two things write records:
+ * - the user's toggles (one group, or every project at once), and
+ * - navigation (initial load, search, deep link, a row click), which writes
+ *   "open" for the groups holding the landing thread.
+ * So clicking a row already on screen writes "open" to groups that are
+ * already open and changes nothing, and a collapse stays until the user
+ * reopens the group or navigation lands inside it.
  */
 export type Disclosure = ReadonlyMap<string, boolean>;
 
-export function isDisclosureOpen(disclosure: Disclosure, key: string, fallback: boolean): boolean {
-  return disclosure.get(key) ?? fallback;
+export const disclosureKey = {
+  project: (group: { environmentId: string; projectId: string }) =>
+    `project:${group.environmentId}:${group.projectId}`,
+  master: (masterKey: string) => `master:${masterKey}`,
+  shelf: (shelf: "snoozed" | "settled") => `shelf:${shelf}`,
+};
+
+export function isDisclosureOpen(disclosure: Disclosure, key: string): boolean {
+  return disclosure.get(key) ?? key.startsWith("master:");
 }
 
-/** The user opened or collapsed these groups (one header, or all projects). */
+/** Records the same choice for several groups (a toggle, or collapse/expand all). */
 export function setDisclosure(
   disclosure: Disclosure,
   keys: readonly string[],
   open: boolean,
 ): Disclosure {
+  if (keys.every((key) => isDisclosureOpen(disclosure, key) === open && disclosure.has(key))) {
+    return disclosure;
+  }
   const updated = new Map(disclosure);
   for (const key of keys) updated.set(key, open);
   return updated;
 }
 
 /**
- * Navigation landed on a thread inside these groups: open any collapsed one.
- * Returns the same map when nothing changes.
+ * The groups that must be open for a thread to be on screen: its project (or
+ * shelf) and the Master heading its Cards. Pinned rows need only their
+ * Master. Empty when the thread is not in the workspace.
  */
-export function revealDisclosure(disclosure: Disclosure, keys: readonly string[]): Disclosure {
-  const collapsed = keys.filter((key) => disclosure.get(key) === false);
-  return collapsed.length ? setDisclosure(disclosure, collapsed, true) : disclosure;
+export function disclosureKeysHolding<T extends MasterBoardThread>(
+  model: MasterWorkspaceModel<T>,
+  threadKeyOf: (thread: T) => string,
+  key: string,
+): string[] | null {
+  const is = (thread: T) => threadKeyOf(thread) === key;
+  const boards = (groups: readonly MasterWorkspaceProject<T>[]) =>
+    groups.flatMap((group) => group.masters);
+  const masterHolding = (candidates: readonly { master: T; cards: readonly T[] }[]) =>
+    candidates
+      .filter((board) => board.cards.some(is))
+      .map((board) => disclosureKey.master(threadKeyOf(board.master)));
+  for (const entry of model.pinned) {
+    if (is(entry.thread) || entry.cards.some(is)) {
+      return masterHolding([{ master: entry.thread, cards: entry.cards }]);
+    }
+  }
+  for (const group of model.activeProjects) {
+    if (navigableRows(group).some(is)) {
+      return [disclosureKey.project(group), ...masterHolding(group.masters)];
+    }
+  }
+  for (const group of model.snoozedProjects) {
+    if (navigableRows(group).some(is)) {
+      return [disclosureKey.shelf("snoozed"), ...masterHolding(boards([group]))];
+    }
+  }
+  if (model.settled.some(is)) return [disclosureKey.shelf("settled")];
+  return null;
+}
+
+/**
+ * Navigation landed on `key`: every group holding it is recorded open. Null
+ * while the thread is not in the workspace yet (callers retry once it is).
+ */
+export function navigateDisclosure<T extends MasterBoardThread>(
+  model: MasterWorkspaceModel<T>,
+  disclosure: Disclosure,
+  threadKeyOf: (thread: T) => string,
+  key: string,
+): Disclosure | null {
+  const holding = disclosureKeysHolding(model, threadKeyOf, key);
+  return holding === null ? null : setDisclosure(disclosure, holding, true);
+}
+
+/**
+ * The rows on screen, in order, under the given disclosure. `keep` (the
+ * active thread) is listed at its position even while a collapsed group
+ * hides it, so next/previous thread still moves from it.
+ */
+export function visibleWorkspaceRows<T extends MasterBoardThread>(
+  model: MasterWorkspaceModel<T>,
+  disclosure: Disclosure,
+  threadKeyOf: (thread: T) => string,
+  options: {
+    readonly keep?: string | null;
+    readonly shows?: (group: { environmentId: string; projectId: string }) => boolean;
+  } = {},
+): T[] {
+  const rows: T[] = [];
+  const add = (thread: T, open: boolean) => {
+    if (open || threadKeyOf(thread) === options.keep) rows.push(thread);
+  };
+  const shows = options.shows ?? (() => true);
+  const group = (project: MasterWorkspaceProject<T>, open: boolean) => {
+    for (const board of project.masters) {
+      if (!board.structural) add(board.master, open);
+      const cardsOpen =
+        open && isDisclosureOpen(disclosure, disclosureKey.master(threadKeyOf(board.master)));
+      for (const card of board.cards) add(card, cardsOpen);
+    }
+    for (const thread of [...project.oneOffs, ...project.orphanCards]) add(thread, open);
+  };
+  for (const entry of model.pinned) {
+    add(entry.thread, true);
+    const open = isDisclosureOpen(disclosure, disclosureKey.master(threadKeyOf(entry.thread)));
+    for (const card of entry.cards) add(card, open);
+  }
+  for (const project of model.activeProjects) {
+    if (shows(project))
+      group(project, isDisclosureOpen(disclosure, disclosureKey.project(project)));
+  }
+  const snoozedOpen = isDisclosureOpen(disclosure, disclosureKey.shelf("snoozed"));
+  for (const project of model.snoozedProjects) if (shows(project)) group(project, snoozedOpen);
+  const settledOpen = isDisclosureOpen(disclosure, disclosureKey.shelf("settled"));
+  for (const thread of model.settled) if (shows(thread)) add(thread, settledOpen);
+  return rows;
 }
 
 /**

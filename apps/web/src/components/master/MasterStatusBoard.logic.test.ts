@@ -10,8 +10,10 @@ import {
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
-  revealDisclosure,
+  disclosureKey,
+  navigateDisclosure,
   setDisclosure,
+  visibleWorkspaceRows,
   type Disclosure,
   type MasterBoardThread,
   type MasterShelf,
@@ -142,103 +144,165 @@ describe("projectWorkSummary", () => {
 });
 
 describe("collapsible groups", () => {
-  // orchard holds Greenhouse (a Master) and its Card Heater; lighthouse holds Keeper.
-  const PROJECT_OF: Record<string, string> = {
-    greenhouse: "project:orchard",
-    heater: "project:orchard",
-    keeper: "project:lighthouse",
-  };
-  const MASTER_OF: Record<string, string> = { heater: "master:greenhouse" };
+  // A small workspace: a pinned Master with a Card; orchard with a Master, its
+  // Card, a chat and an orphan Card; lighthouse with a Master and an archived
+  // Master heading a live Card; a snoozed Card and chat; a settled chat.
+  const harvest = thread("harvest", "Master: Harvest", { shelf: "pinned" });
+  const prune = thread("prune", "Card: Prune", { forkedFrom: { threadId: "harvest" } });
+  const greenhouse = thread("greenhouse", "Master: Greenhouse");
+  const heater = thread("heater", "Card: Heater", { forkedFrom: { threadId: "greenhouse" } });
+  const soil = thread("soil", "Soil question");
+  const compost = thread("compost", "Card: Imported compost");
+  const keeper = thread("keeper", "Master: Keeper", { projectId: "lighthouse" });
+  const leave = thread("leave", "Card: Leave", {
+    projectId: "lighthouse",
+    forkedFrom: { threadId: "keeper" },
+  });
+  const beacon = thread("beacon", "Master: Beacon", {
+    projectId: "lighthouse",
+    archivedAt: ARCHIVED,
+  });
+  const lens = thread("lens", "Card: Lens", {
+    projectId: "lighthouse",
+    forkedFrom: { threadId: "beacon" },
+  });
+  const vents = thread("vents", "Card: Vents", {
+    shelf: "snoozed",
+    forkedFrom: { threadId: "greenhouse" },
+  });
+  const tides = thread("tides", "Tide tables", { projectId: "lighthouse", shelf: "snoozed" });
+  const oven = thread("oven", "Oven log", { projectId: "bakery", shelf: "settled" });
+  const all = [harvest, prune, greenhouse, heater, soil, compost, keeper, leave, beacon, lens];
+  const model = workspace([...all, vents, tides, oven], ["orchard", "lighthouse", "bakery"]);
+  const keyOf = (item: TestThread) => `${item.environmentId}:${item.id}`;
+  const projects = model.activeProjects.map(disclosureKey.project);
+  const groups = [
+    ...projects,
+    disclosureKey.shelf("snoozed"),
+    disclosureKey.shelf("settled"),
+    ...["harvest", "greenhouse", "keeper", "beacon"].map((id) =>
+      disclosureKey.master(`env-a:${id}`),
+    ),
+  ];
+  const threads = [...all, vents, tides, oven];
 
-  // Mirrors the sidebar: navigation opens the groups holding the new thread.
+  // The sidebar's disclosure, driven exactly as MasterWorkspaceSidebar drives it.
   function sidebar() {
     let disclosure: Disclosure = new Map();
-    let active = "";
-    const projectOpen = (key: string) =>
-      isDisclosureOpen(disclosure, key, PROJECT_OF[active] === key);
-    const api = {
-      navigate(thread: string) {
-        active = thread;
-        disclosure = revealDisclosure(
-          disclosure,
-          [PROJECT_OF[thread], MASTER_OF[thread]].filter((key) => key !== undefined),
-        );
+    let active: string | null = null;
+    const view = {
+      get disclosure() {
+        return disclosure;
       },
-      toggle(key: string, open: boolean) {
-        disclosure = setDisclosure(disclosure, [key], open);
+      get active() {
+        return active;
       },
-      projectOpen,
-      visible(thread: string) {
-        const master = MASTER_OF[thread];
-        return (
-          projectOpen(PROJECT_OF[thread]!) &&
-          (master === undefined || isDisclosureOpen(disclosure, master, true))
-        );
+      navigate(target: TestThread) {
+        active = keyOf(target);
+        disclosure = navigateDisclosure(model, disclosure, keyOf, active) ?? disclosure;
       },
+      toggle(key: string) {
+        disclosure = setDisclosure(disclosure, [key], !isDisclosureOpen(disclosure, key));
+      },
+      setProjects(open: boolean) {
+        disclosure = setDisclosure(disclosure, projects, open);
+      },
+      rows: () => visibleWorkspaceRows(model, disclosure, keyOf).map(keyOf),
+      shows: (target: TestThread) => view.rows().includes(keyOf(target)),
+      open: (key: string) => isDisclosureOpen(disclosure, key),
     };
-    return api;
+    return view;
   }
+  const orchard = disclosureKey.project({ environmentId: "env-a", projectId: "orchard" });
+  const lighthouse = disclosureKey.project({ environmentId: "env-a", projectId: "lighthouse" });
 
-  it("keeps a project open after navigation reopened it, when a visible row inside is clicked", () => {
+  it("keeps orchard open when a visible pinned row is clicked after a search jump (D1)", () => {
     const view = sidebar();
-    view.navigate("greenhouse");
-    view.toggle("project:orchard", false);
-    expect(view.visible("greenhouse")).toBe(false);
-
-    view.navigate("heater");
-    expect(view.projectOpen("project:orchard")).toBe(true);
-
-    view.navigate("greenhouse");
-    expect(view.projectOpen("project:orchard")).toBe(true);
-    expect(view.visible("greenhouse")).toBe(true);
+    view.navigate(heater);
+    expect(view.open(orchard)).toBe(true);
+    view.navigate(harvest);
+    expect(view.open(orchard)).toBe(true);
+    expect(view.shows(greenhouse) && view.shows(heater)).toBe(true);
   });
 
-  it("opens a collapsed project when navigation returns to the thread it was collapsed on", () => {
+  it("keeps orchard open when a visible row in another project is clicked after a deep link (D3)", () => {
     const view = sidebar();
-    view.navigate("greenhouse");
-    view.toggle("project:orchard", false);
-
-    view.navigate("keeper");
-    expect(view.projectOpen("project:orchard")).toBe(false);
-
-    view.navigate("greenhouse");
-    expect(view.visible("greenhouse")).toBe(true);
+    view.navigate(greenhouse);
+    view.toggle(lighthouse);
+    view.navigate(keeper);
+    expect(view.open(orchard)).toBe(true);
+    expect(view.shows(greenhouse)).toBe(true);
   });
 
-  it("keeps a Master's Cards open after navigating to one and back to the Master", () => {
+  it("keeps a group reopened by navigation open when a visible row inside is clicked", () => {
     const view = sidebar();
-    view.navigate("greenhouse");
-    view.toggle("master:greenhouse", false);
-    expect(view.visible("heater")).toBe(false);
-    expect(view.visible("greenhouse")).toBe(true);
-
-    view.navigate("heater");
-    expect(view.visible("heater")).toBe(true);
-
-    view.navigate("greenhouse");
-    expect(view.visible("heater")).toBe(true);
+    view.navigate(greenhouse);
+    view.toggle(orchard);
+    expect(view.shows(greenhouse)).toBe(false);
+    view.navigate(heater);
+    view.navigate(greenhouse);
+    expect(view.shows(greenhouse)).toBe(true);
   });
 
-  it("lets the user collapse the group holding the active thread, and collapse or expand all", () => {
+  it("lets the user collapse the group holding the active thread, and a Master's Cards", () => {
     const view = sidebar();
-    view.navigate("heater");
-    view.toggle("project:orchard", false);
-    expect(view.visible("heater")).toBe(false);
-
-    let all: Disclosure = setDisclosure(
-      new Map(),
-      ["project:orchard", "project:lighthouse"],
-      false,
-    );
-    expect(isDisclosureOpen(all, "project:orchard", true)).toBe(false);
-    expect(isDisclosureOpen(all, "project:lighthouse", false)).toBe(false);
-    all = setDisclosure(all, ["project:orchard", "project:lighthouse"], true);
-    expect(isDisclosureOpen(all, "project:lighthouse", false)).toBe(true);
+    view.navigate(greenhouse);
+    view.toggle(disclosureKey.master("env-a:greenhouse"));
+    expect(view.shows(heater)).toBe(false);
+    expect(view.shows(greenhouse)).toBe(true);
+    view.toggle(orchard);
+    expect(view.shows(greenhouse)).toBe(false);
   });
 
-  it("leaves the map untouched when navigation lands in groups that are already open", () => {
-    const open = setDisclosure(new Map(), ["project:orchard"], true);
-    expect(revealDisclosure(open, ["project:orchard"])).toBe(open);
+  it("holds its invariants over random sequences of toggles, navigation and row clicks", () => {
+    let seed = 20260924;
+    const random = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    for (let run = 0; run < 300; run += 1) {
+      const view = sidebar();
+      const userCollapsed = new Set<string>();
+      view.navigate(threads[random(threads.length)]!);
+      for (let step = 0; step < 30; step += 1) {
+        const action = random(6);
+        const label = `run ${run} step ${step} action ${action}`;
+        if (action === 0) {
+          const key = groups[random(groups.length)]!;
+          view.toggle(key);
+          if (view.open(key)) userCollapsed.delete(key);
+          else userCollapsed.add(key);
+        } else if (action === 1 || action === 2) {
+          view.setProjects(action === 2);
+          for (const key of projects) {
+            if (action === 2) userCollapsed.delete(key);
+            else userCollapsed.add(key);
+          }
+        } else if (action === 3) {
+          // Search or deep link: anywhere, hidden or not.
+          const target = threads[random(threads.length)]!;
+          const before = view.disclosure;
+          view.navigate(target);
+          for (const key of groups) {
+            if (view.open(key) !== isDisclosureOpen(before, key)) userCollapsed.delete(key);
+          }
+          expect(view.shows(target), label).toBe(true);
+        } else {
+          // Click a row already on screen.
+          const rows = view.rows();
+          const target = threads.find((item) => keyOf(item) === rows[random(rows.length)]);
+          if (!target) continue;
+          const before = groups.map((key) => view.open(key));
+          view.navigate(target);
+          expect(
+            groups.map((key) => view.open(key)),
+            label,
+          ).toEqual(before);
+          expect(view.shows(target), label).toBe(true);
+        }
+        for (const key of userCollapsed) expect(view.open(key), `${label} ${key}`).toBe(false);
+      }
+    }
   });
 });
 

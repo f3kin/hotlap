@@ -88,9 +88,11 @@ import {
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
   deriveMasterWorkspace,
+  disclosureKey,
   isDisclosureOpen,
-  revealDisclosure,
+  navigateDisclosure,
   setDisclosure,
+  visibleWorkspaceRows,
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
@@ -112,9 +114,6 @@ function rowKey(thread: ThreadRow): string {
 function projectKeyOf(thread: { environmentId: string; projectId: string }): string {
   return `${thread.environmentId}:${thread.projectId}`;
 }
-
-const projectDisclosureKey = (group: ProjectGroup) => `project:${projectKeyOf(group)}`;
-const masterDisclosureKey = (master: ThreadRow) => `master:${rowKey(master)}`;
 
 function matchesSearch(title: string, query: string) {
   return title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
@@ -441,12 +440,9 @@ function MasterWorkspaceSidebar() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
-  // Explicit open/collapse choices for projects and Masters' Cards, held in
-  // memory (the standard sidebar has no project groups to persist).
+  // Explicit open/collapse records for projects, shelves and Masters' Cards,
+  // held in memory (the standard sidebar has no project groups to persist).
   const [disclosure, setDisclosureState] = useState<Disclosure>(new Map());
-  const [revealedFor, setRevealedFor] = useState<string | null>(null);
-  const [snoozedExpanded, setSnoozedExpanded] = useState(false);
-  const [settledExpanded, setSettledExpanded] = useState(false);
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
 
   const capability = useCallback(
@@ -536,71 +532,54 @@ function MasterWorkspaceSidebar() {
     },
     [projectByKey, projectPresentationByKey],
   );
-  const holdsActive = (rows: readonly ThreadRow[]) =>
-    activeKey !== null && rows.some((thread) => rowKey(thread) === activeKey);
-  // Navigation that lands inside a collapsed group opens it, once per
-  // navigation (state adjusted during render, React's pattern for reacting to
-  // a changed value). A click on a row already on screen lands inside an open
-  // group, so it changes nothing.
-  if (activeKey !== revealedFor) {
-    setRevealedFor(activeKey);
-    const holding = [
-      ...workspace.activeProjects
-        .filter((group) => holdsActive(navigableRows(group)))
-        .map(projectDisclosureKey),
-      ...[
-        ...pinnedEntries.map(({ thread, cards }) => ({ master: thread, cards })),
-        ...[...workspace.activeProjects, ...workspace.snoozedProjects].flatMap(
-          (group) => group.masters,
-        ),
-      ]
-        .filter((board) => holdsActive(board.cards))
-        .map((board) => masterDisclosureKey(board.master)),
-    ];
-    if (holding.length) setDisclosureState((current) => revealDisclosure(current, holding));
-  }
+  // The workspace as rendered: Pinned in its sidebar order.
+  const shownWorkspace = useMemo(
+    () => ({ ...workspace, pinned: pinnedEntries }),
+    [pinnedEntries, workspace],
+  );
+  // Navigation (initial load, search, deep link, a row click) writes "open"
+  // for the groups holding the landing thread, once per navigation; nothing
+  // reads the active thread for disclosure at render time. The write waits
+  // until the thread is in the workspace and any search has closed, and runs
+  // before paint so the landing group never flashes shut.
+  const landedOn = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (activeKey === null || activeKey === landedOn.current || searchQuery.trim()) return;
+    if (navigateDisclosure(shownWorkspace, new Map(), rowKey, activeKey) === null) return;
+    landedOn.current = activeKey;
+    setDisclosureState(
+      (current) => navigateDisclosure(shownWorkspace, current, rowKey, activeKey) ?? current,
+    );
+  }, [activeKey, searchQuery, shownWorkspace]);
+  const isOpen = useCallback((key: string) => isDisclosureOpen(disclosure, key), [disclosure]);
   const isProjectOpen = useCallback(
-    (group: ProjectGroup) =>
-      isDisclosureOpen(
-        disclosure,
-        projectDisclosureKey(group),
-        activeKey !== null && navigableRows(group).some((thread) => rowKey(thread) === activeKey),
-      ),
-    [activeKey, disclosure],
+    (group: ProjectGroup) => isOpen(disclosureKey.project(group)),
+    [isOpen],
   );
   const setProjectsOpen = useCallback(
     (groups: readonly ProjectGroup[], open: boolean) =>
       setDisclosureState((current) =>
-        setDisclosure(current, groups.map(projectDisclosureKey), open),
+        setDisclosure(current, groups.map(disclosureKey.project), open),
       ),
     [],
   );
-  // Masters start open; collapsing one hides its Cards until the user opens
-  // it again or navigates to one of them.
   const isMasterOpen = useCallback(
-    (board: { master: ThreadRow }) =>
-      isDisclosureOpen(disclosure, masterDisclosureKey(board.master), true),
-    [disclosure],
+    (board: { master: ThreadRow }) => isOpen(disclosureKey.master(rowKey(board.master))),
+    [isOpen],
   );
   const toggleMaster = useCallback(
     (board: { master: ThreadRow }) =>
       setDisclosureState((current) =>
-        setDisclosure(current, [masterDisclosureKey(board.master)], !isMasterOpen(board)),
+        setDisclosure(current, [disclosureKey.master(rowKey(board.master))], !isMasterOpen(board)),
       ),
     [isMasterOpen],
   );
-  // A project group's rows as rendered: structural headings are not rows, and
-  // a collapsed Master hides its Cards.
-  const visibleRows = useCallback(
-    (group: ProjectGroup) => [
-      ...group.masters.flatMap((board) => [
-        ...(board.structural ? [] : [board.master]),
-        ...(isMasterOpen(board) ? board.cards : []),
-      ]),
-      ...group.oneOffs,
-      ...group.orphanCards,
-    ],
-    [isMasterOpen],
+  const snoozedExpanded = isOpen(disclosureKey.shelf("snoozed"));
+  const settledExpanded = isOpen(disclosureKey.shelf("settled"));
+  const setShelfOpen = useCallback(
+    (shelf: "snoozed" | "settled", open: boolean) =>
+      setDisclosureState((current) => setDisclosure(current, [disclosureKey.shelf(shelf)], open)),
+    [],
   );
 
   const settledRows = useMemo(
@@ -608,37 +587,22 @@ function MasterWorkspaceSidebar() {
     [projectOf, workspace.settled],
   );
 
-  // Rows in on-screen order, for mod+1..9 and next/previous thread.
-  const orderedRows = useMemo(() => {
-    if (searchQuery.trim()) return searchResults;
-    const rows: ThreadRow[] = pinnedEntries.flatMap((entry) => [
-      entry.thread,
-      ...(isMasterOpen({ master: entry.thread }) ? entry.cards : []),
-    ]);
-    for (const group of workspace.activeProjects) {
-      if (projectOf(group) && isProjectOpen(group)) rows.push(...visibleRows(group));
-    }
-    // Only rows that actually render: shelf groups without a project record don't.
-    if (snoozedExpanded) {
-      rows.push(
-        ...workspace.snoozedProjects.filter((group) => projectOf(group)).flatMap(visibleRows),
-      );
-    }
-    if (settledExpanded) rows.push(...settledRows);
-    return rows;
-  }, [
-    isMasterOpen,
-    isProjectOpen,
-    pinnedEntries,
-    projectOf,
-    searchQuery,
-    searchResults,
-    settledExpanded,
-    settledRows,
-    snoozedExpanded,
-    visibleRows,
-    workspace,
-  ]);
+  // Rows in on-screen order, for mod+1..9. Next/previous thread and "next
+  // after parking" also keep the active thread's position while a collapsed
+  // group hides it, so they still move from it.
+  const rowsFor = useCallback(
+    (keep: string | null) =>
+      searchQuery.trim()
+        ? searchResults
+        : visibleWorkspaceRows(shownWorkspace, disclosure, rowKey, {
+            keep,
+            // Only rows that actually render: groups without a project record don't.
+            shows: (group) => projectOf(group) !== null,
+          }),
+    [disclosure, projectOf, searchQuery, searchResults, shownWorkspace],
+  );
+  const orderedRows = useMemo(() => rowsFor(null), [rowsFor]);
+  const traversalKeys = useMemo(() => rowsFor(activeKey).map(rowKey), [activeKey, rowsFor]);
   // Shelves are exclusive, so every row key is unique.
   const orderedKeys = useMemo(() => orderedRows.map(rowKey), [orderedRows]);
   const rowByKey = useMemo(
@@ -696,7 +660,7 @@ function MasterWorkspaceSidebar() {
       if (direction !== null) {
         navigateToKey(
           resolveAdjacentThreadId({
-            threadIds: orderedKeys,
+            threadIds: traversalKeys,
             currentThreadId: activeKey,
             direction,
           }),
@@ -708,7 +672,7 @@ function MasterWorkspaceSidebar() {
     };
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
-  }, [activeKey, keybindings, openThread, orderedKeys, rowByKey, routeTerminalOpen]);
+  }, [activeKey, keybindings, openThread, orderedKeys, rowByKey, routeTerminalOpen, traversalKeys]);
 
   // chat.new opens the "New thread in" picker whenever there is a real choice,
   // like the default sidebar, even if the legacy sidebar preference is saved
@@ -791,7 +755,7 @@ function MasterWorkspaceSidebar() {
       // Like the default sidebar: settling or snoozing the open thread from its
       // row moves on to the next unparked row (planned now, in today's order),
       // or to a new thread in its project.
-      const nextKey = nextUnparkedKey(orderedKeys, key, (candidate) => {
+      const nextKey = nextUnparkedKey(traversalKeys, key, (candidate) => {
         const row = rowByKey.get(candidate);
         return row === undefined || shelfOf(row) === "snoozed" || shelfOf(row) === "settled";
       });
@@ -810,7 +774,7 @@ function MasterWorkspaceSidebar() {
         },
       });
     },
-    [newThreadContext, openMenu, openThread, orderedKeys, projectOf, rowByKey, shelfOf],
+    [newThreadContext, openMenu, openThread, projectOf, rowByKey, shelfOf, traversalKeys],
   );
   const commitRename = useCallback(
     (thread: ThreadRow, title: string) => {
@@ -1014,7 +978,11 @@ function MasterWorkspaceSidebar() {
                           label={presentation.title}
                           detail={projectWorkSummary(group)}
                           // Collapsed over the active thread: the header carries its highlight.
-                          active={!open && holdsActive(navigableRows(group))}
+                          active={
+                            !open &&
+                            activeKey !== null &&
+                            navigableRows(group).some((thread) => rowKey(thread) === activeKey)
+                          }
                           toggle={{
                             expanded: open,
                             onToggle: () => setProjectsOpen([group], !open),
@@ -1039,7 +1007,7 @@ function MasterWorkspaceSidebar() {
                   0,
                 )}
                 expanded={snoozedExpanded}
-                onExpandedChange={setSnoozedExpanded}
+                onExpandedChange={(open) => setShelfOpen("snoozed", open)}
               >
                 {workspace.snoozedProjects.map((group) => (
                   <Fragment key={projectKeyOf(group)}>
@@ -1052,7 +1020,7 @@ function MasterWorkspaceSidebar() {
                 label="Settled"
                 count={settledRows.length}
                 expanded={settledExpanded}
-                onExpandedChange={setSettledExpanded}
+                onExpandedChange={(open) => setShelfOpen("settled", open)}
               >
                 {settledRows.map((thread) => (
                   <MasterThreadRow
