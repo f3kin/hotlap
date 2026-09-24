@@ -1538,6 +1538,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       </span>
     ) : null;
 
+  // The Master workspace lists live threads as slim rows (showStatusIcon), so
+  // those take the card's title treatment and let the timestamp recede. Its
+  // settled and snoozed rows keep the quiet slim treatment.
+  const liveSlimRow = variant === "slim" && props.showStatusIcon && variantAction === "settle";
   const title = isRenaming ? (
     <input
       autoFocus
@@ -1555,28 +1559,37 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     <span
       className={cn(
         "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
-        shouldRecede ? "font-normal" : "font-medium",
-        variant === "card"
+        liveSlimRow ? "font-medium" : shouldRecede ? "font-normal" : "font-medium",
+        liveSlimRow
           ? cn(
               "truncate",
-              shouldRecede
-                ? "text-secondary-label"
-                : isUnread || isWoke || status === "input"
-                  ? "text-foreground"
-                  : status === "failed"
-                    ? "text-foreground/95"
-                    : "text-foreground/90",
+              props.isActive || isUnread || isWoke || status === "input"
+                ? "text-foreground"
+                : status === "failed"
+                  ? "text-foreground/95"
+                  : "text-foreground/90",
             )
-          : cn(
-              "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
-              shouldRecede
-                ? "text-secondary-label/70"
-                : props.isActive || isWoke || status === "input"
-                  ? "text-foreground"
-                  : isUnread
-                    ? "text-muted-foreground"
-                    : "text-secondary-label/70",
-            ),
+          : variant === "card"
+            ? cn(
+                "truncate",
+                shouldRecede
+                  ? "text-secondary-label"
+                  : isUnread || isWoke || status === "input"
+                    ? "text-foreground"
+                    : status === "failed"
+                      ? "text-foreground/95"
+                      : "text-foreground/90",
+              )
+            : cn(
+                "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
+                shouldRecede
+                  ? "text-secondary-label/70"
+                  : props.isActive || isWoke || status === "input"
+                    ? "text-foreground"
+                    : isUnread
+                      ? "text-muted-foreground"
+                      : "text-secondary-label/70",
+              ),
         isRegeneratingTitle && "opacity-[0.55]",
       )}
     >
@@ -1612,7 +1625,13 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       data-testid={`sidebar-terminal-status-${thread.id}`}
       className={cn("inline-flex shrink-0 items-center justify-center", terminalStatus.colorClass)}
     >
-      <TerminalIcon className={cn("size-3.5", terminalStatus.pulse && "animate-status-pulse")} />
+      {/* Beside the status glyph, it matches the PR and pin icons' size-3. */}
+      <TerminalIcon
+        className={cn(
+          props.showStatusIcon ? "size-3" : "size-3.5",
+          terminalStatus.pulse && "animate-status-pulse",
+        )}
+      />
     </span>
   ) : null;
   const slimStatusIcon =
@@ -1623,7 +1642,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         data-testid={`sidebar-status-${thread.id}`}
         className={cn("inline-flex shrink-0 items-center justify-center", topStatus.className)}
       >
-        <StatusIcon aria-hidden className="size-3.5" />
+        <StatusIcon aria-hidden className="size-3" />
       </span>
     ) : null;
   // Same pen the new-thread draft rows lead with, so both kinds of unsent
