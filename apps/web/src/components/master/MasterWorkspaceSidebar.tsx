@@ -90,13 +90,15 @@ import {
   deriveMasterWorkspace,
   disclosureKey,
   isDisclosureOpen,
-  navigateDisclosure,
+  INITIAL_DISCLOSURE_STATE,
+  onNavigate,
   setDisclosure,
   visibleWorkspaceRows,
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
   type Disclosure,
+  type DisclosureState,
   type MasterShelf,
   type MasterShelfBoard,
   type MasterWorkspaceProject,
@@ -442,7 +444,17 @@ function MasterWorkspaceSidebar() {
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
   // Explicit open/collapse records for projects, shelves and Masters' Cards,
   // held in memory (the standard sidebar has no project groups to persist).
-  const [disclosure, setDisclosureState] = useState<Disclosure>(new Map());
+  const [disclosureState, setDisclosureFullState] =
+    useState<DisclosureState>(INITIAL_DISCLOSURE_STATE);
+  const disclosure = disclosureState.disclosure;
+  const setDisclosureState = useCallback(
+    (update: (current: Disclosure) => Disclosure) =>
+      setDisclosureFullState((current) => {
+        const next = update(current.disclosure);
+        return next === current.disclosure ? current : { ...current, disclosure: next };
+      }),
+    [],
+  );
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
 
   const capability = useCallback(
@@ -537,20 +549,16 @@ function MasterWorkspaceSidebar() {
     () => ({ ...workspace, pinned: pinnedEntries }),
     [pinnedEntries, workspace],
   );
-  // Navigation (initial load, search, deep link, a row click) writes "open"
-  // for the groups holding the landing thread, once per navigation; nothing
-  // reads the active thread for disclosure at render time. The write waits
-  // until the thread is in the workspace and any search has closed, and runs
-  // before paint so the landing group never flashes shut.
-  const landedOn = useRef<string | null>(null);
+  // Every navigation goes through onNavigate (MasterStatusBoard.logic): user
+  // navigations from openThread below, route changes (initial load, deep
+  // link, back/forward) from this effect. It runs before paint so a landing
+  // group never flashes shut, and re-runs when the workspace changes, so a
+  // thread that arrives late is still revealed.
   useLayoutEffect(() => {
-    if (activeKey === null || activeKey === landedOn.current || searchQuery.trim()) return;
-    if (navigateDisclosure(shownWorkspace, new Map(), rowKey, activeKey) === null) return;
-    landedOn.current = activeKey;
-    setDisclosureState(
-      (current) => navigateDisclosure(shownWorkspace, current, rowKey, activeKey) ?? current,
+    setDisclosureFullState(
+      (current) => onNavigate(shownWorkspace, current, rowKey, activeKey, "route") ?? current,
     );
-  }, [activeKey, searchQuery, shownWorkspace]);
+  }, [activeKey, shownWorkspace]);
   const isOpen = useCallback((key: string) => isDisclosureOpen(disclosure, key), [disclosure]);
   const isProjectOpen = useCallback(
     (group: ProjectGroup) => isOpen(disclosureKey.project(group)),
@@ -561,7 +569,7 @@ function MasterWorkspaceSidebar() {
       setDisclosureState((current) =>
         setDisclosure(current, groups.map(disclosureKey.project), open),
       ),
-    [],
+    [setDisclosureState],
   );
   const isMasterOpen = useCallback(
     (board: { master: ThreadRow }) => isOpen(disclosureKey.master(rowKey(board.master))),
@@ -572,14 +580,14 @@ function MasterWorkspaceSidebar() {
       setDisclosureState((current) =>
         setDisclosure(current, [disclosureKey.master(rowKey(board.master))], !isMasterOpen(board)),
       ),
-    [isMasterOpen],
+    [isMasterOpen, setDisclosureState],
   );
   const snoozedExpanded = isOpen(disclosureKey.shelf("snoozed"));
   const settledExpanded = isOpen(disclosureKey.shelf("settled"));
   const setShelfOpen = useCallback(
     (shelf: "snoozed" | "settled", open: boolean) =>
       setDisclosureState((current) => setDisclosure(current, [disclosureKey.shelf(shelf)], open)),
-    [],
+    [setDisclosureState],
   );
 
   const settledRows = useMemo(
@@ -619,13 +627,18 @@ function MasterWorkspaceSidebar() {
 
   const openThread = useCallback(
     (thread: ThreadRow) => {
+      // An explicit navigation reveals the landing thread even when it is
+      // already the active one (e.g. picked again from search).
+      setDisclosureFullState(
+        (current) => onNavigate(shownWorkspace, current, rowKey, rowKey(thread), "user") ?? current,
+      );
       if (isMobile) setOpenMobile(false);
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
       });
     },
-    [isMobile, navigate, setOpenMobile],
+    [isMobile, navigate, setOpenMobile, shownWorkspace],
   );
 
   const routePreviewOpen = useRightPanelStore((state) =>

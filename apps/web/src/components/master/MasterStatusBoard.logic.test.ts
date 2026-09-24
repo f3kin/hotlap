@@ -11,10 +11,13 @@ import {
   nextUnparkedKey,
   projectWorkSummary,
   disclosureKey,
-  navigateDisclosure,
+  INITIAL_DISCLOSURE_STATE,
+  onNavigate,
   setDisclosure,
   visibleWorkspaceRows,
   type Disclosure,
+  type DisclosureState,
+  type NavigationSource,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -186,30 +189,48 @@ describe("collapsible groups", () => {
   ];
   const threads = [...all, vents, tides, oven];
 
-  // The sidebar's disclosure, driven exactly as MasterWorkspaceSidebar drives it.
+  // The sidebar's disclosure, driven through the same entry points the
+  // component calls: onNavigate for every navigation, setDisclosure for toggles.
   function sidebar() {
-    let disclosure: Disclosure = new Map();
+    let state: DisclosureState = INITIAL_DISCLOSURE_STATE;
     let active: string | null = null;
+    const route = () => {
+      state = onNavigate(model, state, keyOf, active, "route") ?? state;
+    };
     const view = {
       get disclosure() {
-        return disclosure;
+        return state.disclosure;
       },
       get active() {
         return active;
       },
-      navigate(target: TestThread) {
+      // A user navigation (row click, search select, keyboard): openThread
+      // calls onNavigate, then the route changes and the router effect runs.
+      navigate(target: TestThread, source: NavigationSource = "user") {
+        if (source === "user") {
+          state = onNavigate(model, state, keyOf, keyOf(target), "user") ?? state;
+        }
         active = keyOf(target);
-        disclosure = navigateDisclosure(model, disclosure, keyOf, active) ?? disclosure;
+        route();
       },
+      // The router effect re-running on an unchanged route (a re-render).
+      rerender: route,
       toggle(key: string) {
-        disclosure = setDisclosure(disclosure, [key], !isDisclosureOpen(disclosure, key));
+        state = {
+          ...state,
+          disclosure: setDisclosure(
+            state.disclosure,
+            [key],
+            !isDisclosureOpen(state.disclosure, key),
+          ),
+        };
       },
       setProjects(open: boolean) {
-        disclosure = setDisclosure(disclosure, projects, open);
+        state = { ...state, disclosure: setDisclosure(state.disclosure, projects, open) };
       },
-      rows: () => visibleWorkspaceRows(model, disclosure, keyOf).map(keyOf),
+      rows: () => visibleWorkspaceRows(model, state.disclosure, keyOf).map(keyOf),
       shows: (target: TestThread) => view.rows().includes(keyOf(target)),
-      open: (key: string) => isDisclosureOpen(disclosure, key),
+      open: (key: string) => isDisclosureOpen(state.disclosure, key),
     };
     return view;
   }
@@ -244,6 +265,34 @@ describe("collapsible groups", () => {
     expect(view.shows(greenhouse)).toBe(true);
   });
 
+  it("reveals the active thread when the user navigates to it again from search", () => {
+    const view = sidebar();
+    view.navigate(greenhouse);
+    view.toggle(orchard);
+    view.rerender();
+    expect(view.shows(greenhouse)).toBe(false);
+    view.navigate(greenhouse);
+    expect(view.shows(greenhouse)).toBe(true);
+  });
+
+  it("reveals an active Card hidden by its collapsed Master when the user navigates to it again", () => {
+    const view = sidebar();
+    view.navigate(heater);
+    view.toggle(disclosureKey.master("env-a:greenhouse"));
+    view.rerender();
+    expect(view.shows(heater)).toBe(false);
+    view.navigate(heater);
+    expect(view.shows(heater)).toBe(true);
+  });
+
+  it("lets a re-render on the same route keep the user's collapse", () => {
+    const view = sidebar();
+    view.navigate(greenhouse, "route");
+    view.toggle(orchard);
+    view.rerender();
+    expect(view.open(orchard)).toBe(false);
+  });
+
   it("lets the user collapse the group holding the active thread, and a Master's Cards", () => {
     const view = sidebar();
     view.navigate(greenhouse);
@@ -255,18 +304,26 @@ describe("collapsible groups", () => {
   });
 
   it("holds its invariants over random sequences of toggles, navigation and row clicks", () => {
+    // mulberry32: a small seeded generator, so a failure replays exactly.
     let seed = 20260924;
     const random = (n: number) => {
-      seed = (seed * 1103515245 + 12345) % 2147483648;
-      return seed % n;
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
     };
     for (let run = 0; run < 300; run += 1) {
       const view = sidebar();
       const userCollapsed = new Set<string>();
       view.navigate(threads[random(threads.length)]!);
       for (let step = 0; step < 30; step += 1) {
-        const action = random(6);
+        const action = random(8);
         const label = `run ${run} step ${step} action ${action}`;
+        const forgetReopened = (before: Disclosure) => {
+          for (const key of groups) {
+            if (view.open(key) !== isDisclosureOpen(before, key)) userCollapsed.delete(key);
+          }
+        };
         if (action === 0) {
           const key = groups[random(groups.length)]!;
           view.toggle(key);
@@ -278,16 +335,17 @@ describe("collapsible groups", () => {
             if (action === 2) userCollapsed.delete(key);
             else userCollapsed.add(key);
           }
-        } else if (action === 3) {
-          // Search or deep link: anywhere, hidden or not.
+        } else if (action === 3 || action === 4) {
+          // Search select (user) or a route change (deep link, back/forward):
+          // anywhere, hidden or not. A route to the thread already active is no
+          // route change, so the router case picks another thread.
           const target = threads[random(threads.length)]!;
+          if (action === 4 && keyOf(target) === view.active) continue;
           const before = view.disclosure;
-          view.navigate(target);
-          for (const key of groups) {
-            if (view.open(key) !== isDisclosureOpen(before, key)) userCollapsed.delete(key);
-          }
+          view.navigate(target, action === 3 ? "user" : "route");
+          forgetReopened(before);
           expect(view.shows(target), label).toBe(true);
-        } else {
+        } else if (action === 5) {
           // Click a row already on screen.
           const rows = view.rows();
           const target = threads.find((item) => keyOf(item) === rows[random(rows.length)]);
@@ -299,6 +357,22 @@ describe("collapsible groups", () => {
             label,
           ).toEqual(before);
           expect(view.shows(target), label).toBe(true);
+        } else if (action === 6) {
+          // Search select of the thread that is already active.
+          const target = threads.find((item) => keyOf(item) === view.active);
+          if (!target) continue;
+          const before = view.disclosure;
+          view.navigate(target);
+          forgetReopened(before);
+          expect(view.shows(target), label).toBe(true);
+        } else {
+          // The router effect re-running on the same route changes nothing.
+          const before = groups.map((key) => view.open(key));
+          view.rerender();
+          expect(
+            groups.map((key) => view.open(key)),
+            label,
+          ).toEqual(before);
         }
         for (const key of userCollapsed) expect(view.open(key), `${label} ${key}`).toBe(false);
       }

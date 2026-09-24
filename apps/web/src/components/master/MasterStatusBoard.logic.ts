@@ -325,18 +325,46 @@ export function disclosureKeysHolding<T extends MasterBoardThread>(
   return null;
 }
 
+/** The sidebar's disclosure records plus the thread the last navigation landed on. */
+export interface DisclosureState {
+  readonly disclosure: Disclosure;
+  readonly landedOn: string | null;
+}
+
+export const INITIAL_DISCLOSURE_STATE: DisclosureState = { disclosure: new Map(), landedOn: null };
+
 /**
- * Navigation landed on `key`: every group holding it is recorded open. Null
- * while the thread is not in the workspace yet (callers retry once it is).
+ * Where the navigation came from. "user" is an explicit request (a row click,
+ * search select, keyboard next/previous or jump); "route" is the router
+ * reporting the current route (initial load, deep link, back/forward, or a
+ * re-render with the same route).
  */
-export function navigateDisclosure<T extends MasterBoardThread>(
+export type NavigationSource = "user" | "route";
+
+/**
+ * The one navigation entry point, for every UI path and for the tests. A
+ * navigation writes "open" for the groups holding the landing thread. An
+ * explicit user navigation always does, even to the thread that is already
+ * active (so searching for it reveals it); the router only acts on a route it
+ * has not landed on yet, so a re-render never reopens what the user just
+ * collapsed. Null while the thread is not in the workspace yet: the caller
+ * keeps its state and the router retries once the thread arrives.
+ */
+export function onNavigate<T extends MasterBoardThread>(
   model: MasterWorkspaceModel<T>,
-  disclosure: Disclosure,
+  state: DisclosureState,
   threadKeyOf: (thread: T) => string,
-  key: string,
-): Disclosure | null {
-  const holding = disclosureKeysHolding(model, threadKeyOf, key);
-  return holding === null ? null : setDisclosure(disclosure, holding, true);
+  target: string | null,
+  source: NavigationSource,
+): DisclosureState | null {
+  if (target === null) return state.landedOn === null ? state : { ...state, landedOn: null };
+  if (source === "route" && target === state.landedOn) return state;
+  const holding = disclosureKeysHolding(model, threadKeyOf, target);
+  if (holding === null) return null;
+  const disclosure = setDisclosure(state.disclosure, holding, true);
+  return disclosure === state.disclosure && state.landedOn === target
+    ? state
+    : { disclosure, landedOn: target };
 }
 
 /**
