@@ -259,7 +259,10 @@ function PullRequestBadge({
   // through its own render prop; useRender merges the badge's behavior into it. The badge
   // owns its type: the control itself reads at the meta size (text-xs sets the size and its
   // line height), so its line box, hover underline and baseline match the row's timestamp
-  // instead of the control's inherited body size and weight.
+  // instead of the control's inherited body size and weight. The state tone also sits on an
+  // inner contents span (it adds no box), because a control's own hover or focus colour
+  // (ComposerControl's hover:text-foreground/80) would otherwise repaint the icon and number;
+  // the control keeps the tone too, so an InlineButton's hover underline takes it.
   const control = useRender({
     render,
     props: {
@@ -273,8 +276,10 @@ function PullRequestBadge({
   return (
     <Tooltip>
       <TooltipTrigger render={control}>
-        <presentation.Icon aria-hidden className="size-3 shrink-0" />
-        {presentation.text}
+        <span className={cn("contents", presentation.toneClassName)}>
+          <presentation.Icon aria-hidden className="size-3 shrink-0" />
+          {presentation.text}
+        </span>
       </TooltipTrigger>
       <TooltipPopup side="top">{presentation.label}</TooltipPopup>
     </Tooltip>
