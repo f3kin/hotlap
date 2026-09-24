@@ -287,7 +287,11 @@ function ProjectGroupRows({
       ))}
       {group.oneOffs.length ? (
         <>
-          <SidebarSectionHeader level="sub" label="Chats" />
+          {/* A project of only chats needs no Chats heading: its header's
+            summary ("1 chat") already says so. */}
+          {group.masters.length || group.orphanCards.length ? (
+            <SidebarSectionHeader level="sub" label="Chats" />
+          ) : null}
           {group.oneOffs.map((thread) => (
             <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
           ))}
