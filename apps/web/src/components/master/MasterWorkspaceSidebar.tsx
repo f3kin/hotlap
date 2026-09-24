@@ -125,6 +125,10 @@ interface RowContext {
   // Inside a project group, whose header already names the project: rows of
   // that project drop their project icon, rows of another project keep it.
   readonly groupTitle?: string;
+  // On the Pinned shelf the shelf itself says pinned, so rows drop the pin,
+  // and the project icon too, so titles share the Projects rows' left edge
+  // (the row tooltip still names the project).
+  readonly onPinnedShelf?: boolean;
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly timestampFormat: TimestampFormat;
   readonly projectByKey: ReadonlyMap<string, EnvironmentProject>;
@@ -167,7 +171,7 @@ function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowC
       settlementSupported={false}
       snoozeSupported={false}
       pinningSupported={false}
-      isPinned={thread.pinnedAt != null}
+      isPinned={thread.pinnedAt != null && !context.onPinnedShelf}
       dropVerb={null}
       dragOverPinned={false}
       snoozeWakeLabelText={
@@ -206,8 +210,9 @@ function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowC
       onUnpin={noLifecycleAction}
       onAcknowledgeWoke={noLifecycleAction}
       hideProjectIcon={
-        context.groupTitle !== undefined &&
-        context.projectTitleByKey.get(projectKey) === context.groupTitle
+        context.onPinnedShelf === true ||
+        (context.groupTitle !== undefined &&
+          context.projectTitleByKey.get(projectKey) === context.groupTitle)
       }
       showStatusIcon
       actionsButton={context.isMobile ? "always" : "on-hover"}
@@ -863,7 +868,7 @@ function MasterWorkspaceSidebar() {
                         key={rowKey(thread)}
                         master={thread}
                         cards={cards}
-                        context={rowContext}
+                        context={{ ...rowContext, onPinnedShelf: true }}
                       />
                     ))
                   )}
