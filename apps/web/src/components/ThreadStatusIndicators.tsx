@@ -256,11 +256,15 @@ function PullRequestBadge({
     <a href={url} target="_blank" rel="noopener noreferrer" />
   );
   // The caller's control (InlineButton, ComposerControl) renders as the link or stack button
-  // through its own render prop; useRender merges the badge's behavior into it.
+  // through its own render prop; useRender merges the badge's behavior into it. The badge
+  // owns its type: the control itself reads at the meta size (text-xs sets the size and its
+  // line height), so its line box, hover underline and baseline match the row's timestamp
+  // instead of the control's inherited body size and weight.
   const control = useRender({
     render,
     props: {
       render: element,
+      className: cn("font-normal text-xs tabular-nums", presentation.toneClassName),
       "aria-label": presentation.label,
       onPointerDown: (event: MouseEvent<HTMLElement>) => event.stopPropagation(),
       onClick,
@@ -269,12 +273,8 @@ function PullRequestBadge({
   return (
     <Tooltip>
       <TooltipTrigger render={control}>
-        <span
-          className={cn("contents font-normal text-xs tabular-nums", presentation.toneClassName)}
-        >
-          <presentation.Icon aria-hidden className="size-3 shrink-0" />
-          {presentation.text}
-        </span>
+        <presentation.Icon aria-hidden className="size-3 shrink-0" />
+        {presentation.text}
       </TooltipTrigger>
       <TooltipPopup side="top">{presentation.label}</TooltipPopup>
     </Tooltip>

@@ -2,7 +2,12 @@ import { ThreadId, type ThreadPullRequestLink } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ThreadWorktreeIndicator, linkedPullRequestSnapshotStatus } from "./ThreadStatusIndicators";
+import {
+  ThreadPullRequestBadgeControl,
+  ThreadWorktreeIndicator,
+  linkedPullRequestSnapshotStatus,
+} from "./ThreadStatusIndicators";
+import { InlineButton } from "./ui/button";
 
 describe("ThreadWorktreeIndicator", () => {
   it("renders the worktree folder and branch in an accessible label", () => {
@@ -78,5 +83,27 @@ describe("linked pull request snapshots", () => {
       },
       sourceControlProvider: { kind: "gitlab", name: "gitlab", baseUrl: "" },
     });
+  });
+});
+
+describe("ThreadPullRequestBadgeControl", () => {
+  it("sets the meta size and normal weight on the control itself, over the InlineButton's", () => {
+    const html = renderToStaticMarkup(
+      <ThreadPullRequestBadgeControl
+        render={<InlineButton />}
+        badge={null}
+        number={55}
+        url="https://github.com/example/orchard/pull/55"
+        status={null}
+        onOpenStack={() => {}}
+        onOpenPullRequest={() => {}}
+      />,
+    );
+    const link = html.match(/<a [^>]*class="([^"]*)"/)?.[1]?.split(" ") ?? [];
+
+    expect(link).toContain("text-xs");
+    expect(link).toContain("font-normal");
+    expect(link).not.toContain("font-medium");
+    expect(html).not.toContain("contents");
   });
 });
