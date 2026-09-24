@@ -4,10 +4,15 @@ import {
   deriveMasterBoard,
   deriveMasterWorkspace,
   isCardThreadTitle,
+  isDisclosureOpen,
   isMasterThreadTitle,
   mergeLiveAndArchivedThreads,
   navigableRows,
   nextUnparkedKey,
+  projectWorkSummary,
+  revealDisclosure,
+  setDisclosure,
+  type Disclosure,
   type MasterBoardThread,
   type MasterShelf,
 } from "./MasterStatusBoard.logic";
@@ -104,6 +109,168 @@ describe("deriveMasterWorkspace", () => {
     expect(model.activeProjects[0]?.visibleCount).toBe(1);
     expect(model.settledProjects[0]?.masters[0]?.cards).toEqual([settledCard]);
     expect(model.activeProjects.flatMap((group) => group.orphanCards)).toEqual([]);
+  });
+});
+
+describe("projectWorkSummary", () => {
+  it("counts masters, cards and chats in lower case with singular and plural nouns", () => {
+    const master = thread("master", "Master: Harvest");
+    const card = thread("card", "Card: Prune", { forkedFrom: { threadId: master.id } });
+    const chat = thread("chat", "Quick question");
+    const orphan = thread("orphan", "Card: Imported");
+    const other = thread("other", "Card: Irrigation", { forkedFrom: { threadId: master.id } });
+
+    expect(projectWorkSummary(workspace([master, card]).activeProjects[0]!)).toBe(
+      "1 master · 1 card",
+    );
+    expect(
+      projectWorkSummary(workspace([master, card, other, chat, orphan]).activeProjects[0]!),
+    ).toBe("1 master · 3 cards · 1 chat");
+  });
+
+  it("counts an archived Master's live Cards but not the archived Master", () => {
+    const archivedMaster = thread("master", "Master: Archived", { archivedAt: ARCHIVED });
+    const card = thread("card", "Card: Continuation", {
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const chats = [thread("a", "First question"), thread("b", "Second question")];
+
+    expect(projectWorkSummary(workspace([archivedMaster, card, ...chats]).activeProjects[0]!)).toBe(
+      "1 card · 2 chats",
+    );
+  });
+});
+
+describe("collapsible groups", () => {
+  // orchard holds Greenhouse (a Master) and its Card Heater; lighthouse holds Keeper.
+  const PROJECT_OF: Record<string, string> = {
+    greenhouse: "project:orchard",
+    heater: "project:orchard",
+    keeper: "project:lighthouse",
+  };
+  const MASTER_OF: Record<string, string> = { heater: "master:greenhouse" };
+
+  // Mirrors the sidebar: navigation opens the groups holding the new thread.
+  function sidebar() {
+    let disclosure: Disclosure = new Map();
+    let active = "";
+    const projectOpen = (key: string) =>
+      isDisclosureOpen(disclosure, key, PROJECT_OF[active] === key);
+    const api = {
+      navigate(thread: string) {
+        active = thread;
+        disclosure = revealDisclosure(
+          disclosure,
+          [PROJECT_OF[thread], MASTER_OF[thread]].filter((key) => key !== undefined),
+        );
+      },
+      toggle(key: string, open: boolean) {
+        disclosure = setDisclosure(disclosure, [key], open);
+      },
+      projectOpen,
+      visible(thread: string) {
+        const master = MASTER_OF[thread];
+        return (
+          projectOpen(PROJECT_OF[thread]!) &&
+          (master === undefined || isDisclosureOpen(disclosure, master, true))
+        );
+      },
+    };
+    return api;
+  }
+
+  it("keeps a project open after navigation reopened it, when a visible row inside is clicked", () => {
+    const view = sidebar();
+    view.navigate("greenhouse");
+    view.toggle("project:orchard", false);
+    expect(view.visible("greenhouse")).toBe(false);
+
+    view.navigate("heater");
+    expect(view.projectOpen("project:orchard")).toBe(true);
+
+    view.navigate("greenhouse");
+    expect(view.projectOpen("project:orchard")).toBe(true);
+    expect(view.visible("greenhouse")).toBe(true);
+  });
+
+  it("opens a collapsed project when navigation returns to the thread it was collapsed on", () => {
+    const view = sidebar();
+    view.navigate("greenhouse");
+    view.toggle("project:orchard", false);
+
+    view.navigate("keeper");
+    expect(view.projectOpen("project:orchard")).toBe(false);
+
+    view.navigate("greenhouse");
+    expect(view.visible("greenhouse")).toBe(true);
+  });
+
+  it("keeps a Master's Cards open after navigating to one and back to the Master", () => {
+    const view = sidebar();
+    view.navigate("greenhouse");
+    view.toggle("master:greenhouse", false);
+    expect(view.visible("heater")).toBe(false);
+    expect(view.visible("greenhouse")).toBe(true);
+
+    view.navigate("heater");
+    expect(view.visible("heater")).toBe(true);
+
+    view.navigate("greenhouse");
+    expect(view.visible("heater")).toBe(true);
+  });
+
+  it("lets the user collapse the group holding the active thread, and collapse or expand all", () => {
+    const view = sidebar();
+    view.navigate("heater");
+    view.toggle("project:orchard", false);
+    expect(view.visible("heater")).toBe(false);
+
+    let all: Disclosure = setDisclosure(
+      new Map(),
+      ["project:orchard", "project:lighthouse"],
+      false,
+    );
+    expect(isDisclosureOpen(all, "project:orchard", true)).toBe(false);
+    expect(isDisclosureOpen(all, "project:lighthouse", false)).toBe(false);
+    all = setDisclosure(all, ["project:orchard", "project:lighthouse"], true);
+    expect(isDisclosureOpen(all, "project:lighthouse", false)).toBe(true);
+  });
+
+  it("leaves the map untouched when navigation lands in groups that are already open", () => {
+    const open = setDisclosure(new Map(), ["project:orchard"], true);
+    expect(revealDisclosure(open, ["project:orchard"])).toBe(open);
+  });
+});
+
+describe("settled shelf", () => {
+  it("lists settled threads and archived Masters flat, newest first, keeping live Cards on their shelf", () => {
+    const archivedMaster = thread("beacon", "Master: Beacon", {
+      projectId: "lighthouse",
+      archivedAt: ARCHIVED,
+      updatedAt: "2026-09-12T00:00:00.000Z",
+    });
+    const liveCard = thread("lens", "Card: Lens", {
+      projectId: "lighthouse",
+      forkedFrom: { threadId: archivedMaster.id },
+    });
+    const settledChat = thread("oven", "Oven log", {
+      projectId: "bakery",
+      shelf: "settled",
+      updatedAt: "2026-09-14T00:00:00.000Z",
+    });
+    const settledMaster = thread("done", "Master: Done", {
+      shelf: "settled",
+      updatedAt: "2026-09-15T00:00:00.000Z",
+    });
+
+    const model = workspace([archivedMaster, liveCard, settledChat, settledMaster]);
+
+    expect(model.settled).toEqual([settledMaster, settledChat, archivedMaster]);
+    expect(model.activeProjects[0]?.masters[0]).toMatchObject({
+      master: archivedMaster,
+      cards: [liveCard],
+      structural: true,
+    });
   });
 });
 

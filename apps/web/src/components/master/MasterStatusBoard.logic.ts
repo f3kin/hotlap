@@ -51,6 +51,13 @@ export interface MasterWorkspaceModel<T extends MasterBoardThread> {
   readonly activeProjects: readonly MasterWorkspaceProject<T>[];
   readonly snoozedProjects: readonly MasterWorkspaceProject<T>[];
   readonly settledProjects: readonly MasterWorkspaceProject<T>[];
+  /**
+   * The Settled shelf as one flat list, newest first, the way the default
+   * sidebar's Settled shelf lists its rows: every settled thread plus each
+   * archived Master that still heads live Cards (those Cards stay on their
+   * shelf under the Master's heading).
+   */
+  readonly settled: readonly T[];
 }
 
 const MASTER_TITLE = /^master\s*:/i;
@@ -220,13 +227,63 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
   };
 
   const activeProjects = build("active");
+  const snoozedProjects = build("snoozed");
+  const settledProjects = build("settled");
   for (const cards of pinnedCards.values()) cards.sort(newestFirst);
+  const archivedMasters = new Map<string, T>();
+  for (const group of [...activeProjects, ...snoozedProjects, ...settledProjects]) {
+    for (const board of group.masters) {
+      if (board.master.archivedAt != null) {
+        archivedMasters.set(threadKey(board.master), board.master);
+      }
+    }
+  }
   return {
     pinned,
     activeProjects,
-    snoozedProjects: build("snoozed"),
-    settledProjects: build("settled"),
+    snoozedProjects,
+    settledProjects,
+    settled: [...settledProjects.flatMap(navigableRows), ...archivedMasters.values()].sort(
+      newestFirst,
+    ),
   };
+}
+
+/**
+ * Explicit disclosure choices for collapsible groups (projects, and a
+ * Master's Cards), keyed by group: true opened, false collapsed. A group with
+ * no entry falls back to its default (a project opens while it holds the
+ * active thread; a Master starts open).
+ *
+ * A collapse sticks until the user reopens the group or navigation lands on a
+ * thread inside it; that navigation records the group as open, so a later
+ * click inside never collapses it again and the active thread is never hidden
+ * by an older collapse. Clicking a row already on screen changes nothing.
+ */
+export type Disclosure = ReadonlyMap<string, boolean>;
+
+export function isDisclosureOpen(disclosure: Disclosure, key: string, fallback: boolean): boolean {
+  return disclosure.get(key) ?? fallback;
+}
+
+/** The user opened or collapsed these groups (one header, or all projects). */
+export function setDisclosure(
+  disclosure: Disclosure,
+  keys: readonly string[],
+  open: boolean,
+): Disclosure {
+  const updated = new Map(disclosure);
+  for (const key of keys) updated.set(key, open);
+  return updated;
+}
+
+/**
+ * Navigation landed on a thread inside these groups: open any collapsed one.
+ * Returns the same map when nothing changes.
+ */
+export function revealDisclosure(disclosure: Disclosure, keys: readonly string[]): Disclosure {
+  const collapsed = keys.filter((key) => disclosure.get(key) === false);
+  return collapsed.length ? setDisclosure(disclosure, collapsed, true) : disclosure;
 }
 
 /**
@@ -242,6 +299,31 @@ export function navigableRows<T extends MasterBoardThread>(group: MasterWorkspac
     ...group.oneOffs,
     ...group.orphanCards,
   ];
+}
+
+function countOf(count: number, noun: string): string {
+  return `${count} ${count === 1 ? noun : `${noun}s`}`;
+}
+
+/**
+ * The muted count beside a project header, e.g. "1 master · 3 cards · 1 chat".
+ * A structural Master (archived, or living on another shelf) is not counted,
+ * but its Cards are; orphan Cards count as cards, since their own heading
+ * already sets them apart.
+ */
+export function projectWorkSummary<T extends MasterBoardThread>(
+  group: MasterWorkspaceProject<T>,
+): string {
+  const masters = group.masters.filter((board) => !board.structural).length;
+  const cards =
+    group.masters.reduce((total, board) => total + board.cards.length, 0) +
+    group.orphanCards.length;
+  const parts = [
+    masters ? countOf(masters, "master") : null,
+    cards ? countOf(cards, "card") : null,
+    group.oneOffs.length ? countOf(group.oneOffs.length, "chat") : null,
+  ].filter((part) => part !== null);
+  return parts.length ? parts.join(" · ") : "No threads";
 }
 
 /**
