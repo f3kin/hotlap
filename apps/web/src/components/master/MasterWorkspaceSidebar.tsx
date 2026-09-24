@@ -242,6 +242,7 @@ function MasterBoard({
     <>
       {structural ? (
         <SidebarSectionHeader
+          level="sub"
           label={master.title}
           {...(master.archivedAt != null ? { detail: "Archived" } : {})}
         />
@@ -287,7 +288,7 @@ function ProjectGroupRows({
       ))}
       {group.oneOffs.length ? (
         <>
-          <SidebarSectionHeader label="Chats" />
+          <SidebarSectionHeader level="sub" label="Chats" />
           {group.oneOffs.map((thread) => (
             <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
           ))}
@@ -295,7 +296,7 @@ function ProjectGroupRows({
       ) : null}
       {group.orphanCards.length ? (
         <>
-          <SidebarSectionHeader label="Orphan Cards" />
+          <SidebarSectionHeader level="sub" label="Orphan Cards" />
           {group.orphanCards.map((thread) => (
             <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
           ))}
@@ -307,7 +308,6 @@ function ProjectGroupRows({
 
 function ShelfGroup({
   label,
-  tone,
   groups,
   expanded,
   onExpandedChange,
@@ -315,7 +315,6 @@ function ShelfGroup({
   renderGroup,
 }: {
   label: string;
-  tone?: "snoozed";
   groups: readonly ProjectGroup[];
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
@@ -329,7 +328,6 @@ function ShelfGroup({
       <ul role="list" className="flex flex-col gap-px">
         <SidebarSectionHeader
           label={`${label} (${count})`}
-          {...(tone ? { tone } : {})}
           toggle={{ expanded, onToggle: () => onExpandedChange(!expanded) }}
         />
         {expanded
@@ -921,7 +919,6 @@ function MasterWorkspaceSidebar() {
               </SidebarGroup>
               <ShelfGroup
                 label="Snoozed"
-                tone="snoozed"
                 groups={workspace.snoozedProjects}
                 expanded={snoozedExpanded}
                 onExpandedChange={setSnoozedExpanded}

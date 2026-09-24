@@ -662,9 +662,12 @@ function SidebarDragBoundary(props: {
 // Without a marker the header sits outside the sortable thread list (the
 // Master workspace's sections and project groups): a plain list item that may
 // carry a leading icon and a muted count, and is static when it has no toggle.
+// Only section headers carry the trailing rule: a sub-level header (a group
+// inside a section) reads lighter and ruleless, and an icon header is already
+// anchored by its icon.
 export function SidebarSectionHeader(props: {
   marker?: "snoozed-header" | "settled-header";
-  tone?: "snoozed";
+  level?: "section" | "sub";
   label: string;
   icon?: ReactNode;
   detail?: string;
@@ -675,9 +678,12 @@ export function SidebarSectionHeader(props: {
   isDropTarget?: boolean;
   toggle?: { expanded: boolean; onToggle: () => void };
 }) {
-  const snoozed = props.marker === "snoozed-header" || props.tone === "snoozed";
+  const snoozed = props.marker === "snoozed-header";
+  const sub = props.level === "sub";
+  const ruled = !sub && !props.icon;
   const className = cn(
-    "flex h-full w-full items-center gap-2 px-2 text-left text-xs font-medium",
+    "flex h-full w-full items-center gap-2 px-2 text-left text-xs",
+    sub ? "font-normal" : "font-medium",
     snoozed ? "text-blue-600 dark:text-blue-400" : "text-sidebar-muted-foreground/60",
     props.dragging && "text-sidebar-foreground/80",
     props.isDropTarget && "text-primary",
@@ -686,16 +692,28 @@ export function SidebarSectionHeader(props: {
     <>
       {props.icon}
       <span className={props.marker ? "shrink-0" : "min-w-0 truncate"}>{props.label}</span>
-      {props.detail ? <span className="shrink-0 font-normal">{props.detail}</span> : null}
-      <span
-        aria-hidden
-        className={cn(
-          "h-px min-w-2 flex-1",
-          snoozed ? "bg-blue-500/20 dark:bg-blue-400/15" : "bg-sidebar-border/60",
-          props.dragging && "bg-sidebar-foreground/25",
-          props.isDropTarget && "bg-primary/50",
-        )}
-      />
+      {/* A ruleless header's detail takes the free space and truncates first,
+        so the label (a project name) keeps its full width. */}
+      {props.detail ? (
+        <span className={cn("font-normal", ruled ? "shrink-0" : "min-w-0 flex-1 truncate")}>
+          {props.detail}
+        </span>
+      ) : null}
+      {!ruled ? (
+        props.detail ? null : (
+          <span aria-hidden className="min-w-2 flex-1" />
+        )
+      ) : (
+        <span
+          aria-hidden
+          className={cn(
+            "h-px min-w-2 flex-1",
+            snoozed ? "bg-blue-500/20 dark:bg-blue-400/15" : "bg-sidebar-border/60",
+            props.dragging && "bg-sidebar-foreground/25",
+            props.isDropTarget && "bg-primary/50",
+          )}
+        />
+      )}
       {props.toggle ? (
         <ChevronDownIcon
           aria-hidden
