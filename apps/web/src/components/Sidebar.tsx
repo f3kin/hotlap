@@ -1539,9 +1539,18 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     ) : null;
 
   // The Master workspace lists live threads as slim rows (showStatusIcon), so
-  // those take the card's title treatment and let the timestamp recede. Its
-  // settled and snoozed rows keep the quiet slim treatment.
+  // those take the card's title treatment (weight and colour ladder, without
+  // the card's recede) and let the timestamp recede. Its settled and snoozed
+  // rows keep the quiet slim treatment.
   const liveSlimRow = variant === "slim" && props.showStatusIcon && variantAction === "settle";
+  const cardTitleRecedes = variant === "card" && shouldRecede;
+  const cardTitleColorClassName = cardTitleRecedes
+    ? "text-secondary-label"
+    : isUnread || isWoke || status === "input"
+      ? "text-foreground"
+      : status === "failed"
+        ? "text-foreground/95"
+        : "text-foreground/90";
   const title = isRenaming ? (
     <input
       autoFocus
@@ -1560,36 +1569,18 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       className={cn(
         "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
         liveSlimRow ? "font-medium" : shouldRecede ? "font-normal" : "font-medium",
-        liveSlimRow
-          ? cn(
-              "truncate",
-              props.isActive || isUnread || isWoke || status === "input"
-                ? "text-foreground"
-                : status === "failed"
-                  ? "text-foreground/95"
-                  : "text-foreground/90",
-            )
-          : variant === "card"
-            ? cn(
-                "truncate",
-                shouldRecede
-                  ? "text-secondary-label"
-                  : isUnread || isWoke || status === "input"
-                    ? "text-foreground"
-                    : status === "failed"
-                      ? "text-foreground/95"
-                      : "text-foreground/90",
-              )
-            : cn(
-                "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
-                shouldRecede
-                  ? "text-secondary-label/70"
-                  : props.isActive || isWoke || status === "input"
-                    ? "text-foreground"
-                    : isUnread
-                      ? "text-muted-foreground"
-                      : "text-secondary-label/70",
-              ),
+        variant === "card" || liveSlimRow
+          ? cn("truncate", cardTitleColorClassName)
+          : cn(
+              "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
+              shouldRecede
+                ? "text-secondary-label/70"
+                : props.isActive || isWoke || status === "input"
+                  ? "text-foreground"
+                  : isUnread
+                    ? "text-muted-foreground"
+                    : "text-secondary-label/70",
+            ),
         isRegeneratingTitle && "opacity-[0.55]",
       )}
     >
