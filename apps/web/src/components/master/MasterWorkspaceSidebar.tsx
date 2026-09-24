@@ -74,7 +74,12 @@ import { toastManager } from "../ui/toast";
 import { TooltipProvider } from "../ui/tooltip";
 import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChrome";
 import { SidebarThreadHeader } from "../sidebar/SidebarThreadHeader";
-import { EMPTY_PROVIDER_ENTRIES, SidebarSectionHeader, SidebarThreadRow } from "../Sidebar";
+import {
+  EMPTY_PROVIDER_ENTRIES,
+  SidebarDisclosureButton,
+  SidebarSectionHeader,
+  SidebarThreadRow,
+} from "../Sidebar";
 import {
   resolveAdjacentThreadId,
   sortPinnedThreadsForSidebar,
@@ -83,11 +88,15 @@ import {
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
   deriveMasterWorkspace,
+  isDisclosureOpen,
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
+  type DisclosureToggle,
   type MasterShelf,
+  type MasterShelfBoard,
   type MasterWorkspaceProject,
+  withDisclosureToggles,
 } from "./MasterStatusBoard.logic";
 import { useMasterLineageThreads } from "./useMasterLineageThreads";
 import { useMasterWorkspaceEnabled } from "./useMasterSettings";
@@ -125,10 +134,12 @@ interface RowContext {
   // Inside a project group, whose header already names the project: rows of
   // that project drop their project icon, rows of another project keep it.
   readonly groupTitle?: string;
-  // On the Pinned shelf the shelf itself says pinned, so rows drop the pin,
-  // and the project icon too, so titles share the Projects rows' left edge
-  // (the row tooltip still names the project).
+  // On the Pinned shelf the shelf itself says pinned, so rows drop the pin.
   readonly onPinnedShelf?: boolean;
+  // On the Settled shelf every row reads settled, archived Masters included.
+  readonly onSettledShelf?: boolean;
+  readonly isMasterOpen: (board: MasterShelfBoard<ThreadRow>) => boolean;
+  readonly onToggleMaster: (board: MasterShelfBoard<ThreadRow>) => void;
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly timestampFormat: TimestampFormat;
   readonly projectByKey: ReadonlyMap<string, EnvironmentProject>;
@@ -152,8 +163,20 @@ interface RowContext {
 // standard row's inline lifecycle buttons stay off.
 const noLifecycleAction = () => {};
 
+// Sub-level headings inside a project keep the rows' empty icon slot, so their
+// labels share the titles' left edge.
+const ICON_SLOT = <span aria-hidden className="size-4 shrink-0" />;
+
 /** One thread, rendered by the standard sidebar's slim row. */
-function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowContext }) {
+function MasterThreadRow({
+  thread,
+  context,
+  toggle,
+}: {
+  thread: ThreadRow;
+  context: RowContext;
+  toggle?: { expanded: boolean; onToggle: () => void; label: string } | undefined;
+}) {
   const key = rowKey(thread);
   const projectKey = projectKeyOf(thread);
   const snoozedUntil =
@@ -166,7 +189,11 @@ function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowC
       thread={thread}
       variant="slim"
       variantAction={
-        snoozedUntil ? "unsnooze" : thread.settledOverride === "settled" ? "unsettle" : "settle"
+        snoozedUntil
+          ? "unsnooze"
+          : context.onSettledShelf || thread.settledOverride === "settled"
+            ? "unsettle"
+            : "settle"
       }
       settlementSupported={false}
       snoozeSupported={false}
@@ -210,11 +237,11 @@ function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowC
       onUnpin={noLifecycleAction}
       onAcknowledgeWoke={noLifecycleAction}
       hideProjectIcon={
-        context.onPinnedShelf === true ||
-        (context.groupTitle !== undefined &&
-          context.projectTitleByKey.get(projectKey) === context.groupTitle)
+        context.groupTitle !== undefined &&
+        context.projectTitleByKey.get(projectKey) === context.groupTitle
       }
       showStatusIcon
+      {...(toggle ? { toggle } : {})}
       actionsButton={context.isMobile ? "always" : "on-hover"}
     />
   );
@@ -227,30 +254,39 @@ function MasterThreadRow({ thread, context }: { thread: ThreadRow; context: RowC
  * an inert heading, so each thread stays navigable once.
  */
 function MasterBoard({
-  master,
-  cards,
-  structural,
+  board,
   context,
 }: {
-  master: ThreadRow;
-  cards: readonly ThreadRow[];
-  structural?: boolean;
+  board: MasterShelfBoard<ThreadRow>;
   context: RowContext;
 }) {
+  const { master, cards, structural } = board;
+  // A Master with Cards collapses them with a chevron in the leading icon
+  // slot, on its row or, for a structural Master, on its heading.
+  const open = context.isMasterOpen(board);
+  const toggle = cards.length
+    ? {
+        expanded: open,
+        onToggle: () => context.onToggleMaster(board),
+        label: `${open ? "Collapse" : "Expand"} Cards of ${master.title}`,
+      }
+    : undefined;
   return (
     <>
       {structural ? (
         <SidebarSectionHeader
           level="sub"
+          icon={toggle ? <SidebarDisclosureButton {...toggle} /> : ICON_SLOT}
           label={master.title}
-          {...(master.archivedAt != null ? { detail: "Archived" } : {})}
         />
       ) : (
-        <MasterThreadRow thread={master} context={context} />
+        <MasterThreadRow thread={master} context={context} toggle={toggle} />
       )}
-      {cards.map((card) => (
-        <MasterThreadRow key={rowKey(card)} thread={card} context={context} />
-      ))}
+      {open
+        ? cards.map((card) => (
+            <MasterThreadRow key={rowKey(card)} thread={card} context={context} />
+          ))
+        : null}
     </>
   );
 }
@@ -277,20 +313,14 @@ function ProjectGroupRows({
   return (
     <>
       {group.masters.map((board) => (
-        <MasterBoard
-          key={rowKey(board.master)}
-          master={board.master}
-          cards={board.cards}
-          structural={board.structural}
-          context={context}
-        />
+        <MasterBoard key={rowKey(board.master)} board={board} context={context} />
       ))}
       {group.oneOffs.length ? (
         <>
           {/* A project of only chats needs no Chats heading: its header's
             summary ("1 chat") already says so. */}
           {group.masters.length || group.orphanCards.length ? (
-            <SidebarSectionHeader level="sub" label="Chats" />
+            <SidebarSectionHeader level="sub" icon={ICON_SLOT} label="Chats" />
           ) : null}
           {group.oneOffs.map((thread) => (
             <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
@@ -299,7 +329,7 @@ function ProjectGroupRows({
       ) : null}
       {group.orphanCards.length ? (
         <>
-          <SidebarSectionHeader level="sub" label="Orphan Cards" />
+          <SidebarSectionHeader level="sub" icon={ICON_SLOT} label="Orphan Cards" />
           {group.orphanCards.map((thread) => (
             <MasterThreadRow key={rowKey(thread)} thread={thread} context={context} />
           ))}
@@ -309,38 +339,30 @@ function ProjectGroupRows({
   );
 }
 
+// A collapsed-by-default shelf at the bottom, labelled like the default
+// sidebar's shelves: "Settled (3)" while closed, "Settled" once open.
 function ShelfGroup({
   label,
-  groups,
+  count,
   expanded,
   onExpandedChange,
-  projectTitle,
-  renderGroup,
+  children,
 }: {
   label: string;
-  groups: readonly ProjectGroup[];
+  count: number;
   expanded: boolean;
   onExpandedChange: (open: boolean) => void;
-  projectTitle: (group: ProjectGroup) => ReactNode;
-  renderGroup: (group: ProjectGroup) => ReactNode;
+  children: ReactNode;
 }) {
-  if (groups.length === 0) return null;
-  const count = groups.reduce((total, group) => total + group.visibleCount, 0);
+  if (count === 0) return null;
   return (
     <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
       <ul role="list" className="flex flex-col gap-px">
         <SidebarSectionHeader
-          label={`${label} (${count})`}
+          label={expanded ? label : `${label} (${count})`}
           toggle={{ expanded, onToggle: () => onExpandedChange(!expanded) }}
         />
-        {expanded
-          ? groups.map((group) => (
-              <Fragment key={`${group.environmentId}:${group.projectId}`}>
-                {projectTitle(group)}
-                {renderGroup(group)}
-              </Fragment>
-            ))
-          : null}
+        {expanded ? children : null}
       </ul>
     </SidebarGroup>
   );
@@ -415,7 +437,13 @@ function MasterWorkspaceSidebar() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
-  const [openProjectKeys, setOpenProjectKeys] = useState<ReadonlySet<string>>(new Set());
+  // Explicit disclosure toggles; without one a group follows navigation.
+  const [projectToggles, setProjectToggles] = useState<ReadonlyMap<string, DisclosureToggle>>(
+    new Map(),
+  );
+  const [masterToggles, setMasterToggles] = useState<ReadonlyMap<string, DisclosureToggle>>(
+    new Map(),
+  );
   const [snoozedExpanded, setSnoozedExpanded] = useState(false);
   const [settledExpanded, setSettledExpanded] = useState(false);
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
@@ -509,32 +537,90 @@ function MasterWorkspaceSidebar() {
   );
   const isProjectOpen = useCallback(
     (group: ProjectGroup) =>
-      openProjectKeys.has(`${group.environmentId}:${group.projectId}`) ||
-      (activeKey !== null && navigableRows(group).some((thread) => rowKey(thread) === activeKey)),
-    [activeKey, openProjectKeys],
+      isDisclosureOpen({
+        holdsActive:
+          activeKey !== null && navigableRows(group).some((thread) => rowKey(thread) === activeKey),
+        activeKey,
+        toggle: projectToggles.get(projectKeyOf(group)),
+      }),
+    [activeKey, projectToggles],
+  );
+  const setProjectsOpen = useCallback(
+    (groups: readonly ProjectGroup[], open: boolean) =>
+      setProjectToggles((current) =>
+        withDisclosureToggles(current, groups.map(projectKeyOf), open, activeKey),
+      ),
+    [activeKey],
+  );
+  // Masters start open; collapsing one hides its Cards until toggled back or
+  // until the user navigates to one of them.
+  const isMasterOpen = useCallback(
+    (board: MasterShelfBoard<ThreadRow>) =>
+      isDisclosureOpen({
+        holdsActive: board.cards.some((card) => rowKey(card) === activeKey),
+        activeKey,
+        toggle: masterToggles.get(rowKey(board.master)),
+        defaultOpen: true,
+      }),
+    [activeKey, masterToggles],
+  );
+  const toggleMaster = useCallback(
+    (board: MasterShelfBoard<ThreadRow>) =>
+      setMasterToggles((current) =>
+        withDisclosureToggles(current, [rowKey(board.master)], !isMasterOpen(board), activeKey),
+      ),
+    [activeKey, isMasterOpen],
+  );
+  // A project group's rows as rendered: structural headings are not rows, and
+  // a collapsed Master hides its Cards.
+  const visibleRows = useCallback(
+    (group: ProjectGroup) => [
+      ...group.masters.flatMap((board) => [
+        ...(board.structural ? [] : [board.master]),
+        ...(isMasterOpen(board) ? board.cards : []),
+      ]),
+      ...group.oneOffs,
+      ...group.orphanCards,
+    ],
+    [isMasterOpen],
+  );
+
+  const settledRows = useMemo(
+    () => workspace.settled.filter((thread) => projectOf(thread)),
+    [projectOf, workspace.settled],
   );
 
   // Rows in on-screen order, for mod+1..9 and next/previous thread.
   const orderedRows = useMemo(() => {
     if (searchQuery.trim()) return searchResults;
-    const rows: ThreadRow[] = pinnedEntries.flatMap((entry) => [entry.thread, ...entry.cards]);
+    const rows: ThreadRow[] = pinnedEntries.flatMap((entry) => [
+      entry.thread,
+      ...(isMasterOpen({ master: entry.thread, cards: entry.cards, structural: false })
+        ? entry.cards
+        : []),
+    ]);
     for (const group of workspace.activeProjects) {
-      if (projectOf(group) && isProjectOpen(group)) rows.push(...navigableRows(group));
+      if (projectOf(group) && isProjectOpen(group)) rows.push(...visibleRows(group));
     }
     // Only rows that actually render: shelf groups without a project record don't.
-    const shelfRows = (groups: readonly ProjectGroup[]) =>
-      groups.filter((group) => projectOf(group)).flatMap(navigableRows);
-    if (snoozedExpanded) rows.push(...shelfRows(workspace.snoozedProjects));
-    if (settledExpanded) rows.push(...shelfRows(workspace.settledProjects));
+    if (snoozedExpanded) {
+      rows.push(
+        ...workspace.snoozedProjects.filter((group) => projectOf(group)).flatMap(visibleRows),
+      );
+    }
+    if (settledExpanded) rows.push(...settledRows);
     return rows;
   }, [
+    isMasterOpen,
     isProjectOpen,
     pinnedEntries,
     projectOf,
     searchQuery,
     searchResults,
     settledExpanded,
+    settledRows,
     snoozedExpanded,
+    visibleRows,
     workspace,
   ]);
   // Shelves are exclusive, so every row key is unique.
@@ -755,6 +841,8 @@ function MasterWorkspaceSidebar() {
     onRenameChange: (title) => setRenaming((current) => (current ? { ...current, title } : null)),
     onRenameCommit: commitRename,
     onRenameCancel: () => setRenaming(null),
+    isMasterOpen,
+    onToggleMaster: toggleMaster,
   };
 
   const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -789,6 +877,8 @@ function MasterWorkspaceSidebar() {
     (projectGroupCount <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
 
+  const projectGroupsShown = workspace.activeProjects.filter((group) => projectOf(group));
+  const anyProjectOpen = projectGroupsShown.some(isProjectOpen);
   const shelfProjectTitle = (group: ProjectGroup) => {
     const presentation = projectOf(group);
     return presentation ? (
@@ -870,8 +960,7 @@ function MasterWorkspaceSidebar() {
                     pinnedEntries.map(({ thread, cards }) => (
                       <MasterBoard
                         key={rowKey(thread)}
-                        master={thread}
-                        cards={cards}
+                        board={{ master: thread, cards, structural: false }}
                         context={{ ...rowContext, onPinnedShelf: true }}
                       />
                     ))
@@ -880,9 +969,20 @@ function MasterWorkspaceSidebar() {
               </SidebarGroup>
               <SidebarGroup className="px-[var(--sidebar-content-inset)] py-2">
                 <ul role="list" className="flex flex-col gap-px">
-                  <SidebarSectionHeader label="Projects" />
+                  {/* The section header collapses or expands every project at once. */}
+                  <SidebarSectionHeader
+                    label="Projects"
+                    {...(projectGroupsShown.length
+                      ? {
+                          toggle: {
+                            expanded: anyProjectOpen,
+                            onToggle: () => setProjectsOpen(projectGroupsShown, !anyProjectOpen),
+                          },
+                        }
+                      : {})}
+                  />
                   {workspace.activeProjects.map((group) => {
-                    const projectKey = `${group.environmentId}:${group.projectId}`;
+                    const projectKey = projectKeyOf(group);
                     const presentation = projectOf(group);
                     if (!presentation) return null;
                     const open = isProjectOpen(group);
@@ -899,13 +999,7 @@ function MasterWorkspaceSidebar() {
                           detail={projectWorkSummary(group)}
                           toggle={{
                             expanded: open,
-                            onToggle: () =>
-                              setOpenProjectKeys((current) => {
-                                const updated = new Set(current);
-                                if (open) updated.delete(projectKey);
-                                else updated.add(projectKey);
-                                return updated;
-                              }),
+                            onToggle: () => setProjectsOpen([group], !open),
                           }}
                         />
                         {open ? (
@@ -922,20 +1016,34 @@ function MasterWorkspaceSidebar() {
               </SidebarGroup>
               <ShelfGroup
                 label="Snoozed"
-                groups={workspace.snoozedProjects}
+                count={workspace.snoozedProjects.reduce(
+                  (total, group) => total + group.visibleCount,
+                  0,
+                )}
                 expanded={snoozedExpanded}
                 onExpandedChange={setSnoozedExpanded}
-                projectTitle={shelfProjectTitle}
-                renderGroup={renderShelfGroup}
-              />
+              >
+                {workspace.snoozedProjects.map((group) => (
+                  <Fragment key={projectKeyOf(group)}>
+                    {shelfProjectTitle(group)}
+                    {renderShelfGroup(group)}
+                  </Fragment>
+                ))}
+              </ShelfGroup>
               <ShelfGroup
                 label="Settled"
-                groups={workspace.settledProjects}
+                count={settledRows.length}
                 expanded={settledExpanded}
                 onExpandedChange={setSettledExpanded}
-                projectTitle={shelfProjectTitle}
-                renderGroup={renderShelfGroup}
-              />
+              >
+                {settledRows.map((thread) => (
+                  <MasterThreadRow
+                    key={rowKey(thread)}
+                    thread={thread}
+                    context={{ ...rowContext, onSettledShelf: true }}
+                  />
+                ))}
+              </ShelfGroup>
             </>
           )}
         </TooltipProvider>
