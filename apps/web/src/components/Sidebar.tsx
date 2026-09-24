@@ -728,12 +728,21 @@ export function SidebarSectionHeader(props: {
     snoozed ? "text-blue-600 dark:text-blue-400" : "text-sidebar-muted-foreground/60",
     props.dragging && "text-sidebar-foreground/80",
     props.isDropTarget && "text-primary",
-    props.active && "rounded-md bg-sidebar-row-active text-sidebar-foreground",
+    props.active && "rounded-md bg-sidebar-row-active",
   );
   const content = (
     <>
       {props.icon}
-      <span className={props.marker ? "shrink-0" : "min-w-0 truncate"}>{props.label}</span>
+      {/* On the active surface only the label takes the row's foreground; the
+        detail stays muted. */}
+      <span
+        className={cn(
+          props.marker ? "shrink-0" : "min-w-0 truncate",
+          props.active && "text-sidebar-foreground",
+        )}
+      >
+        {props.label}
+      </span>
       {/* A ruleless header's detail takes the free space and truncates first,
         so the label (a project name) keeps its full width. */}
       {props.detail ? (
