@@ -89,14 +89,15 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import {
   deriveMasterWorkspace,
   isDisclosureOpen,
+  revealDisclosure,
+  setDisclosure,
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
-  type DisclosureToggle,
+  type Disclosure,
   type MasterShelf,
   type MasterShelfBoard,
   type MasterWorkspaceProject,
-  withDisclosureToggles,
 } from "./MasterStatusBoard.logic";
 import { useMasterLineageThreads } from "./useMasterLineageThreads";
 import { useMasterWorkspaceEnabled } from "./useMasterSettings";
@@ -111,6 +112,9 @@ function rowKey(thread: ThreadRow): string {
 function projectKeyOf(thread: { environmentId: string; projectId: string }): string {
   return `${thread.environmentId}:${thread.projectId}`;
 }
+
+const projectDisclosureKey = (group: ProjectGroup) => `project:${projectKeyOf(group)}`;
+const masterDisclosureKey = (master: ThreadRow) => `master:${rowKey(master)}`;
 
 function matchesSearch(title: string, query: string) {
   return title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
@@ -138,8 +142,8 @@ interface RowContext {
   readonly onPinnedShelf?: boolean;
   // On the Settled shelf every row reads settled, archived Masters included.
   readonly onSettledShelf?: boolean;
-  readonly isMasterOpen: (board: MasterShelfBoard<ThreadRow>) => boolean;
-  readonly onToggleMaster: (board: MasterShelfBoard<ThreadRow>) => void;
+  readonly isMasterOpen: (board: { master: ThreadRow }) => boolean;
+  readonly onToggleMaster: (board: { master: ThreadRow }) => void;
   readonly primaryEnvironmentId: EnvironmentId | null;
   readonly timestampFormat: TimestampFormat;
   readonly projectByKey: ReadonlyMap<string, EnvironmentProject>;
@@ -437,13 +441,10 @@ function MasterWorkspaceSidebar() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
-  // Explicit disclosure toggles; without one a group follows navigation.
-  const [projectToggles, setProjectToggles] = useState<ReadonlyMap<string, DisclosureToggle>>(
-    new Map(),
-  );
-  const [masterToggles, setMasterToggles] = useState<ReadonlyMap<string, DisclosureToggle>>(
-    new Map(),
-  );
+  // Explicit open/collapse choices for projects and Masters' Cards, held in
+  // memory (the standard sidebar has no project groups to persist).
+  const [disclosure, setDisclosureState] = useState<Disclosure>(new Map());
+  const [revealedFor, setRevealedFor] = useState<string | null>(null);
   const [snoozedExpanded, setSnoozedExpanded] = useState(false);
   const [settledExpanded, setSettledExpanded] = useState(false);
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
@@ -535,41 +536,58 @@ function MasterWorkspaceSidebar() {
     },
     [projectByKey, projectPresentationByKey],
   );
+  const holdsActive = (rows: readonly ThreadRow[]) =>
+    activeKey !== null && rows.some((thread) => rowKey(thread) === activeKey);
+  // Navigation that lands inside a collapsed group opens it, once per
+  // navigation (state adjusted during render, React's pattern for reacting to
+  // a changed value). A click on a row already on screen lands inside an open
+  // group, so it changes nothing.
+  if (activeKey !== revealedFor) {
+    setRevealedFor(activeKey);
+    const holding = [
+      ...workspace.activeProjects
+        .filter((group) => holdsActive(navigableRows(group)))
+        .map(projectDisclosureKey),
+      ...[
+        ...pinnedEntries.map(({ thread, cards }) => ({ master: thread, cards })),
+        ...[...workspace.activeProjects, ...workspace.snoozedProjects].flatMap(
+          (group) => group.masters,
+        ),
+      ]
+        .filter((board) => holdsActive(board.cards))
+        .map((board) => masterDisclosureKey(board.master)),
+    ];
+    if (holding.length) setDisclosureState((current) => revealDisclosure(current, holding));
+  }
   const isProjectOpen = useCallback(
     (group: ProjectGroup) =>
-      isDisclosureOpen({
-        holdsActive:
-          activeKey !== null && navigableRows(group).some((thread) => rowKey(thread) === activeKey),
-        activeKey,
-        toggle: projectToggles.get(projectKeyOf(group)),
-      }),
-    [activeKey, projectToggles],
+      isDisclosureOpen(
+        disclosure,
+        projectDisclosureKey(group),
+        activeKey !== null && navigableRows(group).some((thread) => rowKey(thread) === activeKey),
+      ),
+    [activeKey, disclosure],
   );
   const setProjectsOpen = useCallback(
     (groups: readonly ProjectGroup[], open: boolean) =>
-      setProjectToggles((current) =>
-        withDisclosureToggles(current, groups.map(projectKeyOf), open, activeKey),
+      setDisclosureState((current) =>
+        setDisclosure(current, groups.map(projectDisclosureKey), open),
       ),
-    [activeKey],
+    [],
   );
-  // Masters start open; collapsing one hides its Cards until toggled back or
-  // until the user navigates to one of them.
+  // Masters start open; collapsing one hides its Cards until the user opens
+  // it again or navigates to one of them.
   const isMasterOpen = useCallback(
-    (board: MasterShelfBoard<ThreadRow>) =>
-      isDisclosureOpen({
-        holdsActive: board.cards.some((card) => rowKey(card) === activeKey),
-        activeKey,
-        toggle: masterToggles.get(rowKey(board.master)),
-        defaultOpen: true,
-      }),
-    [activeKey, masterToggles],
+    (board: { master: ThreadRow }) =>
+      isDisclosureOpen(disclosure, masterDisclosureKey(board.master), true),
+    [disclosure],
   );
   const toggleMaster = useCallback(
-    (board: MasterShelfBoard<ThreadRow>) =>
-      setMasterToggles((current) =>
-        withDisclosureToggles(current, [rowKey(board.master)], !isMasterOpen(board), activeKey),
+    (board: { master: ThreadRow }) =>
+      setDisclosureState((current) =>
+        setDisclosure(current, [masterDisclosureKey(board.master)], !isMasterOpen(board)),
       ),
-    [activeKey, isMasterOpen],
+    [isMasterOpen],
   );
   // A project group's rows as rendered: structural headings are not rows, and
   // a collapsed Master hides its Cards.
@@ -595,9 +613,7 @@ function MasterWorkspaceSidebar() {
     if (searchQuery.trim()) return searchResults;
     const rows: ThreadRow[] = pinnedEntries.flatMap((entry) => [
       entry.thread,
-      ...(isMasterOpen({ master: entry.thread, cards: entry.cards, structural: false })
-        ? entry.cards
-        : []),
+      ...(isMasterOpen({ master: entry.thread }) ? entry.cards : []),
     ]);
     for (const group of workspace.activeProjects) {
       if (projectOf(group) && isProjectOpen(group)) rows.push(...visibleRows(group));
@@ -997,6 +1013,8 @@ function MasterWorkspaceSidebar() {
                           }
                           label={presentation.title}
                           detail={projectWorkSummary(group)}
+                          // Collapsed over the active thread: the header carries its highlight.
+                          active={!open && holdsActive(navigableRows(group))}
                           toggle={{
                             expanded: open,
                             onToggle: () => setProjectsOpen([group], !open),
