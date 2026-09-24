@@ -129,13 +129,13 @@ describe("ThreadPullRequestBadgeControl", () => {
   });
 
   it.each([
-    ["an InlineButton", <InlineButton />],
-    ["a ComposerControl", <ComposerControl size="xs" />],
+    ["an InlineButton", () => <InlineButton />],
+    ["a ComposerControl", () => <ComposerControl size="xs" />],
   ])(
     "keeps the state tone on the icon and number inside %s, whatever its hover colour",
     (_, control) => {
       const tone = merged!.colorClass;
-      const { html, link } = renderBadge(control);
+      const { html, link } = renderBadge(control());
       // The glyph and number sit in a wrapper that carries the tone and no hover or focus
       // colour, so the control's own hover:text-* can never repaint them.
       const wrapper = html.match(/<span class="([^"]*)"><svg/)?.[1] ?? "";
