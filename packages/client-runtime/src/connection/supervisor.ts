@@ -34,6 +34,8 @@ const CONNECTION_ESTABLISHMENT_TIMEOUT = "15 seconds";
 const CONNECTION_PROBE_TIMEOUT = "15 seconds";
 const MOBILE_CONNECTION_PROBE_TIMEOUT = "3 seconds";
 const BACKOFF_RESET_AFTER_MS = 30_000;
+/** How long a request waits for a reconnect before it fails as unavailable. */
+export const REQUEST_RECONNECT_WAIT_TIMEOUT = "30 seconds";
 
 interface SupervisorIntent {
   readonly desired: boolean;
@@ -162,6 +164,20 @@ function failureFromExit<A>(
   if (Exit.isSuccess(exit)) {
     return { _tag: "Interrupted", established, stable, resetRetry: false };
   }
+  if (Cause.hasInterruptsOnly(exit.cause)) {
+    return {
+      _tag: "Failure",
+      established,
+      stable,
+      failure: {
+        error: new ConnectionTransientError({
+          reason: "transport",
+          detail: `${target.label} interrupted the connection check.`,
+        }),
+        attemptSpan: Option.none(),
+      },
+    };
+  }
   const typedFailure = exit.cause.reasons.find(Cause.isFailReason);
   if (typedFailure) {
     return {
@@ -244,9 +260,13 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     { discard: true },
   );
 
+  // Once disposed, the state stays settled so callers waiting for a session
+  // fail instead of waiting on a supervisor that will never publish one.
+  const disposed = yield* Ref.make(false);
   const setState = Effect.fn("EnvironmentSupervisor.setState")(function* (
     next: SupervisorConnectionState,
   ) {
+    if (yield* Ref.get(disposed)) return;
     yield* SubscriptionRef.set(state, next);
   });
 
@@ -776,7 +796,14 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     Effect.withSpan("EnvironmentSupervisor.retryNow"),
   );
 
-  yield* Effect.addFinalizer(() => Queue.shutdown(signals).pipe(Effect.andThen(clearLease)));
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      yield* Ref.set(disposed, true);
+      yield* Queue.shutdown(signals);
+      yield* clearLease;
+      yield* SubscriptionRef.set(state, availableState(yield* Ref.get(intent), 0));
+    }),
+  );
 
   return EnvironmentSupervisor.of({
     target,
