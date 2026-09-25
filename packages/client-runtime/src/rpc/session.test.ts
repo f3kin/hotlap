@@ -33,8 +33,13 @@ import {
   RelayConnectionTarget,
   type PreparedConnection,
 } from "../connection/model.ts";
+import * as Connectivity from "../connection/connectivity.ts";
+import * as ConnectionDriver from "../connection/driver.ts";
+import * as ConnectionResolver from "../connection/resolver.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import * as ConnectionWakeups from "../connection/wakeups.ts";
 import * as Persistence from "../platform/persistence.ts";
+import * as EnvironmentRpc from "./client.ts";
 import * as RpcSession from "./session.ts";
 import { makeEnvironmentServerConfigState } from "../state/server.ts";
 import { applyServerConfigProjection } from "../state/serverConfigProjection.ts";
@@ -58,6 +63,7 @@ class TestWebSocket {
   readyState = TestWebSocket.CONNECTING;
   readonly sent: string[] = [];
   readonly url: string;
+  onSend: ((data: string) => void) | undefined;
   private readonly listeners = new Map<SocketEventType, Set<SocketListener>>();
 
   constructor(url: string) {
@@ -76,6 +82,14 @@ class TestWebSocket {
 
   send(data: string) {
     this.sent.push(data);
+    this.onSend?.(data);
+  }
+
+  /** A refused or dropped handshake: the browser reports an error, then a close. */
+  refuse() {
+    this.readyState = TestWebSocket.CLOSED;
+    this.emit("error", { type: "error" });
+    this.emit("close", { code: 1006, reason: "", type: "close" });
   }
 
   close(code = 1000, reason = "") {
@@ -1224,4 +1238,194 @@ describe("RpcSessionFactory", () => {
       }).pipe(Effect.provide(TestClock.layer())),
     );
   }
+});
+
+type FakeServerMode = "up" | "stalled" | "down";
+
+/**
+ * A fake T3 server behind the test websocket. "stalled" models a busy main
+ * thread: frames are accepted but nothing is answered until it recovers.
+ * "down" drops every open socket and refuses new handshakes.
+ */
+const makeFakeServer = () => {
+  const sockets: TestWebSocket[] = [];
+  const deferredReplies: Array<() => void> = [];
+  const received: Array<{ readonly tag: string; readonly socket: number }> = [];
+  let mode: FakeServerMode = "up";
+
+  const reply = (socket: TestWebSocket, message: unknown) => {
+    const deliver = () => {
+      if (socket.readyState === TestWebSocket.OPEN) {
+        socket.serverMessage(encodeJson(message));
+      }
+    };
+    if (mode === "stalled") {
+      deferredReplies.push(deliver);
+    } else {
+      queueMicrotask(deliver);
+    }
+  };
+
+  const handle = (socket: TestWebSocket, data: string) => {
+    const message = decodeJson(data);
+    if (isPing(message)) {
+      reply(socket, { _tag: "Pong" });
+      return;
+    }
+    if (!isRpcRequest(message)) {
+      return;
+    }
+    received.push({ tag: message.tag, socket: sockets.indexOf(socket) });
+    if (message.tag === WS_METHODS.subscribeServerConfig) {
+      reply(socket, {
+        _tag: "Chunk",
+        requestId: message.id,
+        values: [{ version: 1, type: "snapshot", config: ENCODED_SERVER_CONFIG }],
+      });
+      return;
+    }
+    reply(socket, { _tag: "Exit", requestId: message.id, exit: { _tag: "Success", value: {} } });
+  };
+
+  const constructorLayer = Layer.succeed(Socket.WebSocketConstructor, (url) => {
+    const socket = new TestWebSocket(url);
+    socket.onSend = (data) => handle(socket, data);
+    sockets.push(socket);
+    queueMicrotask(() => (mode === "down" ? socket.refuse() : socket.open()));
+    return socket as unknown as globalThis.WebSocket;
+  });
+
+  return {
+    sockets,
+    received,
+    constructorLayer,
+    setMode: (next: FakeServerMode) => {
+      mode = next;
+      if (next === "down") {
+        deferredReplies.length = 0;
+        for (const socket of sockets) {
+          if (socket.readyState === TestWebSocket.OPEN) socket.close(1006);
+        }
+      }
+      if (next === "up") {
+        for (const deliver of deferredReplies.splice(0)) queueMicrotask(deliver);
+      }
+    },
+  };
+};
+
+// Each fake-clock step yields to the real event loop so socket events land,
+// which costs wall time under a loaded runner.
+const FAKE_SERVER_TEST_TIMEOUT_MS = 60_000;
+
+const settle = Effect.fn("FakeServer.settle")(function* () {
+  for (let i = 0; i < 20; i += 1) {
+    yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+    yield* Effect.yieldNow;
+  }
+});
+
+const advance = Effect.fn("FakeServer.advance")(function* (totalMs: number, stepMs = 250) {
+  for (let elapsed = 0; elapsed < totalMs; elapsed += stepMs) {
+    yield* TestClock.adjust(`${stepMs} millis`);
+    yield* settle();
+  }
+});
+
+const makeSupervisedConnection = Effect.fn("FakeServer.makeSupervisedConnection")(function* (
+  server: ReturnType<typeof makeFakeServer>,
+) {
+  const resolver = ConnectionResolver.ConnectionResolver.of({
+    prepare: () => Effect.succeed(PREPARED),
+  });
+  const dependencies = Layer.mergeAll(
+    ConnectionDriver.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.succeed(ConnectionResolver.ConnectionResolver, resolver),
+          RpcSession.layerWithOptions({}).pipe(Layer.provide(server.constructorLayer)),
+        ),
+      ),
+    ),
+    Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
+    ConnectionWakeups.layer({ changes: Stream.never }),
+  );
+  const supervisor = yield* EnvironmentSupervisor.make(
+    { target: TARGET, profile: Option.none(), enabled: true },
+    { initiallyDesired: true },
+  ).pipe(Effect.provide(dependencies));
+  const phases: string[] = [];
+  yield* SubscriptionRef.changes(supervisor.state).pipe(
+    Stream.runForEach((state) => Effect.sync(() => phases.push(state.phase))),
+    Effect.forkScoped,
+  );
+  yield* settle();
+  expect(phases.at(-1)).toBe("connected");
+  return { supervisor, phases };
+});
+
+describe("supervised session against a stalling server", () => {
+  it.effect(
+    "stays connected while the server stalls ping replies for 5 seconds",
+    () =>
+      Effect.gen(function* () {
+        const server = makeFakeServer();
+        const { phases } = yield* makeSupervisedConnection(server);
+        const phasesBeforeStall = phases.length;
+
+        server.setMode("stalled");
+        yield* advance(5_000);
+        server.setMode("up");
+        yield* advance(15_000);
+
+        expect(phases.slice(phasesBeforeStall)).toEqual([]);
+        expect(server.sockets).toHaveLength(1);
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+    FAKE_SERVER_TEST_TIMEOUT_MS,
+  );
+
+  it.effect(
+    "recovers without user action after the server is down for 30 seconds",
+    () =>
+      Effect.gen(function* () {
+        const server = makeFakeServer();
+        const { phases } = yield* makeSupervisedConnection(server);
+
+        server.setMode("down");
+        yield* advance(30_000);
+        expect(phases).toContain("backoff");
+        expect(phases.at(-1)).not.toBe("connected");
+
+        server.setMode("up");
+        yield* advance(30_000);
+        expect(phases.at(-1)).toBe("connected");
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+    FAKE_SERVER_TEST_TIMEOUT_MS,
+  );
+
+  it.effect(
+    "delivers a request issued during the outage exactly once after recovery",
+    () =>
+      Effect.gen(function* () {
+        const server = makeFakeServer();
+        const { supervisor } = yield* makeSupervisedConnection(server);
+
+        server.setMode("down");
+        yield* advance(10_000);
+        const requestFiber = yield* EnvironmentRpc.request(WS_METHODS.serverProbe, {}).pipe(
+          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+          Effect.forkScoped,
+        );
+        yield* advance(20_000);
+        server.setMode("up");
+        yield* advance(30_000);
+
+        const exit = yield* Fiber.await(requestFiber);
+        expect(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : null).toBeNull();
+        expect(
+          server.received.filter((entry) => entry.tag === WS_METHODS.serverProbe),
+        ).toHaveLength(1);
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+    FAKE_SERVER_TEST_TIMEOUT_MS,
+  );
 });
