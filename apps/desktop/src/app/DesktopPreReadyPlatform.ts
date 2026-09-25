@@ -58,6 +58,14 @@ export const make = Effect.gen(function* () {
         : null;
     const linux = platform === "linux" ? resolveEarlyLinuxElectronOptionsFromProcess() : null;
 
+    // Locally built macOS apps carry no Developer ID team, so the Keychain
+    // re-prompts for "Safe Storage" on every launch and helper process and
+    // "Always Allow" never sticks. Builders opt out with T3CODE_MOCK_KEYCHAIN=1
+    // (set in the bundle's LSEnvironment); release builds are unaffected.
+    if (platform === "darwin" && process.env.T3CODE_MOCK_KEYCHAIN === "1") {
+      Electron.app.commandLine.appendSwitch("use-mock-keychain");
+    }
+
     if (linux !== null) {
       // The portal also requires a valid desktop entry. An AppImage update may
       // have removed the executable referenced by the previous launch's entry.
