@@ -12,6 +12,7 @@ import {
   reorderProjects,
   resolveProjectExpanded,
   setDefaultAdvertisedEndpointKey,
+  setMasterWorkspaceExpanded,
   setProjectExpanded,
   setSidebarProjectScopeKey,
   setThreadChangedFilesExpanded,
@@ -21,6 +22,7 @@ import {
 function makeUiState(overrides: Partial<UiState> = {}): UiState {
   return {
     projectExpandedById: {},
+    masterWorkspaceExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKey: null,
     threadLastVisitedAtById: {},
@@ -196,6 +198,7 @@ describe("parsePersistedState", () => {
       projectExpandedById: {
         logical: false,
       },
+      masterWorkspaceExpandedById: {},
       projectOrder: ["physical-b", "physical-a"],
       threadLastVisitedAtById: {
         "environment:thread-1": "2026-02-25T12:35:00.000Z",
@@ -291,6 +294,24 @@ describe("uiStateStore persistence", () => {
     vi.unstubAllGlobals();
   });
 
+  it("round-trips the Master workspace's collapse state through a reload", () => {
+    let state = makeUiState();
+    state = setProjectExpanded(state, ["env-a:/tmp/orchard"], false);
+    state = setMasterWorkspaceExpanded(state, ["master:env-a:greenhouse"], false);
+    state = setMasterWorkspaceExpanded(state, ["shelf:settled"], true);
+
+    persistState(state);
+    const reloaded = parsePersistedState(
+      JSON.parse(localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}") as PersistedUiState,
+    );
+
+    expect(reloaded.projectExpandedById).toEqual({ "env-a:/tmp/orchard": false });
+    expect(reloaded.masterWorkspaceExpandedById).toEqual({
+      "master:env-a:greenhouse": false,
+      "shelf:settled": true,
+    });
+  });
+
   it("persists raw UI preferences including thread visit markers", () => {
     const state = makeUiState({
       projectExpandedById: {
@@ -318,6 +339,7 @@ describe("uiStateStore persistence", () => {
       projectExpandedById: {
         logical: false,
       },
+      masterWorkspaceExpandedById: {},
       projectOrder: ["physical-b", "physical-a"],
       threadLastVisitedAtById: {
         "environment:thread-1": "2026-02-25T12:35:00.000Z",

@@ -96,6 +96,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { previewEnvironment } from "../state/preview";
 import {
   legacyProjectCwdPreferenceKey,
+  projectExpansionPreferenceKeys,
   resolveProjectExpanded,
   useUiStateStore,
 } from "../uiStateStore";
@@ -259,14 +260,6 @@ function formatProjectMemberActionLabel(
   return member.environmentLabel
     ? `${member.environmentLabel} — ${member.workspaceRoot}`
     : member.workspaceRoot;
-}
-
-function projectExpansionPreferenceKeys(project: SidebarProjectSnapshot): string[] {
-  return [
-    project.projectKey,
-    ...project.memberProjects.map((member) => member.physicalProjectKey),
-    ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
-  ];
 }
 
 function projectGroupingModeDescription(mode: SidebarProjectGroupingMode): string {

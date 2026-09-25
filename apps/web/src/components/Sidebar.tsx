@@ -70,6 +70,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -191,6 +192,8 @@ import {
   type SidebarListItem,
   type SidebarListMarker,
   type SidebarSection,
+  mostUrgentAttentionStatus,
+  type SidebarAttentionStatus,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
@@ -315,6 +318,65 @@ const SIDEBAR_STATUS_ICONS = {
   monitoring: EyeIcon,
   done: CircleCheckIcon,
 } as const;
+
+// The statuses that need the user, as every row renders them: the card's
+// status label, the slim row's glyph and a collapsed group's roll-up.
+const SIDEBAR_ATTENTION_PRESENTATION = {
+  approval: {
+    label: "Approval",
+    icon: "approval",
+    className: "text-amber-700 dark:text-amber-300",
+  },
+  input: {
+    label: "Input",
+    icon: "input",
+    className: "text-indigo-600 dark:text-indigo-300",
+  },
+  failed: {
+    label: "Failed",
+    icon: "failed",
+    className: "text-red-700 dark:text-red-300",
+  },
+} as const satisfies Record<
+  SidebarAttentionStatus,
+  { label: string; icon: keyof typeof SIDEBAR_STATUS_ICONS; className: string }
+>;
+
+// A status as an icon only, labelled for assistive tech: the slim row's
+// status and a collapsed group's attention roll-up.
+function SidebarStatusGlyph(props: {
+  label: string;
+  icon: keyof typeof SIDEBAR_STATUS_ICONS;
+  className: string;
+  testId?: string;
+}) {
+  const Icon = SIDEBAR_STATUS_ICONS[props.icon];
+  return (
+    <span
+      role="img"
+      aria-label={props.label}
+      data-testid={props.testId}
+      className={cn("inline-flex shrink-0 items-center justify-center", props.className)}
+    >
+      <Icon aria-hidden className="size-3" />
+    </span>
+  );
+}
+
+/**
+ * What a collapsed group shows when something it hides needs the user: the
+ * most urgent status's glyph, exactly as the rows render it.
+ */
+export function SidebarAttentionRollup(props: { status: SidebarAttentionStatus }) {
+  const presentation = SIDEBAR_ATTENTION_PRESENTATION[props.status];
+  return (
+    <SidebarStatusGlyph
+      label={`${presentation.label} inside`}
+      icon={presentation.icon}
+      className={presentation.className}
+    />
+  );
+}
 
 export const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, ProviderInstanceEntry> = new Map();
 // Collapsed shelves share one empty list so a route change alone does not
@@ -661,13 +723,51 @@ function SidebarDragBoundary(props: {
   );
 }
 
+// A parent row's disclosure, sized to the leading icon slot so a Master row
+// and a structural Master heading put their chevron where rows show a project
+// icon. The chevron turns the way the section header's does.
+export function SidebarDisclosureButton(props: {
+  expanded: boolean;
+  onToggle: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-expanded={props.expanded}
+      aria-label={props.label}
+      onClick={(event) => {
+        event.stopPropagation();
+        props.onToggle();
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+      className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-sm text-muted-foreground/65 outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <SidebarDisclosureChevron expanded={props.expanded} />
+    </button>
+  );
+}
+
+// The one disclosure chevron: section headers and parent rows both turn it.
+function SidebarDisclosureChevron(props: { expanded: boolean }) {
+  return (
+    <ChevronDownIcon
+      aria-hidden
+      className={cn("size-3 shrink-0 transition-transform", props.expanded && "rotate-180")}
+    />
+  );
+}
+
 // Shelf headers stay visible and keep their measured height while dragging.
 // Without a marker the header sits outside the sortable thread list (the
 // Master workspace's sections and project groups): a plain list item that may
 // carry a leading icon and a muted count, and is static when it has no toggle.
+// Only section headers carry the trailing rule: a sub-level header (a group
+// inside a section) reads lighter and ruleless, and an icon header is already
+// anchored by its icon.
 export function SidebarSectionHeader(props: {
   marker?: "snoozed-header" | "settled-header";
-  tone?: "snoozed";
+  level?: "section" | "sub";
   label: string;
   icon?: ReactNode;
   detail?: string;
@@ -676,38 +776,63 @@ export function SidebarSectionHeader(props: {
   // accent while the lifted row is over it.
   dragging?: boolean;
   isDropTarget?: boolean;
+  // A collapsed group holding the active thread takes the active row's surface.
+  active?: boolean;
+  // A collapsed group's attention roll-up, beside its chevron.
+  status?: ReactNode;
   toggle?: { expanded: boolean; onToggle: () => void };
 }) {
-  const snoozed = props.marker === "snoozed-header" || props.tone === "snoozed";
+  const snoozed = props.marker === "snoozed-header";
+  const sub = props.level === "sub";
+  const ruled = !sub && !props.icon;
   const className = cn(
-    "flex h-full w-full items-center gap-2 px-2 text-left text-xs font-medium",
+    // An icon header spaces its icon like a slim row, so its label shares the
+    // row titles' left edge.
+    "flex h-full w-full items-center px-2 text-left text-xs",
+    props.icon ? "gap-2.5" : "gap-2",
+    sub ? "font-normal" : "font-medium",
     snoozed ? "text-blue-600 dark:text-blue-400" : "text-sidebar-muted-foreground/60",
     props.dragging && "text-sidebar-foreground/80",
     props.isDropTarget && "text-primary",
+    props.active && "rounded-md bg-sidebar-row-active",
   );
   const content = (
     <>
       {props.icon}
-      <span className={props.marker ? "shrink-0" : "min-w-0 truncate"}>{props.label}</span>
-      {props.detail ? <span className="shrink-0 font-normal">{props.detail}</span> : null}
+      {/* On the active surface only the label takes the row's foreground; the
+        detail stays muted. */}
       <span
-        aria-hidden
         className={cn(
-          "h-px min-w-2 flex-1",
-          snoozed ? "bg-blue-500/20 dark:bg-blue-400/15" : "bg-sidebar-border/60",
-          props.dragging && "bg-sidebar-foreground/25",
-          props.isDropTarget && "bg-primary/50",
+          props.marker ? "shrink-0" : "min-w-0 truncate",
+          props.active && "text-sidebar-foreground",
         )}
-      />
-      {props.toggle ? (
-        <ChevronDownIcon
+      >
+        {props.label}
+      </span>
+      {/* A ruleless header's detail takes the free space and truncates first,
+        so the label (a project name) keeps its full width. */}
+      {props.detail ? (
+        <span className={cn("font-normal", ruled ? "shrink-0" : "min-w-0 flex-1 truncate")}>
+          {props.detail}
+        </span>
+      ) : null}
+      {!ruled ? (
+        props.detail ? null : (
+          <span aria-hidden className="min-w-2 flex-1" />
+        )
+      ) : (
+        <span
           aria-hidden
           className={cn(
-            "size-3 shrink-0 transition-transform",
-            props.toggle.expanded && "rotate-180",
+            "h-px min-w-2 flex-1",
+            snoozed ? "bg-blue-500/20 dark:bg-blue-400/15" : "bg-sidebar-border/60",
+            props.dragging && "bg-sidebar-foreground/25",
+            props.isDropTarget && "bg-primary/50",
           )}
         />
-      ) : null}
+      )}
+      {props.status}
+      {props.toggle ? <SidebarDisclosureChevron expanded={props.toggle.expanded} /> : null}
     </>
   );
   const header = props.toggle ? (
@@ -1069,9 +1194,20 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   showStatusIcon?: boolean;
   /**
    * Slim rows only. Drops the leading project icon where a surrounding
-   * project header already names the project.
+   * project header already names the project; the slot stays, so titles keep
+   * one left edge with the rows that show an icon.
    */
   hideProjectIcon?: boolean;
+  /**
+   * Slim rows only. A parent row's disclosure (a Master over its Cards): the
+   * section header's chevron, in the row's leading slot.
+   */
+  toggle?: { expanded: boolean; onToggle: () => void; label: string } | undefined;
+  /**
+   * Slim rows only. The most urgent status among rows this one hides (a
+   * collapsed Master's Cards), rolled up into its status slot.
+   */
+  hiddenAttention?: SidebarAttentionStatus | null | undefined;
   /**
    * Slim rows only. Replaces the lifecycle button in the trailing slot with
    * a button that opens the row's context menu: on hover, or always on touch.
@@ -1204,43 +1340,27 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             icon: "monitoring" as const,
             className: "text-foreground dark:text-white",
           }
-        : status === "approval"
-          ? {
-              label: "Approval",
-              icon: "approval" as const,
-              className: "text-amber-700 dark:text-amber-300",
-            }
-          : status === "input"
+        : status === "approval" || status === "input" || status === "failed"
+          ? SIDEBAR_ATTENTION_PRESENTATION[status]
+          : isWoke
             ? {
-                label: "Input",
-                icon: "input" as const,
-                className: "text-indigo-600 dark:text-indigo-300",
+                label: "Woke",
+                icon: "woke" as const,
+                className: "text-amber-700 dark:text-amber-300",
               }
-            : status === "failed"
+            : hasUnsentDraft
               ? {
-                  label: "Failed",
-                  icon: "failed" as const,
-                  className: "text-red-700 dark:text-red-300",
+                  label: "Draft",
+                  icon: null,
+                  className: "text-amber-700 dark:text-amber-300",
                 }
-              : isWoke
+              : isUnread
                 ? {
-                    label: "Woke",
-                    icon: "woke" as const,
-                    className: "text-amber-700 dark:text-amber-300",
+                    label: "Done",
+                    icon: "done" as const,
+                    className: "text-emerald-700 dark:text-emerald-300",
                   }
-                : hasUnsentDraft
-                  ? {
-                      label: "Draft",
-                      icon: null,
-                      className: "text-amber-700 dark:text-amber-300",
-                    }
-                  : isUnread
-                    ? {
-                        label: "Done",
-                        icon: "done" as const,
-                        className: "text-emerald-700 dark:text-emerald-300",
-                      }
-                    : null;
+                : null;
   const isWokeStatus = topStatus?.icon === "woke";
   const StatusIcon =
     topStatus?.icon != null && topStatus.icon !== "woke"
@@ -1523,6 +1643,22 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       </span>
     ) : null;
 
+  // The Master workspace lists live threads as slim rows (showStatusIcon), so
+  // those take the card's title treatment (weight and colour ladder, without
+  // the card's recede) and let the timestamp recede. Its settled and snoozed
+  // rows keep the quiet slim treatment.
+  const liveSlimRow = variant === "slim" && props.showStatusIcon && variantAction === "settle";
+  // A row with a disclosure names itself by its title alone, not by the
+  // chevron's label and every badge after it.
+  const titleId = useId();
+  const cardTitleRecedes = variant === "card" && shouldRecede;
+  const cardTitleColorClassName = cardTitleRecedes
+    ? "text-secondary-label"
+    : isUnread || isWoke || status === "input"
+      ? "text-foreground"
+      : status === "failed"
+        ? "text-foreground/95"
+        : "text-foreground/90";
   const title = isRenaming ? (
     <input
       autoFocus
@@ -1538,20 +1674,12 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     />
   ) : (
     <span
+      id={props.toggle ? titleId : undefined}
       className={cn(
         "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
-        shouldRecede ? "font-normal" : "font-medium",
-        variant === "card"
-          ? cn(
-              "truncate",
-              shouldRecede
-                ? "text-secondary-label"
-                : isUnread || isWoke || status === "input"
-                  ? "text-foreground"
-                  : status === "failed"
-                    ? "text-foreground/95"
-                    : "text-foreground/90",
-            )
+        liveSlimRow ? "font-medium" : shouldRecede ? "font-normal" : "font-medium",
+        variant === "card" || liveSlimRow
+          ? cn("truncate", cardTitleColorClassName)
           : cn(
               "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
               shouldRecede
@@ -1597,20 +1725,32 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       data-testid={`sidebar-terminal-status-${thread.id}`}
       className={cn("inline-flex shrink-0 items-center justify-center", terminalStatus.colorClass)}
     >
-      <TerminalIcon className={cn("size-3.5", terminalStatus.pulse && "animate-status-pulse")} />
+      {/* Beside the status glyph, it matches the PR and pin icons' size-3. */}
+      <TerminalIcon
+        className={cn(
+          props.showStatusIcon ? "size-3" : "size-3.5",
+          terminalStatus.pulse && "animate-status-pulse",
+        )}
+      />
     </span>
   ) : null;
-  const slimStatusIcon =
-    props.showStatusIcon && topStatus && StatusIcon ? (
-      <span
-        role="img"
-        aria-label={topStatus.label}
-        data-testid={`sidebar-status-${thread.id}`}
-        className={cn("inline-flex shrink-0 items-center justify-center", topStatus.className)}
-      >
-        <StatusIcon aria-hidden className="size-3.5" />
-      </span>
-    ) : null;
+  // A collapsed parent row (a Master over hidden Cards) rolls up what its
+  // hidden rows need when that outranks its own status.
+  const rolledUpAttention =
+    props.hiddenAttention != null &&
+    mostUrgentAttentionStatus([props.hiddenAttention, status]) !== status
+      ? props.hiddenAttention
+      : null;
+  const slimStatusIcon = !props.showStatusIcon ? null : rolledUpAttention ? (
+    <SidebarAttentionRollup status={rolledUpAttention} />
+  ) : topStatus && StatusIcon && topStatus.icon !== null && topStatus.icon !== "woke" ? (
+    <SidebarStatusGlyph
+      label={topStatus.label}
+      icon={topStatus.icon}
+      className={topStatus.className}
+      testId={`sidebar-status-${thread.id}`}
+    />
+  ) : null;
   // Same pen the new-thread draft rows lead with, so both kinds of unsent
   // work read the same way in the list.
   const draftIndicator =
@@ -1659,6 +1799,22 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     )
   ) : null;
 
+  // Settled history recedes: dimmed favicon at rest, restored on hover so the
+  // tail stays scannable when you're hunting. Live Master rows keep the icon at
+  // full strength, like card rows.
+  const projectIcon = (
+    <span
+      className={cn(
+        "shrink-0 transition-opacity",
+        !liveSlimRow &&
+          (!props.isActive || variantAction === "unsettle") &&
+          "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
+      )}
+    >
+      {props.project ? <ProjectFavicon project={props.project} className="size-4" /> : null}
+    </span>
+  );
+
   if (variant === "slim") {
     const slimRowActionClassName =
       "pointer-events-none absolute inset-y-0 right-0 inline-flex cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-xs text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/sidebar-row:pointer-events-auto group-hover/sidebar-row:opacity-100";
@@ -1681,6 +1837,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 role="button"
                 tabIndex={0}
                 data-testid="sidebar-row-slim"
+                aria-labelledby={props.toggle && !isRenaming ? titleId : undefined}
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
@@ -1690,20 +1847,37 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               />
             }
           >
-            {/* Settled history recedes: dimmed favicon at rest, restored on
-              hover so the tail stays scannable when you're hunting. */}
-            {props.hideProjectIcon ? null : (
-              <span
-                className={cn(
-                  "shrink-0 transition-opacity",
-                  (!props.isActive || variantAction === "unsettle") &&
-                    "opacity-40 grayscale group-focus-within/sidebar-row:opacity-100 group-focus-within/sidebar-row:grayscale-0 group-hover/sidebar-row:opacity-100 group-hover/sidebar-row:grayscale-0",
-                )}
-              >
-                {props.project ? (
-                  <ProjectFavicon project={props.project} className="size-4" />
-                ) : null}
+            {props.toggle && !props.hideProjectIcon ? (
+              // A parent row that shows its project icon keeps it at rest and
+              // swaps in the chevron on hover or focus; collapsed, the chevron
+              // stays so the state is visible.
+              <span className="relative flex size-4 shrink-0 items-center justify-center">
+                <span
+                  className={cn(
+                    "flex transition-opacity",
+                    props.toggle.expanded
+                      ? "group-focus-within/sidebar-row:opacity-0 group-hover/sidebar-row:opacity-0"
+                      : "opacity-0",
+                  )}
+                >
+                  {projectIcon}
+                </span>
+                <span
+                  className={cn(
+                    "absolute inset-0 flex items-center justify-center transition-opacity",
+                    props.toggle.expanded &&
+                      "opacity-0 group-focus-within/sidebar-row:opacity-100 group-hover/sidebar-row:opacity-100",
+                  )}
+                >
+                  <SidebarDisclosureButton {...props.toggle} />
+                </span>
               </span>
+            ) : props.toggle ? (
+              <SidebarDisclosureButton {...props.toggle} />
+            ) : props.hideProjectIcon ? (
+              <span aria-hidden className="size-4 shrink-0" />
+            ) : (
+              projectIcon
             )}
             {draftIndicator}
             {title}

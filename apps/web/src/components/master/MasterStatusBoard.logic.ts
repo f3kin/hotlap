@@ -1,3 +1,11 @@
+import {
+  mostUrgentAttentionStatus,
+  type SidebarAttentionStatus,
+  type SidebarThreadStatus,
+} from "../Sidebar.logic";
+import { derivePhysicalProjectKeyFromPath } from "../../logicalProject";
+import { projectExpansionPreferenceKeys, resolveProjectExpanded } from "../../uiStateStore";
+
 export interface MasterBoardThread {
   readonly id: string;
   readonly environmentId: string;
@@ -51,6 +59,13 @@ export interface MasterWorkspaceModel<T extends MasterBoardThread> {
   readonly activeProjects: readonly MasterWorkspaceProject<T>[];
   readonly snoozedProjects: readonly MasterWorkspaceProject<T>[];
   readonly settledProjects: readonly MasterWorkspaceProject<T>[];
+  /**
+   * The Settled shelf as one flat list, newest first, the way the default
+   * sidebar's Settled shelf lists its rows: every settled thread plus each
+   * archived Master that still heads live Cards (those Cards stay on their
+   * shelf under the Master's heading).
+   */
+  readonly settled: readonly T[];
 }
 
 const MASTER_TITLE = /^master\s*:/i;
@@ -220,13 +235,322 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
   };
 
   const activeProjects = build("active");
+  const snoozedProjects = build("snoozed");
+  const settledProjects = build("settled");
   for (const cards of pinnedCards.values()) cards.sort(newestFirst);
+  const archivedMasters = new Map<string, T>();
+  for (const group of [...activeProjects, ...snoozedProjects, ...settledProjects]) {
+    for (const board of group.masters) {
+      if (board.master.archivedAt != null) {
+        archivedMasters.set(threadKey(board.master), board.master);
+      }
+    }
+  }
   return {
     pinned,
     activeProjects,
-    snoozedProjects: build("snoozed"),
-    settledProjects: build("settled"),
+    snoozedProjects,
+    settledProjects,
+    settled: [...settledProjects.flatMap(navigableRows), ...archivedMasters.values()].sort(
+      newestFirst,
+    ),
   };
+}
+
+/**
+ * Which collapsible groups are open: projects, the Snoozed and Settled
+ * shelves, and each Master's Cards. Disclosure is a pure lookup of explicit
+ * records with one default that ignores navigation: projects and Masters
+ * start open, the quiet Snoozed and Settled shelves start collapsed. Nothing derives openness from the
+ * active thread at render time. Only two things write records:
+ * - the user's toggles (one group, or every project at once), and
+ * - navigation (initial load, search, deep link, a row click), which writes
+ *   "open" for the groups holding the landing thread.
+ * So clicking a row already on screen writes "open" to groups that are
+ * already open and changes nothing, and a collapse stays until the user
+ * reopens the group or navigation lands inside it.
+ */
+export type Disclosure = ReadonlyMap<string, boolean>;
+
+export const disclosureKey = {
+  project: (group: { environmentId: string; projectId: string }) =>
+    `project:${group.environmentId}:${group.projectId}`,
+  master: (masterKey: string) => `master:${masterKey}`,
+  shelf: (shelf: "snoozed" | "settled") => `shelf:${shelf}`,
+};
+
+export function isDisclosureOpen(disclosure: Disclosure, key: string): boolean {
+  return disclosure.get(key) ?? !key.startsWith("shelf:");
+}
+
+/**
+ * Disclosure as the UI store persists it across reloads. A project lives in
+ * `projectExpandedById` under the legacy sidebar's preference keys
+ * (`projectExpansionPreferenceKeys`, read with `resolveProjectExpanded`); a
+ * Master's Cards and the shelves live under their disclosure key in
+ * `masterWorkspaceExpandedById`.
+ */
+export interface PersistedDisclosure {
+  readonly projectExpandedById: Readonly<Record<string, boolean>>;
+  readonly masterWorkspaceExpandedById: Readonly<Record<string, boolean>>;
+}
+
+interface PreferenceGroup {
+  readonly projectKey: string;
+  readonly memberProjects: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly id: string;
+    readonly physicalProjectKey: string;
+    readonly workspaceRoot: string;
+  }>;
+}
+
+/**
+ * The store keys each Master project header reads and writes, keyed by its
+ * disclosure key, built from the sidebar's own project groups
+ * (`buildSidebarProjectSnapshots`). The Master sidebar draws one header per
+ * physical project; the legacy sidebar draws one per repository group.
+ * - A single-member group is the same header in both sidebars, so it uses
+ *   exactly the legacy keys in the legacy order,
+ *   `projectExpansionPreferenceKeys(group)`, group key first.
+ * - A member of a multi-member group uses only its own physical and cwd
+ *   keys, with no group-key fallback, so its siblings stay independent and a
+ *   member joining or leaving the group never inherits or loses a choice
+ *   through the shared key. (The legacy sidebar writes every member's own
+ *   keys whenever it toggles a group, so a fallback would only ever serve
+ *   group-only state.)
+ * - A project in no group uses its own keys.
+ */
+export function masterProjectStoreKeys(
+  projects: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly id: string;
+    readonly workspaceRoot: string;
+  }>,
+  projectGroups: readonly PreferenceGroup[],
+): ReadonlyMap<string, readonly string[]> {
+  const groupByMember = new Map<string, PreferenceGroup>();
+  for (const group of projectGroups) {
+    for (const member of group.memberProjects) {
+      groupByMember.set(`${member.environmentId}:${member.id}`, group);
+    }
+  }
+  const keys = new Map<string, readonly string[]>();
+  for (const project of projects) {
+    const group = groupByMember.get(`${project.environmentId}:${project.id}`);
+    const member = group?.memberProjects.find(
+      (candidate) =>
+        candidate.environmentId === project.environmentId && candidate.id === project.id,
+    ) ?? {
+      physicalProjectKey: derivePhysicalProjectKeyFromPath(
+        project.environmentId,
+        project.workspaceRoot,
+      ),
+      workspaceRoot: project.workspaceRoot,
+    };
+    const ownKeys = projectExpansionPreferenceKeys({
+      projectKey: member.physicalProjectKey,
+      memberProjects: [member],
+    }).slice(1);
+    keys.set(
+      disclosureKey.project({ environmentId: project.environmentId, projectId: project.id }),
+      group !== undefined && group.memberProjects.length === 1
+        ? projectExpansionPreferenceKeys(group)
+        : ownKeys,
+    );
+  }
+  return keys;
+}
+
+export function readPersistedDisclosure(
+  persisted: PersistedDisclosure,
+  projectStoreKeys: ReadonlyMap<string, readonly string[]>,
+): Disclosure {
+  const disclosure = new Map<string, boolean>();
+  for (const [key, open] of Object.entries(persisted.masterWorkspaceExpandedById)) {
+    if (!key.startsWith("project:")) disclosure.set(key, open);
+  }
+  for (const [key, preferenceKeys] of projectStoreKeys) {
+    disclosure.set(key, resolveProjectExpanded(persisted.projectExpandedById, preferenceKeys));
+  }
+  return disclosure;
+}
+
+/** The store writes that turn `before` into `after`, in the layout above. */
+export function persistedDisclosureWrites(
+  before: Disclosure,
+  after: Disclosure,
+  projectStoreKeys: ReadonlyMap<string, readonly string[]>,
+): Array<{
+  readonly slot: "project" | "masterWorkspace";
+  readonly keys: readonly string[];
+  readonly open: boolean;
+}> {
+  const writes: Array<{
+    slot: "project" | "masterWorkspace";
+    keys: readonly string[];
+    open: boolean;
+  }> = [];
+  for (const [key, open] of after) {
+    if (before.get(key) === open) continue;
+    if (key.startsWith("project:")) {
+      const preferenceKeys = projectStoreKeys.get(key);
+      if (preferenceKeys !== undefined)
+        writes.push({ slot: "project", keys: preferenceKeys, open });
+    } else {
+      writes.push({ slot: "masterWorkspace", keys: [key], open });
+    }
+  }
+  return writes;
+}
+
+/**
+ * What a collapsible group's header rolls up: the most urgent status among
+ * the rows it hides, only while it is collapsed (open, the rows show it).
+ */
+export function collapsedAttention(
+  open: boolean,
+  statuses: Iterable<SidebarThreadStatus>,
+): SidebarAttentionStatus | null {
+  return open ? null : mostUrgentAttentionStatus(statuses);
+}
+
+/** Records the same choice for several groups (a toggle, or collapse/expand all). */
+export function setDisclosure(
+  disclosure: Disclosure,
+  keys: readonly string[],
+  open: boolean,
+): Disclosure {
+  if (keys.every((key) => isDisclosureOpen(disclosure, key) === open && disclosure.has(key))) {
+    return disclosure;
+  }
+  const updated = new Map(disclosure);
+  for (const key of keys) updated.set(key, open);
+  return updated;
+}
+
+/**
+ * The groups that must be open for a thread to be on screen: its project (or
+ * shelf) and the Master heading its Cards. Pinned rows need only their
+ * Master. Empty when the thread is not in the workspace.
+ */
+export function disclosureKeysHolding<T extends MasterBoardThread>(
+  model: MasterWorkspaceModel<T>,
+  threadKeyOf: (thread: T) => string,
+  key: string,
+): string[] | null {
+  const is = (thread: T) => threadKeyOf(thread) === key;
+  const boards = (groups: readonly MasterWorkspaceProject<T>[]) =>
+    groups.flatMap((group) => group.masters);
+  const masterHolding = (candidates: readonly { master: T; cards: readonly T[] }[]) =>
+    candidates
+      .filter((board) => board.cards.some(is))
+      .map((board) => disclosureKey.master(threadKeyOf(board.master)));
+  for (const entry of model.pinned) {
+    if (is(entry.thread) || entry.cards.some(is)) {
+      return masterHolding([{ master: entry.thread, cards: entry.cards }]);
+    }
+  }
+  for (const group of model.activeProjects) {
+    if (navigableRows(group).some(is)) {
+      return [disclosureKey.project(group), ...masterHolding(group.masters)];
+    }
+  }
+  for (const group of model.snoozedProjects) {
+    if (navigableRows(group).some(is)) {
+      return [disclosureKey.shelf("snoozed"), ...masterHolding(boards([group]))];
+    }
+  }
+  if (model.settled.some(is)) return [disclosureKey.shelf("settled")];
+  return null;
+}
+
+/**
+ * The sidebar's disclosure records plus the route the router last reported
+ * and acted on. The route is tracked on its own, apart from user navigation:
+ * between a click and the router catching up there is a render that still
+ * reports the old route, and it must not count as landing there again.
+ */
+export interface DisclosureState {
+  readonly disclosure: Disclosure;
+  readonly route: string | null;
+}
+
+/**
+ * Where the navigation came from. "user" is an explicit request (a row click,
+ * search select, keyboard next/previous or jump); "route" is the router
+ * reporting the current route (initial load, deep link, back/forward, a
+ * reload, or a re-render with the same route).
+ */
+export type NavigationSource = "user" | "route";
+
+/**
+ * The one navigation entry point, for every UI path and for the tests. A
+ * navigation writes "open" for the groups holding the landing thread. An
+ * explicit user navigation always does, even to the thread that is already
+ * active (so searching for it reveals it). The router acts only on a route
+ * other than the one it last reported, so a re-render, or the render between
+ * a click and the route change, never reopens what the user collapsed. Null
+ * while a routed thread is not in the workspace yet: the caller keeps its
+ * state and the router retries once the thread arrives.
+ */
+export function onNavigate<T extends MasterBoardThread>(
+  model: MasterWorkspaceModel<T>,
+  state: DisclosureState,
+  threadKeyOf: (thread: T) => string,
+  target: string | null,
+  source: NavigationSource,
+): DisclosureState | null {
+  if (source === "route" && target === state.route) return state;
+  const holding = target === null ? [] : disclosureKeysHolding(model, threadKeyOf, target);
+  if (holding === null) return source === "route" ? null : state;
+  const disclosure = setDisclosure(state.disclosure, holding, true);
+  const route = source === "route" ? target : state.route;
+  return disclosure === state.disclosure && route === state.route ? state : { disclosure, route };
+}
+
+/**
+ * The rows on screen, in order, under the given disclosure. `keep` (the
+ * active thread) is listed at its position even while a collapsed group
+ * hides it, so next/previous thread still moves from it.
+ */
+export function visibleWorkspaceRows<T extends MasterBoardThread>(
+  model: MasterWorkspaceModel<T>,
+  disclosure: Disclosure,
+  threadKeyOf: (thread: T) => string,
+  options: {
+    readonly keep?: string | null;
+    readonly shows?: (group: { environmentId: string; projectId: string }) => boolean;
+  } = {},
+): T[] {
+  const rows: T[] = [];
+  const add = (thread: T, open: boolean) => {
+    if (open || threadKeyOf(thread) === options.keep) rows.push(thread);
+  };
+  const shows = options.shows ?? (() => true);
+  const group = (project: MasterWorkspaceProject<T>, open: boolean) => {
+    for (const board of project.masters) {
+      if (!board.structural) add(board.master, open);
+      const cardsOpen =
+        open && isDisclosureOpen(disclosure, disclosureKey.master(threadKeyOf(board.master)));
+      for (const card of board.cards) add(card, cardsOpen);
+    }
+    for (const thread of [...project.oneOffs, ...project.orphanCards]) add(thread, open);
+  };
+  for (const entry of model.pinned) {
+    add(entry.thread, true);
+    const open = isDisclosureOpen(disclosure, disclosureKey.master(threadKeyOf(entry.thread)));
+    for (const card of entry.cards) add(card, open);
+  }
+  for (const project of model.activeProjects) {
+    if (shows(project))
+      group(project, isDisclosureOpen(disclosure, disclosureKey.project(project)));
+  }
+  const snoozedOpen = isDisclosureOpen(disclosure, disclosureKey.shelf("snoozed"));
+  for (const project of model.snoozedProjects) if (shows(project)) group(project, snoozedOpen);
+  const settledOpen = isDisclosureOpen(disclosure, disclosureKey.shelf("settled"));
+  for (const thread of model.settled) if (shows(thread)) add(thread, settledOpen);
+  return rows;
 }
 
 /**
@@ -242,6 +566,31 @@ export function navigableRows<T extends MasterBoardThread>(group: MasterWorkspac
     ...group.oneOffs,
     ...group.orphanCards,
   ];
+}
+
+function countOf(count: number, noun: string): string {
+  return `${count} ${count === 1 ? noun : `${noun}s`}`;
+}
+
+/**
+ * The muted count beside a project header, e.g. "1 master · 3 cards · 1 chat".
+ * A structural Master (archived, or living on another shelf) is not counted,
+ * but its Cards are; orphan Cards count as cards, since their own heading
+ * already sets them apart.
+ */
+export function projectWorkSummary<T extends MasterBoardThread>(
+  group: MasterWorkspaceProject<T>,
+): string {
+  const masters = group.masters.filter((board) => !board.structural).length;
+  const cards =
+    group.masters.reduce((total, board) => total + board.cards.length, 0) +
+    group.orphanCards.length;
+  const parts = [
+    masters ? countOf(masters, "master") : null,
+    cards ? countOf(cards, "card") : null,
+    group.oneOffs.length ? countOf(group.oneOffs.length, "chat") : null,
+  ].filter((part) => part !== null);
+  return parts.length ? parts.join(" · ") : "No threads";
 }
 
 /**
