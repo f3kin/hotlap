@@ -87,16 +87,6 @@ type EstablishmentEvent =
   | { readonly _tag: "Interrupted"; readonly resetRetry: boolean }
   | { readonly _tag: "TimedOut" };
 
-function exitUnlessInterrupted<A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<Exit.Exit<A, E>, never, R> {
-  return Effect.matchCauseEffect(effect, {
-    onFailure: (cause) =>
-      Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(Exit.failCause(cause)),
-    onSuccess: (value) => Effect.succeed(Exit.succeed(value)),
-  });
-}
-
 export interface EnvironmentSupervisorOptions {
   readonly initiallyDesired?: boolean;
 }
@@ -169,7 +159,7 @@ function failureFromExit<A>(
   established: boolean,
   stable: boolean,
 ): AttemptOutcome {
-  if (Exit.isSuccess(exit) || Cause.hasInterruptsOnly(exit.cause)) {
+  if (Exit.isSuccess(exit)) {
     return { _tag: "Interrupted", established, stable, resetRetry: false };
   }
   const typedFailure = exit.cause.reasons.find(Cause.isFailReason);
@@ -494,9 +484,10 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
   ) {
     yield* SubscriptionRef.set(prepared, Option.none());
     const establishment = yield* Effect.raceAllFirst([
-      exitUnlessInterrupted(
-        establishTracedConnection(attempt, generation, lastFailure, pendingRetry),
-      ).pipe(
+      // Interrupting this fiber cannot be caught here, so an interrupt in an
+      // attempt's exit came from the attempt (e.g. a server that interrupted
+      // a request) and is a failure to retry, never a reason to stop.
+      Effect.exit(establishTracedConnection(attempt, generation, lastFailure, pendingRetry)).pipe(
         Effect.map((exit): EstablishmentEvent => ({
           _tag: "Completed",
           exit,
@@ -592,7 +583,7 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
           attemptSpan: active.attemptSpan,
         })),
       ),
-    ).pipe(exitUnlessInterrupted);
+    ).pipe(Effect.exit);
     const connectedForMs = (yield* Clock.currentTimeMillis) - connectedAt;
     if (Exit.isSuccess(connectedExit)) {
       return {

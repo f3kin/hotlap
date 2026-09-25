@@ -1252,6 +1252,7 @@ const makeFakeServer = () => {
   const deferredReplies: Array<() => void> = [];
   const received: Array<{ readonly tag: string; readonly socket: number }> = [];
   let mode: FakeServerMode = "up";
+  let interruptProbes = false;
 
   const reply = (socket: TestWebSocket, message: unknown) => {
     const deliver = () => {
@@ -1284,7 +1285,14 @@ const makeFakeServer = () => {
       });
       return;
     }
-    reply(socket, { _tag: "Exit", requestId: message.id, exit: { _tag: "Success", value: {} } });
+    reply(socket, {
+      _tag: "Exit",
+      requestId: message.id,
+      exit:
+        interruptProbes && message.tag === WS_METHODS.serverProbe
+          ? { _tag: "Failure", cause: [{ _tag: "Interrupt", fiberId: 1 }] }
+          : { _tag: "Success", value: {} },
+    });
   };
 
   const constructorLayer = Layer.succeed(Socket.WebSocketConstructor, (url) => {
@@ -1299,6 +1307,10 @@ const makeFakeServer = () => {
     sockets,
     received,
     constructorLayer,
+    /** The server interrupts probe handlers, as it does while shutting down. */
+    interruptProbes: () => {
+      interruptProbes = true;
+    },
     setMode: (next: FakeServerMode) => {
       mode = next;
       if (next === "down") {
@@ -1314,13 +1326,9 @@ const makeFakeServer = () => {
   };
 };
 
-// Each fake-clock step yields to the real event loop so socket events land,
-// which costs wall time under a loaded runner.
-const FAKE_SERVER_TEST_TIMEOUT_MS = 60_000;
-
+/** Yields to the scheduler so queued socket events land between clock steps. */
 const settle = Effect.fn("FakeServer.settle")(function* () {
-  for (let i = 0; i < 20; i += 1) {
-    yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+  for (let i = 0; i < 40; i += 1) {
     yield* Effect.yieldNow;
   }
 });
@@ -1335,6 +1343,7 @@ const advance = Effect.fn("FakeServer.advance")(function* (totalMs: number, step
 const makeSupervisedConnection = Effect.fn("FakeServer.makeSupervisedConnection")(function* (
   server: ReturnType<typeof makeFakeServer>,
 ) {
+  const wakeups = yield* Queue.unbounded<ConnectionWakeups.ConnectionWakeup>();
   const resolver = ConnectionResolver.ConnectionResolver.of({
     prepare: () => Effect.succeed(PREPARED),
   });
@@ -1348,7 +1357,7 @@ const makeSupervisedConnection = Effect.fn("FakeServer.makeSupervisedConnection"
       ),
     ),
     Connectivity.layer({ status: Effect.succeed("online"), changes: Stream.never }),
-    ConnectionWakeups.layer({ changes: Stream.never }),
+    ConnectionWakeups.layer({ changes: Stream.fromQueue(wakeups) }),
   );
   const supervisor = yield* EnvironmentSupervisor.make(
     { target: TARGET, profile: Option.none(), enabled: true },
@@ -1361,71 +1370,100 @@ const makeSupervisedConnection = Effect.fn("FakeServer.makeSupervisedConnection"
   );
   yield* settle();
   expect(phases.at(-1)).toBe("connected");
-  return { supervisor, phases };
+  return { supervisor, phases, wakeups };
 });
 
 describe("supervised session against a stalling server", () => {
-  it.effect(
-    "stays connected while the server stalls ping replies for 5 seconds",
-    () =>
-      Effect.gen(function* () {
-        const server = makeFakeServer();
-        const { phases } = yield* makeSupervisedConnection(server);
-        const phasesBeforeStall = phases.length;
+  it.effect("stays connected while the server stalls ping replies for 5 and 10 seconds", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const { phases } = yield* makeSupervisedConnection(server);
+      const phasesBeforeStall = phases.length;
 
-        server.setMode("stalled");
-        yield* advance(5_000);
-        server.setMode("up");
-        yield* advance(15_000);
+      server.setMode("stalled");
+      yield* advance(5_000);
+      server.setMode("up");
+      yield* advance(15_000);
+      server.setMode("stalled");
+      yield* advance(10_000);
+      server.setMode("up");
+      yield* advance(15_000);
 
-        expect(phases.slice(phasesBeforeStall)).toEqual([]);
-        expect(server.sockets).toHaveLength(1);
-      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
-    FAKE_SERVER_TEST_TIMEOUT_MS,
+      expect(phases.slice(phasesBeforeStall)).toEqual([]);
+      expect(server.sockets).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
-  it.effect(
-    "recovers without user action after the server is down for 30 seconds",
-    () =>
-      Effect.gen(function* () {
-        const server = makeFakeServer();
-        const { phases } = yield* makeSupervisedConnection(server);
+  it.effect("recovers without user action after the server is down for 30 seconds", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const { phases } = yield* makeSupervisedConnection(server);
 
-        server.setMode("down");
-        yield* advance(30_000);
-        expect(phases).toContain("backoff");
-        expect(phases.at(-1)).not.toBe("connected");
+      server.setMode("down");
+      yield* advance(30_000);
+      expect(phases).toContain("backoff");
+      expect(phases.at(-1)).not.toBe("connected");
 
-        server.setMode("up");
-        yield* advance(30_000);
-        expect(phases.at(-1)).toBe("connected");
-      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
-    FAKE_SERVER_TEST_TIMEOUT_MS,
+      server.setMode("up");
+      yield* advance(30_000);
+      expect(phases.at(-1)).toBe("connected");
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
-  it.effect(
-    "delivers a request issued during the outage exactly once after recovery",
-    () =>
-      Effect.gen(function* () {
-        const server = makeFakeServer();
-        const { supervisor } = yield* makeSupervisedConnection(server);
+  it.effect("keeps reconnecting after a health check is answered with an interrupt", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const { phases, wakeups } = yield* makeSupervisedConnection(server);
 
-        server.setMode("down");
-        yield* advance(10_000);
-        const requestFiber = yield* EnvironmentRpc.request(WS_METHODS.serverProbe, {}).pipe(
-          Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
-          Effect.forkScoped,
-        );
-        yield* advance(20_000);
-        server.setMode("up");
-        yield* advance(30_000);
+      server.interruptProbes();
+      yield* Queue.offer(wakeups, "application-active");
+      yield* advance(1_000);
+      server.setMode("down");
+      yield* advance(10_000);
+      server.setMode("up");
+      yield* advance(30_000);
 
-        const exit = yield* Fiber.await(requestFiber);
-        expect(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : null).toBeNull();
-        expect(
-          server.received.filter((entry) => entry.tag === WS_METHODS.serverProbe),
-        ).toHaveLength(1);
-      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
-    FAKE_SERVER_TEST_TIMEOUT_MS,
+      expect(server.sockets.length).toBeGreaterThan(1);
+      expect(phases.at(-1)).toBe("connected");
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("fails a request at once when the connection is switched off", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const { supervisor } = yield* makeSupervisedConnection(server);
+
+      yield* supervisor.disconnect;
+      yield* settle();
+      const error = yield* EnvironmentRpc.request(WS_METHODS.serverProbe, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.flip,
+      );
+
+      expect(error).toMatchObject({ _tag: "EnvironmentRpcUnavailableError" });
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("delivers a request issued during the outage exactly once after recovery", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const { supervisor } = yield* makeSupervisedConnection(server);
+
+      server.setMode("down");
+      yield* advance(10_000);
+      const requestFiber = yield* EnvironmentRpc.request(WS_METHODS.serverProbe, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkScoped,
+      );
+      yield* advance(20_000);
+      server.setMode("up");
+      yield* advance(30_000);
+
+      const exit = yield* Fiber.await(requestFiber);
+      expect(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : null).toBeNull();
+      expect(server.received.filter((entry) => entry.tag === WS_METHODS.serverProbe)).toHaveLength(
+        1,
+      );
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 });
