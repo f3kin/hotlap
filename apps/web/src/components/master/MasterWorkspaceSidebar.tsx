@@ -541,13 +541,8 @@ function MasterWorkspaceSidebar() {
   const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
   const setMasterWorkspaceExpanded = useUiStateStore((state) => state.setMasterWorkspaceExpanded);
   const projectStoreKeys = useMemo(
-    () =>
-      masterProjectStoreKeys(
-        projects,
-        (project) =>
-          projectPresentationByKey.get(`${project.environmentId}:${project.id}`)?.project,
-      ),
-    [projectPresentationByKey, projects],
+    () => masterProjectStoreKeys(projects, projectGroups),
+    [projectGroups, projects],
   );
   const disclosure = useMemo(
     () =>

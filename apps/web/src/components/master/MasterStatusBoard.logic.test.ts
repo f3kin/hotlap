@@ -1,9 +1,11 @@
+import { EnvironmentId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import masterWorkspaceSidebarSource from "./MasterWorkspaceSidebar.tsx?raw";
 
 import {
   PERSISTED_STATE_KEY,
+  legacyProjectCwdPreferenceKey,
   parsePersistedState,
   persistState,
   projectExpansionPreferenceKeys,
@@ -13,6 +15,8 @@ import {
   type PersistedUiState,
   type UiState,
 } from "../../uiStateStore";
+import { buildSidebarProjectSnapshots } from "../../sidebarProjectGrouping";
+import type { Project } from "../../types";
 
 import {
   collapsedAttention,
@@ -247,7 +251,7 @@ describe("collapsible groups", () => {
       id,
       workspaceRoot: `/tmp/${id}`,
     })),
-    groupOfProject,
+    ["orchard", "lighthouse", "bakery"].map((id) => groupOfProject({ environmentId: "env-a", id })),
   );
   function sidebar() {
     // The persisted UI store, written and read through the same adapter the
@@ -527,21 +531,44 @@ describe("collapsible groups", () => {
 });
 
 describe("masterProjectStoreKeys", () => {
-  // One repository checked out in two environments: one legacy group, two
-  // Master project headers.
-  const a = { environmentId: "env-a", id: "orchard-a", workspaceRoot: "/srv/a/orchard" };
-  const b = { environmentId: "env-b", id: "orchard-b", workspaceRoot: "/srv/b/orchard" };
-  const group = {
-    projectKey: "repo:orchard",
-    memberProjects: [a, b].map((member) => ({
-      ...member,
-      physicalProjectKey: `${member.environmentId}:${member.workspaceRoot}`,
-    })),
+  // One repository checked out in two environments: under the default
+  // "repository" grouping, one legacy group with two Master project headers.
+  const repositoryIdentity = {
+    canonicalKey: "github.com/example/orchard",
+    locator: {
+      source: "git-remote" as const,
+      remoteName: "origin",
+      remoteUrl: "https://github.com/example/orchard.git",
+    },
   };
-  const keys = masterProjectStoreKeys([a, b], () => group);
+  const project = (id: string, environmentId: string, workspaceRoot: string): Project => ({
+    id: ProjectId.make(id),
+    environmentId: EnvironmentId.make(environmentId),
+    title: "orchard",
+    workspaceRoot,
+    repositoryIdentity,
+    defaultModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    scripts: [],
+  });
+  const a = project("orchard-a", "env-a", "/srv/a/orchard");
+  const b = project("orchard-b", "env-b", "/srv/b/orchard");
+  const snapshots = (projects: Project[]) =>
+    buildSidebarProjectSnapshots({
+      projects,
+      settings: { sidebarProjectGroupingMode: "repository", sidebarProjectGroupingOverrides: {} },
+      primaryEnvironmentId: EnvironmentId.make("env-a"),
+      resolveEnvironmentLabel: () => null,
+    });
+  const keysFor = (projects: Project[]) => masterProjectStoreKeys(projects, snapshots(projects));
   const keyA = disclosureKey.project({ environmentId: "env-a", projectId: "orchard-a" });
   const keyB = disclosureKey.project({ environmentId: "env-b", projectId: "orchard-b" });
-  const apply = (state: UiState, next: Disclosure) => {
+  const apply = (
+    state: UiState,
+    keys: ReadonlyMap<string, readonly string[]>,
+    next: Disclosure,
+  ) => {
     for (const change of persistedDisclosureWrites(
       readPersistedDisclosure(state, keys),
       next,
@@ -554,39 +581,91 @@ describe("masterProjectStoreKeys", () => {
     }
     return state;
   };
+  const toggle = (
+    state: UiState,
+    keys: ReadonlyMap<string, readonly string[]>,
+    key: string,
+    open: boolean,
+  ) => apply(state, keys, setDisclosure(readPersistedDisclosure(state, keys), [key], open));
+  const openIn = (state: UiState, keys: ReadonlyMap<string, readonly string[]>, key: string) =>
+    isDisclosureOpen(readPersistedDisclosure(state, keys), key);
+  const legacyOpen = (state: UiState, projects: Project[]) =>
+    resolveProjectExpanded(
+      state.projectExpandedById,
+      projectExpansionPreferenceKeys(snapshots(projects)[0]!),
+    );
 
-  it("collapses one member of a repository group without collapsing its sibling", () => {
-    let state = parsePersistedState({});
-    state = apply(state, setDisclosure(readPersistedDisclosure(state, keys), [keyA], false));
-    const read = readPersistedDisclosure(reloadThroughStorage(state), keys);
-    expect(isDisclosureOpen(read, keyA)).toBe(false);
-    expect(isDisclosureOpen(read, keyB)).toBe(true);
+  it("gives the two members of a real repository group their own keys", () => {
+    expect(snapshots([a, b])).toHaveLength(1);
+    const keys = keysFor([a, b]);
+    expect(keys.get(keyA)).toEqual([
+      "env-a:/srv/a/orchard",
+      legacyProjectCwdPreferenceKey("/srv/a/orchard"),
+    ]);
+    expect(keys.get(keyB)).toEqual([
+      "env-b:/srv/b/orchard",
+      legacyProjectCwdPreferenceKey("/srv/b/orchard"),
+    ]);
   });
 
-  it("reveals one member of a repository group without opening its collapsed sibling", () => {
-    let state = parsePersistedState({});
-    state = apply(state, setDisclosure(readPersistedDisclosure(state, keys), [keyA, keyB], false));
-    state = apply(state, setDisclosure(readPersistedDisclosure(state, keys), [keyA], true));
-    const read = readPersistedDisclosure(state, keys);
-    expect(isDisclosureOpen(read, keyA)).toBe(true);
-    expect(isDisclosureOpen(read, keyB)).toBe(false);
+  it("collapses one member without collapsing its sibling", () => {
+    const keys = keysFor([a, b]);
+    const state = reloadThroughStorage(toggle(parsePersistedState({}), keys, keyA, false));
+    expect(openIn(state, keys, keyA)).toBe(false);
+    expect(openIn(state, keys, keyB)).toBe(true);
   });
 
-  it("keeps a single-member group in step with the legacy sidebar's grouped key", () => {
-    const sole = { ...group, memberProjects: [group.memberProjects[0]!] };
-    const soleKeys = masterProjectStoreKeys([a], () => sole);
-    expect(soleKeys.get(keyA)?.write).toEqual(projectExpansionPreferenceKeys(sole));
-    // A member with no record of its own follows the legacy grouped key.
-    const legacy = setProjectExpanded(parsePersistedState({}), ["repo:orchard"], false);
-    expect(isDisclosureOpen(readPersistedDisclosure(legacy, soleKeys), keyA)).toBe(false);
+  it("reveals one member without opening its collapsed sibling", () => {
+    const keys = keysFor([a, b]);
+    let state = toggle(parsePersistedState({}), keys, keyA, false);
+    state = toggle(state, keys, keyB, false);
+    state = toggle(state, keys, keyA, true);
+    expect(openIn(state, keys, keyA)).toBe(true);
+    expect(openIn(state, keys, keyB)).toBe(false);
+  });
+
+  it("reads a member's own keys, never the group key, in a multi-member group", () => {
+    const keys = keysFor([a, b]);
+    const groupKey = snapshots([a, b])[0]!.projectKey;
+    const state = setProjectExpanded(parsePersistedState({}), [groupKey], false);
+    expect(openIn(state, keys, keyA)).toBe(true);
+    expect(openIn(state, keys, keyB)).toBe(true);
+  });
+
+  it("keeps a single-member group in the legacy keys and order, group key first", () => {
+    const keys = keysFor([a]);
+    expect(keys.get(keyA)).toEqual(projectExpansionPreferenceKeys(snapshots([a])[0]!));
+    let state = toggle(parsePersistedState({}), keys, keyA, false);
+    expect(legacyOpen(state, [a])).toBe(false);
+    state = setProjectExpanded(state, projectExpansionPreferenceKeys(snapshots([a])[0]!), true);
+    expect(openIn(state, keys, keyA)).toBe(true);
+  });
+
+  it("does not collapse a member that joins a group whose sole member was collapsed", () => {
+    const state = toggle(parsePersistedState({}), keysFor([a]), keyA, false);
+    const joined = keysFor([a, b]);
+    expect(openIn(state, joined, keyA)).toBe(false);
+    expect(openIn(state, joined, keyB)).toBe(true);
+  });
+
+  it("agrees with the legacy sidebar when a group shrinks back to one member", () => {
+    const both = [a, b];
+    let state = setProjectExpanded(
+      parsePersistedState({}),
+      projectExpansionPreferenceKeys(snapshots(both)[0]!),
+      true,
+    );
+    state = toggle(state, keysFor(both), keyA, false);
+    expect(openIn(state, keysFor([a]), keyA)).toBe(legacyOpen(state, [a]));
   });
 
   it("is what the Master sidebar builds its store keys with", () => {
-    // Wiring guard: the component must build its keys with this function, not
-    // with its own physical-key or whole-group mapping.
+    // Wiring guard: the component passes its own projects and project groups
+    // to masterProjectStoreKeys, with no key mapping of its own. (It cannot
+    // catch the call's result being ignored; that is a documented residue.)
     const source = masterWorkspaceSidebarSource;
     expect(source).toMatch(
-      /const projectStoreKeys = useMemo\(\s*\(\) =>\s*masterProjectStoreKeys\(/,
+      /const projectStoreKeys = useMemo\(\s*\(\) =>\s*masterProjectStoreKeys\(projects, projectGroups\)/,
     );
     expect(source).not.toMatch(/derivePhysicalProjectKey|projectExpansionPreferenceKeys/);
   });
