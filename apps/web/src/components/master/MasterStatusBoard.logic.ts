@@ -252,8 +252,8 @@ export function deriveMasterWorkspace<T extends MasterBoardThread>(input: {
 /**
  * Which collapsible groups are open: projects, the Snoozed and Settled
  * shelves, and each Master's Cards. Disclosure is a pure lookup of explicit
- * records with one default that ignores navigation: a Master starts open,
- * every other group starts collapsed. Nothing derives openness from the
+ * records with one default that ignores navigation: projects and Masters
+ * start open, the quiet Snoozed and Settled shelves start collapsed. Nothing derives openness from the
  * active thread at render time. Only two things write records:
  * - the user's toggles (one group, or every project at once), and
  * - navigation (initial load, search, deep link, a row click), which writes
@@ -272,7 +272,57 @@ export const disclosureKey = {
 };
 
 export function isDisclosureOpen(disclosure: Disclosure, key: string): boolean {
-  return disclosure.get(key) ?? key.startsWith("master:");
+  return disclosure.get(key) ?? !key.startsWith("shelf:");
+}
+
+/**
+ * Disclosure as the UI store persists it across reloads: a project under its
+ * physical project key in `projectExpandedById` (the entry the legacy sidebar
+ * reads and writes), everything else (a Master's Cards, the shelves) under its
+ * disclosure key in `masterWorkspaceExpandedById`. `projectStoreKeys` maps a
+ * project's disclosure key to its store key.
+ */
+export interface PersistedDisclosure {
+  readonly projectExpandedById: Readonly<Record<string, boolean>>;
+  readonly masterWorkspaceExpandedById: Readonly<Record<string, boolean>>;
+}
+
+export function readPersistedDisclosure(
+  persisted: PersistedDisclosure,
+  projectStoreKeys: ReadonlyMap<string, string>,
+): Disclosure {
+  const disclosure = new Map<string, boolean>();
+  for (const [key, open] of Object.entries(persisted.masterWorkspaceExpandedById)) {
+    if (!key.startsWith("project:")) disclosure.set(key, open);
+  }
+  for (const [key, storeKey] of projectStoreKeys) {
+    const open = persisted.projectExpandedById[storeKey];
+    if (open !== undefined) disclosure.set(key, open);
+  }
+  return disclosure;
+}
+
+/** The store writes that turn `before` into `after`, in the layout above. */
+export function persistedDisclosureWrites(
+  before: Disclosure,
+  after: Disclosure,
+  projectStoreKeys: ReadonlyMap<string, string>,
+): Array<{
+  readonly slot: "project" | "masterWorkspace";
+  readonly key: string;
+  readonly open: boolean;
+}> {
+  const writes: Array<{ slot: "project" | "masterWorkspace"; key: string; open: boolean }> = [];
+  for (const [key, open] of after) {
+    if (before.get(key) === open) continue;
+    if (key.startsWith("project:")) {
+      const storeKey = projectStoreKeys.get(key);
+      if (storeKey !== undefined) writes.push({ slot: "project", key: storeKey, open });
+    } else {
+      writes.push({ slot: "masterWorkspace", key, open });
+    }
+  }
+  return writes;
 }
 
 /** Records the same choice for several groups (a toggle, or collapse/expand all). */
@@ -330,8 +380,6 @@ export interface DisclosureState {
   readonly disclosure: Disclosure;
   readonly landedOn: string | null;
 }
-
-export const INITIAL_DISCLOSURE_STATE: DisclosureState = { disclosure: new Map(), landedOn: null };
 
 /**
  * Where the navigation came from. "user" is an explicit request (a row click,

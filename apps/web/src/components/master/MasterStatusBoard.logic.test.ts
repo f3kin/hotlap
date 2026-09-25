@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  parsePersistedState,
+  setMasterWorkspaceExpanded,
+  setProjectExpanded,
+  type PersistedUiState,
+  type UiState,
+} from "../../uiStateStore";
+
+import {
   deriveMasterBoard,
   deriveMasterWorkspace,
   isCardThreadTitle,
@@ -11,12 +19,13 @@ import {
   nextUnparkedKey,
   projectWorkSummary,
   disclosureKey,
-  INITIAL_DISCLOSURE_STATE,
+  disclosureKeysHolding,
   onNavigate,
+  persistedDisclosureWrites,
+  readPersistedDisclosure,
   setDisclosure,
   visibleWorkspaceRows,
   type Disclosure,
-  type DisclosureState,
   type NavigationSource,
   type MasterBoardThread,
   type MasterShelf,
@@ -191,15 +200,31 @@ describe("collapsible groups", () => {
 
   // The sidebar's disclosure, driven through the same entry points the
   // component calls: onNavigate for every navigation, setDisclosure for toggles.
+  const projectStoreKeys = new Map(projects.map((key) => [key, `physical:${key}`]));
   function sidebar() {
-    let state: DisclosureState = INITIAL_DISCLOSURE_STATE;
+    // The persisted UI store, written and read through the same adapter the
+    // component uses; the landed-on thread lives in memory.
+    let store: UiState = parsePersistedState({});
+    let landedOn: string | null = null;
     let active: string | null = null;
-    const route = () => {
-      state = onNavigate(model, state, keyOf, active, "route") ?? state;
+    const current = () => readPersistedDisclosure(store, projectStoreKeys);
+    const write = (next: Disclosure) => {
+      for (const change of persistedDisclosureWrites(current(), next, projectStoreKeys)) {
+        store =
+          change.slot === "project"
+            ? setProjectExpanded(store, [change.key], change.open)
+            : setMasterWorkspaceExpanded(store, [change.key], change.open);
+      }
+    };
+    const go = (target: string | null, source: NavigationSource) => {
+      const next = onNavigate(model, { disclosure: current(), landedOn }, keyOf, target, source);
+      if (next === null) return;
+      write(next.disclosure);
+      landedOn = next.landedOn;
     };
     const view = {
       get disclosure() {
-        return state.disclosure;
+        return current();
       },
       get active() {
         return active;
@@ -207,30 +232,35 @@ describe("collapsible groups", () => {
       // A user navigation (row click, search select, keyboard): openThread
       // calls onNavigate, then the route changes and the router effect runs.
       navigate(target: TestThread, source: NavigationSource = "user") {
-        if (source === "user") {
-          state = onNavigate(model, state, keyOf, keyOf(target), "user") ?? state;
-        }
+        if (source === "user") go(keyOf(target), "user");
         active = keyOf(target);
-        route();
+        go(active, "route");
       },
       // The router effect re-running on an unchanged route (a re-render).
-      rerender: route,
+      rerender: () => go(active, "route"),
+      // A reload: the store comes back from what persistState wrote, the
+      // in-memory landing is gone, and the router lands on the same route.
+      reload() {
+        store = parsePersistedState(
+          JSON.parse(
+            JSON.stringify({
+              projectExpandedById: store.projectExpandedById,
+              masterWorkspaceExpandedById: store.masterWorkspaceExpandedById,
+            }),
+          ) as PersistedUiState,
+        );
+        landedOn = null;
+        go(active, "route");
+      },
       toggle(key: string) {
-        state = {
-          ...state,
-          disclosure: setDisclosure(
-            state.disclosure,
-            [key],
-            !isDisclosureOpen(state.disclosure, key),
-          ),
-        };
+        write(setDisclosure(current(), [key], !isDisclosureOpen(current(), key)));
       },
       setProjects(open: boolean) {
-        state = { ...state, disclosure: setDisclosure(state.disclosure, projects, open) };
+        write(setDisclosure(current(), projects, open));
       },
-      rows: () => visibleWorkspaceRows(model, state.disclosure, keyOf).map(keyOf),
+      rows: () => visibleWorkspaceRows(model, current(), keyOf).map(keyOf),
       shows: (target: TestThread) => view.rows().includes(keyOf(target)),
-      open: (key: string) => isDisclosureOpen(state.disclosure, key),
+      open: (key: string) => isDisclosureOpen(current(), key),
     };
     return view;
   }
@@ -285,6 +315,31 @@ describe("collapsible groups", () => {
     expect(view.shows(heater)).toBe(true);
   });
 
+  it("starts projects and Masters open and the quiet shelves collapsed", () => {
+    const view = sidebar();
+    expect(view.open(orchard)).toBe(true);
+    expect(view.open(disclosureKey.master("env-a:greenhouse"))).toBe(true);
+    expect(view.open(disclosureKey.shelf("snoozed"))).toBe(false);
+    expect(view.open(disclosureKey.shelf("settled"))).toBe(false);
+    expect(view.shows(heater) && view.shows(keeper)).toBe(true);
+  });
+
+  it("keeps collapses across a reload, and reveals the active thread after it", () => {
+    const view = sidebar();
+    view.navigate(keeper);
+    view.toggle(orchard);
+    view.toggle(disclosureKey.master("env-a:keeper"));
+    view.toggle(disclosureKey.shelf("settled"));
+    view.reload();
+    expect(view.open(orchard)).toBe(false);
+    expect(view.open(disclosureKey.master("env-a:keeper"))).toBe(false);
+    expect(view.open(disclosureKey.shelf("settled"))).toBe(true);
+    expect(view.shows(keeper)).toBe(true);
+    view.toggle(lighthouse);
+    view.reload();
+    expect(view.shows(keeper)).toBe(true);
+  });
+
   it("lets a re-render on the same route keep the user's collapse", () => {
     const view = sidebar();
     view.navigate(greenhouse, "route");
@@ -317,11 +372,14 @@ describe("collapsible groups", () => {
       const userCollapsed = new Set<string>();
       view.navigate(threads[random(threads.length)]!);
       for (let step = 0; step < 30; step += 1) {
-        const action = random(8);
+        const action = random(9);
         const label = `run ${run} step ${step} action ${action}`;
-        const forgetReopened = (before: Disclosure) => {
-          for (const key of groups) {
-            if (view.open(key) !== isDisclosureOpen(before, key)) userCollapsed.delete(key);
+        // Navigation (a reload included) may reopen only the groups holding the
+        // thread it lands on; every other user collapse must survive it.
+        const forgetLandedIn = (target: string | null) => {
+          if (target === null) return;
+          for (const key of disclosureKeysHolding(model, keyOf, target) ?? []) {
+            userCollapsed.delete(key);
           }
         };
         if (action === 0) {
@@ -341,9 +399,8 @@ describe("collapsible groups", () => {
           // route change, so the router case picks another thread.
           const target = threads[random(threads.length)]!;
           if (action === 4 && keyOf(target) === view.active) continue;
-          const before = view.disclosure;
           view.navigate(target, action === 3 ? "user" : "route");
-          forgetReopened(before);
+          forgetLandedIn(keyOf(target));
           expect(view.shows(target), label).toBe(true);
         } else if (action === 5) {
           // Click a row already on screen.
@@ -361,10 +418,15 @@ describe("collapsible groups", () => {
           // Search select of the thread that is already active.
           const target = threads.find((item) => keyOf(item) === view.active);
           if (!target) continue;
-          const before = view.disclosure;
           view.navigate(target);
-          forgetReopened(before);
+          forgetLandedIn(keyOf(target));
           expect(view.shows(target), label).toBe(true);
+        } else if (action === 8) {
+          // Reload or restart: persisted records come back, the active route lands again.
+          view.reload();
+          forgetLandedIn(view.active);
+          const target = threads.find((item) => keyOf(item) === view.active);
+          if (target) expect(view.shows(target), label).toBe(true);
         } else {
           // The router effect re-running on the same route changes nothing.
           const before = groups.map((key) => view.open(key));

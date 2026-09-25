@@ -54,7 +54,8 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminal
 import { useProjects, useServerConfigs } from "~/state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useClientSettings } from "~/hooks/useSettings";
-import { selectProjectGroupingSettings } from "~/logicalProject";
+import { useUiStateStore } from "~/uiStateStore";
+import { derivePhysicalProjectKey, selectProjectGroupingSettings } from "~/logicalProject";
 import {
   deriveProviderEntriesByEnvironment,
   type ProviderInstanceEntry,
@@ -76,12 +77,15 @@ import { SidebarChromeFooter, SidebarChromeHeader } from "../sidebar/SidebarChro
 import { SidebarThreadHeader } from "../sidebar/SidebarThreadHeader";
 import {
   EMPTY_PROVIDER_ENTRIES,
+  SidebarAttentionRollup,
   SidebarDisclosureButton,
   SidebarSectionHeader,
   SidebarThreadRow,
 } from "../Sidebar";
 import {
+  mostUrgentAttentionStatus,
   resolveAdjacentThreadId,
+  resolveSidebarThreadStatus,
   sortPinnedThreadsForSidebar,
   useThreadJumpHintVisibility,
 } from "../Sidebar.logic";
@@ -90,15 +94,16 @@ import {
   deriveMasterWorkspace,
   disclosureKey,
   isDisclosureOpen,
-  INITIAL_DISCLOSURE_STATE,
   onNavigate,
+  persistedDisclosureWrites,
+  readPersistedDisclosure,
   setDisclosure,
   visibleWorkspaceRows,
   navigableRows,
   nextUnparkedKey,
   projectWorkSummary,
   type Disclosure,
-  type DisclosureState,
+  type NavigationSource,
   type MasterShelf,
   type MasterShelfBoard,
   type MasterWorkspaceProject,
@@ -168,6 +173,11 @@ interface RowContext {
 // standard row's inline lifecycle buttons stay off.
 const noLifecycleAction = () => {};
 
+// What a collapsed group hides that needs the user, most urgent first.
+function hiddenAttention(threads: readonly ThreadRow[]) {
+  return mostUrgentAttentionStatus(threads.map(resolveSidebarThreadStatus));
+}
+
 // Sub-level headings inside a project keep the rows' empty icon slot, so their
 // labels share the titles' left edge.
 const ICON_SLOT = <span aria-hidden className="size-4 shrink-0" />;
@@ -177,10 +187,12 @@ function MasterThreadRow({
   thread,
   context,
   toggle,
+  attention,
 }: {
   thread: ThreadRow;
   context: RowContext;
   toggle?: { expanded: boolean; onToggle: () => void; label: string } | undefined;
+  attention?: ReturnType<typeof hiddenAttention>;
 }) {
   const key = rowKey(thread);
   const projectKey = projectKeyOf(thread);
@@ -247,6 +259,7 @@ function MasterThreadRow({
       }
       showStatusIcon
       {...(toggle ? { toggle } : {})}
+      hiddenAttention={attention ?? null}
       actionsButton={context.isMobile ? "always" : "on-hover"}
     />
   );
@@ -276,6 +289,8 @@ function MasterBoard({
         label: `${open ? "Collapse" : "Expand"} Cards of ${master.title}`,
       }
     : undefined;
+  // Collapsed, the Master rolls up what its hidden Cards need.
+  const attention = open ? null : hiddenAttention(cards);
   return (
     <>
       {structural ? (
@@ -283,9 +298,10 @@ function MasterBoard({
           level="sub"
           icon={toggle ? <SidebarDisclosureButton {...toggle} /> : ICON_SLOT}
           label={master.title}
+          status={attention ? <SidebarAttentionRollup status={attention} /> : null}
         />
       ) : (
-        <MasterThreadRow thread={master} context={context} toggle={toggle} />
+        <MasterThreadRow thread={master} context={context} toggle={toggle} attention={attention} />
       )}
       {open
         ? cards.map((card) => (
@@ -442,19 +458,8 @@ function MasterWorkspaceSidebar() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
-  // Explicit open/collapse records for projects, shelves and Masters' Cards,
-  // held in memory (the standard sidebar has no project groups to persist).
-  const [disclosureState, setDisclosureFullState] =
-    useState<DisclosureState>(INITIAL_DISCLOSURE_STATE);
-  const disclosure = disclosureState.disclosure;
-  const setDisclosureState = useCallback(
-    (update: (current: Disclosure) => Disclosure) =>
-      setDisclosureFullState((current) => {
-        const next = update(current.disclosure);
-        return next === current.disclosure ? current : { ...current, disclosure: next };
-      }),
-    [],
-  );
+  // The thread the last navigation landed on (in memory: a reload lands again).
+  const [landedOn, setLandedOn] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
 
   const capability = useCallback(
@@ -512,6 +517,44 @@ function MasterWorkspaceSidebar() {
     () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
     [projects],
   );
+  // Disclosure records persist in the UI store across reloads: projects in
+  // projectExpandedById (under the same physical key the legacy sidebar
+  // uses), Masters' Cards and the shelves in masterWorkspaceExpandedById.
+  const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
+  const masterWorkspaceExpandedById = useUiStateStore((state) => state.masterWorkspaceExpandedById);
+  const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
+  const setMasterWorkspaceExpanded = useUiStateStore((state) => state.setMasterWorkspaceExpanded);
+  const projectStoreKeys = useMemo(
+    () =>
+      new Map(
+        projects.map((project) => [
+          disclosureKey.project({ environmentId: project.environmentId, projectId: project.id }),
+          derivePhysicalProjectKey(project),
+        ]),
+      ),
+    [projects],
+  );
+  const disclosure = useMemo(
+    () =>
+      readPersistedDisclosure(
+        { projectExpandedById, masterWorkspaceExpandedById },
+        projectStoreKeys,
+      ),
+    [masterWorkspaceExpandedById, projectExpandedById, projectStoreKeys],
+  );
+  const writeDisclosure = useCallback(
+    (next: Disclosure) => {
+      for (const write of persistedDisclosureWrites(disclosure, next, projectStoreKeys)) {
+        if (write.slot === "project") setProjectExpanded([write.key], write.open);
+        else setMasterWorkspaceExpanded([write.key], write.open);
+      }
+    },
+    [disclosure, projectStoreKeys, setMasterWorkspaceExpanded, setProjectExpanded],
+  );
+  const setDisclosureState = useCallback(
+    (update: (current: Disclosure) => Disclosure) => writeDisclosure(update(disclosure)),
+    [disclosure, writeDisclosure],
+  );
   const projectPresentationByKey = useMemo(() => {
     const presentations = new Map<
       string,
@@ -554,11 +597,18 @@ function MasterWorkspaceSidebar() {
   // link, back/forward) from this effect. It runs before paint so a landing
   // group never flashes shut, and re-runs when the workspace changes, so a
   // thread that arrives late is still revealed.
+  const navigateDisclosureTo = useCallback(
+    (target: string | null, source: NavigationSource) => {
+      const next = onNavigate(shownWorkspace, { disclosure, landedOn }, rowKey, target, source);
+      if (next === null) return;
+      writeDisclosure(next.disclosure);
+      if (next.landedOn !== landedOn) setLandedOn(next.landedOn);
+    },
+    [disclosure, landedOn, shownWorkspace, writeDisclosure],
+  );
   useLayoutEffect(() => {
-    setDisclosureFullState(
-      (current) => onNavigate(shownWorkspace, current, rowKey, activeKey, "route") ?? current,
-    );
-  }, [activeKey, shownWorkspace]);
+    navigateDisclosureTo(activeKey, "route");
+  }, [activeKey, navigateDisclosureTo]);
   const isOpen = useCallback((key: string) => isDisclosureOpen(disclosure, key), [disclosure]);
   const isProjectOpen = useCallback(
     (group: ProjectGroup) => isOpen(disclosureKey.project(group)),
@@ -629,16 +679,14 @@ function MasterWorkspaceSidebar() {
     (thread: ThreadRow) => {
       // An explicit navigation reveals the landing thread even when it is
       // already the active one (e.g. picked again from search).
-      setDisclosureFullState(
-        (current) => onNavigate(shownWorkspace, current, rowKey, rowKey(thread), "user") ?? current,
-      );
+      navigateDisclosureTo(rowKey(thread), "user");
       if (isMobile) setOpenMobile(false);
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
       });
     },
-    [isMobile, navigate, setOpenMobile, shownWorkspace],
+    [isMobile, navigate, navigateDisclosureTo, setOpenMobile],
   );
 
   const routePreviewOpen = useRightPanelStore((state) =>
@@ -979,6 +1027,8 @@ function MasterWorkspaceSidebar() {
                     const presentation = projectOf(group);
                     if (!presentation) return null;
                     const open = isProjectOpen(group);
+                    // Collapsed, the header rolls up what its hidden rows need.
+                    const attention = open ? null : hiddenAttention(navigableRows(group));
                     return (
                       <Fragment key={projectKey}>
                         <SidebarSectionHeader
@@ -990,6 +1040,7 @@ function MasterWorkspaceSidebar() {
                           }
                           label={presentation.title}
                           detail={projectWorkSummary(group)}
+                          status={attention ? <SidebarAttentionRollup status={attention} /> : null}
                           // Collapsed over the active thread: the header carries its highlight.
                           active={
                             !open &&
