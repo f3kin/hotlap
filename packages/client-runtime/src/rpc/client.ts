@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { RpcClientError } from "effect/unstable/rpc";
 
+import type { SupervisorConnectionState } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import type { RpcSession } from "../rpc/session.ts";
@@ -112,23 +113,40 @@ export type EnvironmentRpcStreamFailure<TTag extends EnvironmentStreamRpcTag> =
     ? E
     : never;
 
+/**
+ * Resolves the session a call runs on. While the supervisor is replacing a
+ * lost transport, the call waits for the replacement instead of failing work
+ * the user just asked for; it is written once, on that session. Settled phases
+ * (switched off, offline, blocked) fail at once because no session is coming.
+ */
 const currentSession = Effect.fn("EnvironmentRpc.currentSession")(function* () {
   const supervisor = yield* EnvironmentSupervisor;
-  return yield* SubscriptionRef.get(supervisor.session).pipe(
-    Effect.flatMap(
-      Option.match({
-        onNone: () =>
-          Effect.fail(
+  const active = yield* SubscriptionRef.get(supervisor.session);
+  if (Option.isSome(active)) {
+    return active.value;
+  }
+  return yield* SubscriptionRef.changes(supervisor.state).pipe(
+    Stream.zipLatest(SubscriptionRef.changes(supervisor.session)),
+    Stream.filter(([state, session]) => Option.isSome(session) || !isReconnecting(state.phase)),
+    Stream.runHead,
+    Effect.flatMap((next) =>
+      Option.isSome(next) && Option.isSome(next.value[1])
+        ? Effect.succeed(next.value[1].value)
+        : Effect.fail(
             new EnvironmentRpcUnavailableError({
               environmentId: supervisor.target.environmentId,
               message: `${supervisor.target.label} is not connected.`,
             }),
           ),
-        onSome: Effect.succeed,
-      }),
     ),
   );
 });
+
+function isReconnecting(phase: SupervisorConnectionState["phase"]): boolean {
+  // "connected" without a session is the instant between a lease closing and
+  // the supervisor publishing its backoff state.
+  return phase === "connecting" || phase === "backoff" || phase === "connected";
+}
 
 export const request = Effect.fn("EnvironmentRpc.request")(function* <
   TTag extends EnvironmentUnaryRpcTag,
