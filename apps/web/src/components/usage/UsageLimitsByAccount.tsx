@@ -1,6 +1,7 @@
 import {
   collectLimitGroups,
   collectLimitNotices,
+  displayLimitWindows,
   type LimitGroup,
   type LimitPresentations,
   type LimitRow,
@@ -106,7 +107,11 @@ function AccountRow({ row, now }: { readonly row: LimitRow; readonly now: number
     <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-border/60 p-4">
       <RowHeader row={row} />
       {row.kind === "account" ? (
-        <LimitWindows driver={row.account.driver} windows={row.windows} now={now} />
+        <LimitWindows
+          driver={row.account.driver}
+          windows={displayLimitWindows({ driver: row.account.driver, windows: row.windows })}
+          now={now}
+        />
       ) : (
         <p className="text-xs text-muted-foreground">{row.message}</p>
       )}

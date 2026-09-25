@@ -455,7 +455,10 @@ export interface LimitPool {
 }
 
 /** Show Cursor's two usable pools instead of a combined percentage when both are available. */
-export function displayLimitWindows(pool: LimitPool) {
+export function displayLimitWindows<Window extends { readonly id: string }>(pool: {
+  readonly driver: ServerProvider["driver"];
+  readonly windows: readonly Window[];
+}): readonly Window[] {
   if (pool.driver !== "cursor") return pool.windows;
   const hasAuto = pool.windows.some((window) => window.id === "autoPercentUsed");
   const hasApi = pool.windows.some((window) => window.id === "apiPercentUsed");

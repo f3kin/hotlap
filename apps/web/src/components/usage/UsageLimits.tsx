@@ -1,4 +1,5 @@
 import {
+  cursorUsageWindowDetails,
   type EnvironmentId,
   type ProviderConsumeResetCreditOutcome,
   ProviderConsumeResetCreditInput,
@@ -170,13 +171,17 @@ export function LimitWindows({
         {windows.map((window) => {
           const pace = paceOf(window, now);
           const resetsIn = formatResetsIn(window, now);
+          const details = driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
           return (
             <div
               key={window.id}
               className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 sm:grid-cols-[11rem_minmax(0,1fr)_8rem] sm:gap-x-4"
             >
               <span className="col-start-1 row-start-1 flex min-w-0 items-baseline gap-2 text-xs">
-                <span className="min-w-0 break-words text-muted-foreground">{window.label}</span>
+                <span className="flex min-w-0 flex-col break-words text-muted-foreground">
+                  <span>{details?.label ?? window.label}</span>
+                  {details ? <span>{details.description}</span> : null}
+                </span>
                 <span className="ms-auto shrink-0 font-medium text-foreground tabular-nums">
                   {remainingPercent(window)}% left
                 </span>

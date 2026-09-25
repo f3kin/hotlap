@@ -22,6 +22,7 @@ const now = Date.parse("2026-09-23T12:00:00.000Z");
 const checkedAt = "2026-09-23T11:59:00.000Z";
 const codex = ProviderDriverKind.make("codex");
 const claude = ProviderDriverKind.make("claudeAgent");
+const cursor = ProviderDriverKind.make("cursor");
 
 const session = (usedPercent: number): ServerProviderUsageWindow => ({
   id: "primary",
@@ -104,5 +105,19 @@ describe("UsageLimitsByAccount", () => {
     // Mean of 97, 88 and 12: the old pooled figure.
     expect(text).not.toContain("66%");
     expect(text).not.toMatch(/\+\d+%/);
+  });
+
+  it("shows Cursor's usable allowances with their explanations, omitting the combined quota", () => {
+    const text = render([
+      lane("cursor_personal", cursor, "Cursor · Personal", [
+        { id: "totalPercentUsed", kind: "monthly", label: "Overall", usedPercent: 15 },
+        { id: "apiPercentUsed", kind: "monthly", label: "API", usedPercent: 49 },
+        { id: "autoPercentUsed", kind: "monthly", label: "Auto", usedPercent: 9 },
+      ]),
+    ]);
+    expect(text).not.toContain("Overall");
+    expect(text).toMatch(
+      /Cursor Models Grok and Composer use this first.*Other Models Claude, GPT, and Gemini use this pool/,
+    );
   });
 });
