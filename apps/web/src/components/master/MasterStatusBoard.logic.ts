@@ -3,7 +3,8 @@ import {
   type SidebarAttentionStatus,
   type SidebarThreadStatus,
 } from "../Sidebar.logic";
-import { resolveProjectExpanded } from "../../uiStateStore";
+import { derivePhysicalProjectKeyFromPath } from "../../logicalProject";
+import { projectExpansionPreferenceKeys, resolveProjectExpanded } from "../../uiStateStore";
 
 export interface MasterBoardThread {
   readonly id: string;
@@ -283,30 +284,94 @@ export function isDisclosureOpen(disclosure: Disclosure, key: string): boolean {
 }
 
 /**
- * Disclosure as the UI store persists it across reloads: a project in
- * `projectExpandedById` through the same key resolution the legacy sidebar
- * uses (its grouped key, then each member's physical key, then each legacy
- * cwd key: `projectExpansionPreferenceKeys`, read with
- * `resolveProjectExpanded`), so both sidebars agree on every project;
- * everything else (a Master's Cards, the shelves) under its disclosure key in
- * `masterWorkspaceExpandedById`. `projectStoreKeys` maps a project's
- * disclosure key to its preference keys.
+ * Disclosure as the UI store persists it across reloads. A project lives in
+ * `projectExpandedById` under the legacy sidebar's preference keys
+ * (`projectExpansionPreferenceKeys`, read with `resolveProjectExpanded`); a
+ * Master's Cards and the shelves live under their disclosure key in
+ * `masterWorkspaceExpandedById`.
  */
 export interface PersistedDisclosure {
   readonly projectExpandedById: Readonly<Record<string, boolean>>;
   readonly masterWorkspaceExpandedById: Readonly<Record<string, boolean>>;
 }
 
+/** The store keys one Master project header reads and writes. */
+export interface ProjectPreferenceKeys {
+  readonly read: readonly string[];
+  readonly write: readonly string[];
+}
+
+interface PreferenceGroup {
+  readonly projectKey: string;
+  readonly memberProjects: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly id: string;
+    readonly physicalProjectKey: string;
+    readonly workspaceRoot: string;
+  }>;
+}
+
+/**
+ * The store keys for each Master project header, keyed by its disclosure key.
+ * The Master sidebar draws one header per physical project, while the legacy
+ * sidebar draws one per repository group, so a member reads and writes its
+ * OWN keys (physical and cwd): collapsing one checkout never collapses its
+ * siblings in other environments or worktrees. The group's key is shared
+ * with the legacy sidebar only where the two agree on what a header is, a
+ * group with a single member: there it is written too, keeping both sidebars
+ * in step. Reads try the member's own keys first and fall back to the
+ * group's key only when the member has no record of its own.
+ */
+export function masterProjectStoreKeys(
+  projects: ReadonlyArray<{
+    readonly environmentId: string;
+    readonly id: string;
+    readonly workspaceRoot: string;
+  }>,
+  groupOf: (project: {
+    readonly environmentId: string;
+    readonly id: string;
+  }) => PreferenceGroup | undefined,
+): ReadonlyMap<string, ProjectPreferenceKeys> {
+  const keys = new Map<string, ProjectPreferenceKeys>();
+  for (const project of projects) {
+    const group = groupOf(project);
+    const member = group?.memberProjects.find(
+      (candidate) =>
+        candidate.environmentId === project.environmentId && candidate.id === project.id,
+    ) ?? {
+      ...project,
+      physicalProjectKey: derivePhysicalProjectKeyFromPath(
+        project.environmentId,
+        project.workspaceRoot,
+      ),
+    };
+    const [grouped, ...own] = projectExpansionPreferenceKeys({
+      projectKey: group?.projectKey ?? member.physicalProjectKey,
+      memberProjects: [member],
+    });
+    const soleMember = group === undefined || group.memberProjects.length === 1;
+    keys.set(
+      disclosureKey.project({ environmentId: project.environmentId, projectId: project.id }),
+      {
+        read: group === undefined ? own : [...own, grouped!],
+        write: soleMember && group !== undefined ? projectExpansionPreferenceKeys(group) : own,
+      },
+    );
+  }
+  return keys;
+}
+
 export function readPersistedDisclosure(
   persisted: PersistedDisclosure,
-  projectStoreKeys: ReadonlyMap<string, readonly string[]>,
+  projectStoreKeys: ReadonlyMap<string, ProjectPreferenceKeys>,
 ): Disclosure {
   const disclosure = new Map<string, boolean>();
   for (const [key, open] of Object.entries(persisted.masterWorkspaceExpandedById)) {
     if (!key.startsWith("project:")) disclosure.set(key, open);
   }
   for (const [key, preferenceKeys] of projectStoreKeys) {
-    disclosure.set(key, resolveProjectExpanded(persisted.projectExpandedById, preferenceKeys));
+    disclosure.set(key, resolveProjectExpanded(persisted.projectExpandedById, preferenceKeys.read));
   }
   return disclosure;
 }
@@ -315,7 +380,7 @@ export function readPersistedDisclosure(
 export function persistedDisclosureWrites(
   before: Disclosure,
   after: Disclosure,
-  projectStoreKeys: ReadonlyMap<string, readonly string[]>,
+  projectStoreKeys: ReadonlyMap<string, ProjectPreferenceKeys>,
 ): Array<{
   readonly slot: "project" | "masterWorkspace";
   readonly keys: readonly string[];
@@ -327,11 +392,11 @@ export function persistedDisclosureWrites(
     open: boolean;
   }> = [];
   for (const [key, open] of after) {
-    if (isDisclosureOpen(before, key) === open && before.has(key)) continue;
+    if (before.get(key) === open) continue;
     if (key.startsWith("project:")) {
       const preferenceKeys = projectStoreKeys.get(key);
       if (preferenceKeys !== undefined)
-        writes.push({ slot: "project", keys: preferenceKeys, open });
+        writes.push({ slot: "project", keys: preferenceKeys.write, open });
     } else {
       writes.push({ slot: "masterWorkspace", keys: [key], open });
     }

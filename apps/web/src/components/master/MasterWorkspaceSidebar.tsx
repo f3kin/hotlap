@@ -54,8 +54,8 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminal
 import { useProjects, useServerConfigs } from "~/state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useClientSettings } from "~/hooks/useSettings";
-import { projectExpansionPreferenceKeys, useUiStateStore } from "~/uiStateStore";
-import { derivePhysicalProjectKey, selectProjectGroupingSettings } from "~/logicalProject";
+import { useUiStateStore } from "~/uiStateStore";
+import { selectProjectGroupingSettings } from "~/logicalProject";
 import {
   deriveProviderEntriesByEnvironment,
   type ProviderInstanceEntry,
@@ -94,6 +94,7 @@ import {
   collapsedAttention,
   disclosureKey,
   isDisclosureOpen,
+  masterProjectStoreKeys,
   onNavigate,
   persistedDisclosureWrites,
   readPersistedDisclosure,
@@ -533,25 +534,18 @@ function MasterWorkspaceSidebar() {
     return presentations;
   }, [projectGroups]);
   // Disclosure records persist in the UI store across reloads: projects in
-  // projectExpandedById under the legacy sidebar's own preference keys (so
-  // both sidebars resolve the same choice), Masters' Cards and the shelves in
-  // masterWorkspaceExpandedById.
+  // projectExpandedById under the keys masterProjectStoreKeys picks, Masters'
+  // Cards and the shelves in masterWorkspaceExpandedById.
   const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
   const masterWorkspaceExpandedById = useUiStateStore((state) => state.masterWorkspaceExpandedById);
   const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
   const setMasterWorkspaceExpanded = useUiStateStore((state) => state.setMasterWorkspaceExpanded);
   const projectStoreKeys = useMemo(
     () =>
-      new Map(
-        projects.map((project) => {
-          const group = projectPresentationByKey.get(
-            `${project.environmentId}:${project.id}`,
-          )?.project;
-          return [
-            disclosureKey.project({ environmentId: project.environmentId, projectId: project.id }),
-            group ? projectExpansionPreferenceKeys(group) : [derivePhysicalProjectKey(project)],
-          ] as const;
-        }),
+      masterProjectStoreKeys(
+        projects,
+        (project) =>
+          projectPresentationByKey.get(`${project.environmentId}:${project.id}`)?.project,
       ),
     [projectPresentationByKey, projects],
   );
