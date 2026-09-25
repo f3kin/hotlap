@@ -49,7 +49,9 @@ The workflow builds the shared JavaScript bundle once, then uses
 [release-desktop.yml](../../.github/workflows/release-desktop.yml) for six targets:
 
 - macOS arm64 and x64: DMG and updater ZIP.
-- Linux arm64 and x64: AppImage.
+- Linux arm64 and x64: AppImage and `.deb`, from one electron-builder run. The
+  `.deb` updates in the app through electron-updater, which installs it with
+  `dpkg`.
 - Windows arm64 and x64: NSIS installer, including a matching Linux WSL runtime.
 
 Five targets also produce standalone CLI archives:
@@ -163,6 +165,9 @@ include blockmaps. Preview publishes neither manifests nor blockmaps.
 
 macOS uses one combined per-channel manifest for Intel and Apple Silicon.
 Preserve the manifest merge step and macOS ZIP assets alongside the DMGs.
+Linux publishes both the AppImage and the `.deb` in `latest-linux.yml` /
+`nightly-linux.yml`; keep both installers in the release assets so each install
+updates in its own format.
 
 ### Windows payload topology and update validation
 

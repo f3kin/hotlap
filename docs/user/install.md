@@ -57,6 +57,12 @@ Hotlap does not migrate or synchronize a T3 Code profile.
 Download the installer for your operating system and processor from
 [Hotlap Releases](https://github.com/shwarmadev/hotlap/releases).
 
+On Debian or Ubuntu, download the `.deb` and install it with
+`sudo apt install ./Hotlap-*.deb`. The `.deb` updates itself like the other
+desktop builds. It asks for your password to install each update. If your
+desktop has no password prompt, the update fails. Download the new `.deb` and
+install it the same way.
+
 ### Windows Subsystem for Linux
 
 Choose a WSL distro in **Settings → Connections** to run agents and projects
