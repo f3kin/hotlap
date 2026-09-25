@@ -279,11 +279,17 @@ function subscribeDynamicMapped<TTag extends EnvironmentSubscriptionRpcTag, A>(
                       const hasOnlyExpectedFailures =
                         cause.reasons.length > 0 &&
                         cause.reasons.every((reason) => reason._tag === "Fail");
+                      // Interrupting this fiber cannot be caught here, so an
+                      // interrupt-only cause is the server's Exit for the stream
+                      // (e.g. a handler interrupted while it shuts down). Like a
+                      // lost transport, it waits for the next session rather than
+                      // ending the durable subscription.
                       const isTransportFailure =
-                        hasOnlyExpectedFailures &&
-                        cause.reasons.every(
-                          (reason) => reason._tag === "Fail" && isRpcClientError(reason.error),
-                        );
+                        Cause.hasInterruptsOnly(cause) ||
+                        (hasOnlyExpectedFailures &&
+                          cause.reasons.every(
+                            (reason) => reason._tag === "Fail" && isRpcClientError(reason.error),
+                          ));
                       if (isTransportFailure) {
                         return Stream.fromEffect(
                           Effect.logWarning(
