@@ -338,6 +338,40 @@ describe("environment RPC", () => {
     }),
   );
 
+  it.effect("keeps a durable subscription alive when the server interrupts its stream", () =>
+    Effect.gen(function* () {
+      const subscriptions: string[] = [];
+      const firstClient = {
+        [WS_METHODS.subscribeTerminalEvents]: () => {
+          subscriptions.push("first");
+          // The server interrupted the handler: the Exit arrives as data.
+          return Stream.failCause(Cause.interrupt(1));
+        },
+      } as unknown as WsRpcProtocolClient;
+      const secondClient = {
+        [WS_METHODS.subscribeTerminalEvents]: () => {
+          subscriptions.push("second");
+          return Stream.never;
+        },
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+
+      const subscriptionFiber = yield* subscribe(WS_METHODS.subscribeTerminalEvents, {}).pipe(
+        Stream.runDrain,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
+      for (let i = 0; i < 50; i += 1) yield* Effect.yieldNow;
+      expect(subscriptionFiber.pollUnsafe()).toBeUndefined();
+
+      yield* SubscriptionRef.set(activeSession, Option.some(session(secondClient)));
+      for (let i = 0; i < 50; i += 1) yield* Effect.yieldNow;
+      expect(subscriptions).toEqual(["first", "second"]);
+      yield* Fiber.interrupt(subscriptionFiber);
+    }),
+  );
+
   it.effect("switches durable subscriptions when the supervisor replaces the session", () =>
     Effect.gen(function* () {
       const subscriptions: string[] = [];
