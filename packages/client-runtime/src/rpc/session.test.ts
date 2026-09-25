@@ -1436,6 +1436,40 @@ describe("supervised session against a stalling server", () => {
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
+  it.effect.each([{ when: "while connected" }, { when: "after an interrupted health check" }])(
+    "publishes only a settled state once disposed $when",
+    ({ when }) =>
+      Effect.gen(function* () {
+        const server = makeFakeServer();
+        const scope = yield* Scope.make();
+        const { supervisor, wakeups } = yield* makeSupervisedConnection(server).pipe(
+          Scope.provide(scope),
+        );
+        const published: string[] = [];
+        let closed = false;
+        yield* SubscriptionRef.changes(supervisor.state).pipe(
+          Stream.runForEach((state) =>
+            Effect.sync(() => {
+              if (closed) published.push(state.phase);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* settle();
+        if (when !== "while connected") {
+          server.interruptProbes();
+          yield* Queue.offer(wakeups, "application-active");
+          yield* settle();
+        }
+
+        closed = true;
+        yield* Scope.close(scope, Exit.void);
+        yield* advance(5_000);
+
+        expect(published).toEqual(["available"]);
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
   it.effect("fails a waiting request when its environment is removed", () =>
     Effect.gen(function* () {
       const server = makeFakeServer();
