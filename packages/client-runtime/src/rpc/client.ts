@@ -195,7 +195,11 @@ export function runStream<TTag extends EnvironmentStreamCommandRpcTag>(
   );
 }
 
-/** Matches the supervisor's first retry rung. */
+/**
+ * Resubscribe delay after a server interrupt when the caller sets no
+ * retryExpectedFailureAfter (callers such as shell and thread sync pass their
+ * own, e.g. 250 ms). This default matches the supervisor's first retry rung.
+ */
 const SERVER_INTERRUPTED_RESUBSCRIBE_AFTER = "3 seconds";
 
 interface SubscriptionOptions<TTag extends EnvironmentSubscriptionRpcTag> {
