@@ -1,5 +1,4 @@
 import {
-  cursorUsageWindowDetails,
   type EnvironmentId,
   type ProviderConsumeResetCreditOutcome,
   ProviderConsumeResetCreditInput,
@@ -10,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
+  cursorUsageWindowDetails,
   elapsedShare,
   formatDuration,
   formatResetsIn,
