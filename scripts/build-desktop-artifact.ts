@@ -3670,7 +3670,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     // Required by the .deb control file.
     homepage: "https://github.com/shwarmadev/hotlap",
     author: "Hotlap",
-    main: "apps/desktop/dist-electron/main.cjs",
+    main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
       options.platform,
       options.target,

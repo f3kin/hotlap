@@ -550,7 +550,12 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
 
     return {
       executablePath: process.execPath,
+      // Packaged builds only, so a dev instance never shares the cache with the
+      // prod app it is often run from. `--require` rather than NODE_COMPILE_CACHE,
+      // so the setting does not leak into the provider and terminal processes
+      // the backend starts.
       args: [
+        ...(environment.isPackaged ? ["--require", environment.compileCachePath] : []),
         environment.backendEntryPath,
         "--bootstrap-fd",
         "3",
