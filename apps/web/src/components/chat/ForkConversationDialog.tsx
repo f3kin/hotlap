@@ -120,7 +120,6 @@ function OpenForkConversationDialog(props: {
               instanceEntries={props.instanceEntries}
               modelOptionsByInstance={props.modelOptionsByInstance}
               disabled={pending}
-              triggerVariant="outline"
               triggerAriaLabel={pickerAriaLabel}
               onInstanceModelChange={(instanceId, model) => {
                 setModelSelection((current) =>

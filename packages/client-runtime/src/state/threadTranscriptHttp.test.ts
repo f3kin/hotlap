@@ -1,5 +1,6 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -20,6 +21,7 @@ import type { RpcSession } from "../rpc/session.ts";
 import {
   createThreadTranscriptCommand,
   fetchEnvironmentThreadTranscript,
+  ThreadTranscriptConnectionNotReadyError,
   ThreadTranscriptLoader,
 } from "./threadTranscriptHttp.ts";
 
@@ -108,80 +110,94 @@ describe("fetchEnvironmentThreadTranscript", () => {
     }),
   );
 
+  const EXPECTED = {
+    threadId: THREAD_ID,
+    title: "Readable thread",
+    markdown: "# Readable thread",
+    messageCount: 0,
+  } as const;
+
+  // Runs the command against one fake environment whose HTTP connection is `prepared`.
+  const makeTranscriptCommand = Effect.fn(function* (prepared: Option.Option<PreparedConnection>) {
+    const requested: Array<readonly [PreparedConnection, typeof THREAD_ID]> = [];
+    const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>({
+      ...AVAILABLE_CONNECTION_STATE,
+      desired: true,
+      network: "online",
+      phase: "connected",
+      attempt: 1,
+      generation: 1,
+    });
+    const supervisor = EnvironmentSupervisor.of({
+      target: TARGET,
+      state: supervisorState,
+      session: yield* SubscriptionRef.make<Option.Option<RpcSession>>(Option.none()),
+      prepared: yield* SubscriptionRef.make(prepared),
+      connect: Effect.void,
+      disconnect: Effect.void,
+      retryNow: Effect.void,
+    } satisfies EnvironmentSupervisor["Service"]);
+    const run: EnvironmentRegistry["Service"]["run"] = (_environmentId, effect) =>
+      Effect.provideService(effect, EnvironmentSupervisor, supervisor);
+    const followStream: EnvironmentRegistry["Service"]["followStream"] = (_environmentId, stream) =>
+      Stream.provideService(stream, EnvironmentSupervisor, supervisor);
+    const environments = EnvironmentRegistry.of({
+      run,
+      followStream,
+      stateChanges: () => Stream.never,
+    } as unknown as EnvironmentRegistry["Service"]);
+    const loader = ThreadTranscriptLoader.of({
+      load: (connection, threadId) =>
+        Effect.sync(() => {
+          requested.push([connection, threadId]);
+          return EXPECTED;
+        }),
+    });
+    const runtime = Atom.runtime(
+      Layer.merge(
+        Layer.succeed(EnvironmentRegistry, environments),
+        Layer.succeed(ThreadTranscriptLoader, loader),
+      ),
+    );
+    const command = createThreadTranscriptCommand(runtime);
+    const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (value) =>
+      Effect.sync(() => value.dispose()),
+    );
+    const load = () =>
+      Effect.promise(() =>
+        command.run(registry, {
+          environmentId: TARGET.environmentId,
+          input: { threadId: THREAD_ID },
+        }),
+      );
+    return { load, requested } as const;
+  });
+
   it.effect("loads a fresh transcript through the target environment command", () =>
     Effect.gen(function* () {
-      const requested: Array<readonly [PreparedConnection, typeof THREAD_ID]> = [];
-      const expected = {
-        threadId: THREAD_ID,
-        title: "Readable thread",
-        markdown: "# Readable thread",
-        messageCount: 0,
-      } as const;
-      const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>({
-        ...AVAILABLE_CONNECTION_STATE,
-        desired: true,
-        network: "online",
-        phase: "connected",
-        attempt: 1,
-        generation: 1,
-      });
-      const supervisor = EnvironmentSupervisor.of({
-        target: TARGET,
-        state: supervisorState,
-        session: yield* SubscriptionRef.make<Option.Option<RpcSession>>(Option.none()),
-        prepared: yield* SubscriptionRef.make(Option.some(PREPARED)),
-        connect: Effect.void,
-        disconnect: Effect.void,
-        retryNow: Effect.void,
-      } satisfies EnvironmentSupervisor["Service"]);
-      const run: EnvironmentRegistry["Service"]["run"] = (_environmentId, effect) =>
-        Effect.provideService(effect, EnvironmentSupervisor, supervisor);
-      const followStream: EnvironmentRegistry["Service"]["followStream"] = (
-        _environmentId,
-        stream,
-      ) => Stream.provideService(stream, EnvironmentSupervisor, supervisor);
-      const environments = EnvironmentRegistry.of({
-        run,
-        followStream,
-        stateChanges: () => Stream.never,
-      } as unknown as EnvironmentRegistry["Service"]);
-      const loader = ThreadTranscriptLoader.of({
-        load: (prepared, threadId) =>
-          Effect.sync(() => {
-            requested.push([prepared, threadId]);
-            return expected;
-          }),
-      });
-      const runtime = Atom.runtime(
-        Layer.merge(
-          Layer.succeed(EnvironmentRegistry, environments),
-          Layer.succeed(ThreadTranscriptLoader, loader),
-        ),
-      );
-      const command = createThreadTranscriptCommand(runtime);
-      const registry = yield* Effect.acquireRelease(Effect.sync(AtomRegistry.make), (value) =>
-        Effect.sync(() => value.dispose()),
-      );
+      const { load, requested } = yield* makeTranscriptCommand(Option.some(PREPARED));
 
-      const result = yield* Effect.promise(() =>
-        command.run(registry, {
-          environmentId: TARGET.environmentId,
-          input: { threadId: THREAD_ID },
-        }),
-      );
-      const second = yield* Effect.promise(() =>
-        command.run(registry, {
-          environmentId: TARGET.environmentId,
-          input: { threadId: THREAD_ID },
-        }),
-      );
+      const result = yield* load();
+      const second = yield* load();
 
-      expect(result).toMatchObject({ _tag: "Success", value: expected });
-      expect(second).toMatchObject({ _tag: "Success", value: expected });
+      expect(result).toMatchObject({ _tag: "Success", value: EXPECTED });
+      expect(second).toMatchObject({ _tag: "Success", value: EXPECTED });
       expect(requested).toEqual([
         [PREPARED, THREAD_ID],
         [PREPARED, THREAD_ID],
       ]);
+    }),
+  );
+
+  it.effect("fails without loading when the environment HTTP connection is not ready", () =>
+    Effect.gen(function* () {
+      const { load, requested } = yield* makeTranscriptCommand(Option.none());
+
+      const result = yield* load();
+
+      if (result._tag !== "Failure") throw new Error("expected the transcript load to fail");
+      expect(Cause.squash(result.cause)).toBeInstanceOf(ThreadTranscriptConnectionNotReadyError);
+      expect(requested).toEqual([]);
     }),
   );
 });

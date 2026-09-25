@@ -16,6 +16,12 @@ import {
 import { prepareMigrationLedgers } from "./HotlapMigrations.ts";
 import migrateThreadForks from "./HotlapMigrations/001_ProjectionThreadForks.ts";
 
+// Every upstream migration lands in the upstream ledger, in manifest order.
+const expectedUpstreamLedger = migrationManifest.map(([migrationId, name]) => ({
+  migrationId,
+  name,
+}));
+
 const withDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
   effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
 
@@ -50,11 +56,7 @@ it.effect("records upstream and Hotlap migrations in separate ledgers", () =>
         ORDER BY migration_id
       `;
 
-      assert.equal(upstream.length, 53);
-      assert.deepEqual(upstream.at(-1), {
-        migrationId: 53,
-        name: "PullRequestFilesViewed",
-      });
+      assert.deepEqual(upstream, expectedUpstreamLedger);
       assert.deepEqual(hotlap, [
         { migrationId: 1, name: "ProjectionThreadForks" },
         { migrationId: 2, name: "ProjectionThreadProviderRoutingMode" },
@@ -82,10 +84,7 @@ it.effect("upgrades a valid older T3 schema before applying Hotlap migrations", 
         ORDER BY migration_id
       `;
 
-      assert.deepEqual(upstream.at(-1), {
-        migrationId: 53,
-        name: "PullRequestFilesViewed",
-      });
+      assert.deepEqual(upstream, expectedUpstreamLedger);
       assert.deepEqual(hotlap, [
         { migrationId: 1, name: "ProjectionThreadForks" },
         { migrationId: 2, name: "ProjectionThreadProviderRoutingMode" },

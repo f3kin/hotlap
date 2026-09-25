@@ -81,7 +81,7 @@ export const threadTranscriptLoaderLayer: Layer.Layer<
   }),
 );
 
-class ThreadTranscriptConnectionNotReadyError extends Data.TaggedError(
+export class ThreadTranscriptConnectionNotReadyError extends Data.TaggedError(
   "ThreadTranscriptConnectionNotReadyError",
 )<{ readonly message: string }> {}
 
