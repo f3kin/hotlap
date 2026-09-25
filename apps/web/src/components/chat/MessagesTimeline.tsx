@@ -2520,10 +2520,9 @@ function AssistantForkButton({
           <Button
             type="button"
             size="icon-xs"
-            variant="ghost"
+            variant="ghost-muted"
             aria-label="Fork conversation from this response"
             disabled={pending}
-            className="text-muted-foreground hover:text-foreground"
             onClick={() => {
               if (pending) return;
               setPending(true);

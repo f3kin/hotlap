@@ -32,8 +32,8 @@ export function ProviderRoutingModeControl(props: {
         </SelectValue>
       </ComposerSelectControl>
       <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-        <SelectItem value="auto" className="min-w-60 py-2" disabled={!props.autoEnabled}>
-          <div className="grid gap-0.5">
+        <SelectItem value="auto" className="min-w-60" disabled={!props.autoEnabled}>
+          <div className="grid gap-0.5 py-1">
             <span className="font-medium">Auto</span>
             <span className="text-xs text-muted-foreground">
               {props.autoEnabled
@@ -42,8 +42,8 @@ export function ProviderRoutingModeControl(props: {
             </span>
           </div>
         </SelectItem>
-        <SelectItem value="fixed" className="min-w-60 py-2">
-          <div className="grid gap-0.5">
+        <SelectItem value="fixed" className="min-w-60">
+          <div className="grid gap-0.5 py-1">
             <span className="font-medium">Fixed</span>
             <span className="text-xs text-muted-foreground">Stay on this account.</span>
           </div>
