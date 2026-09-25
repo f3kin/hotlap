@@ -10,6 +10,7 @@ import {
   buildBulkUnpinContextMenuItem,
   buildMultiSelectThreadContextMenuItems,
   createThreadJumpHintVisibilityController,
+  mostUrgentAttentionStatus,
   deleteSelectedThreadEntries,
   filterSidebarProjectScopeItems,
   getSidebarThreadIdsToPrewarm,
@@ -2608,4 +2609,14 @@ describe("navigation after parking a thread", () => {
       ).toBe(expected);
     },
   );
+});
+
+describe("mostUrgentAttentionStatus", () => {
+  it("rolls up approval over input over failed, and ignores statuses that need nobody", () => {
+    expect(mostUrgentAttentionStatus(["failed", "input", "working", "approval"])).toBe("approval");
+    expect(mostUrgentAttentionStatus(["ready", "failed", "input"])).toBe("input");
+    expect(mostUrgentAttentionStatus(["monitoring", "failed"])).toBe("failed");
+    expect(mostUrgentAttentionStatus(["working", "monitoring", "ready"])).toBeNull();
+    expect(mostUrgentAttentionStatus([])).toBeNull();
+  });
 });
