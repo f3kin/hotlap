@@ -191,6 +191,8 @@ import {
   type SidebarListItem,
   type SidebarListMarker,
   type SidebarSection,
+  mostUrgentAttentionStatus,
+  type SidebarAttentionStatus,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
@@ -315,6 +317,65 @@ const SIDEBAR_STATUS_ICONS = {
   monitoring: EyeIcon,
   done: CircleCheckIcon,
 } as const;
+
+// The statuses that need the user, as every row renders them: the card's
+// status label, the slim row's glyph and a collapsed group's roll-up.
+const SIDEBAR_ATTENTION_PRESENTATION = {
+  approval: {
+    label: "Approval",
+    icon: "approval",
+    className: "text-amber-700 dark:text-amber-300",
+  },
+  input: {
+    label: "Input",
+    icon: "input",
+    className: "text-indigo-600 dark:text-indigo-300",
+  },
+  failed: {
+    label: "Failed",
+    icon: "failed",
+    className: "text-red-700 dark:text-red-300",
+  },
+} as const satisfies Record<
+  SidebarAttentionStatus,
+  { label: string; icon: keyof typeof SIDEBAR_STATUS_ICONS; className: string }
+>;
+
+// A status as an icon only, labelled for assistive tech: the slim row's
+// status and a collapsed group's attention roll-up.
+function SidebarStatusGlyph(props: {
+  label: string;
+  icon: keyof typeof SIDEBAR_STATUS_ICONS;
+  className: string;
+  testId?: string;
+}) {
+  const Icon = SIDEBAR_STATUS_ICONS[props.icon];
+  return (
+    <span
+      role="img"
+      aria-label={props.label}
+      data-testid={props.testId}
+      className={cn("inline-flex shrink-0 items-center justify-center", props.className)}
+    >
+      <Icon aria-hidden className="size-3" />
+    </span>
+  );
+}
+
+/**
+ * What a collapsed group shows when something it hides needs the user: the
+ * most urgent status's glyph, exactly as the rows render it.
+ */
+export function SidebarAttentionRollup(props: { status: SidebarAttentionStatus }) {
+  const presentation = SIDEBAR_ATTENTION_PRESENTATION[props.status];
+  return (
+    <SidebarStatusGlyph
+      label={`${presentation.label} inside`}
+      icon={presentation.icon}
+      className={presentation.className}
+    />
+  );
+}
 
 export const EMPTY_PROVIDER_ENTRIES: ReadonlyMap<string, ProviderInstanceEntry> = new Map();
 // Collapsed shelves share one empty list so a route change alone does not
@@ -714,6 +775,8 @@ export function SidebarSectionHeader(props: {
   isDropTarget?: boolean;
   // A collapsed group holding the active thread takes the active row's surface.
   active?: boolean;
+  // A collapsed group's attention roll-up, beside its chevron.
+  status?: ReactNode;
   toggle?: { expanded: boolean; onToggle: () => void };
 }) {
   const snoozed = props.marker === "snoozed-header";
@@ -765,6 +828,7 @@ export function SidebarSectionHeader(props: {
           )}
         />
       )}
+      {props.status}
       {props.toggle ? <SidebarDisclosureChevron expanded={props.toggle.expanded} /> : null}
     </>
   );
@@ -1137,6 +1201,11 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
    */
   toggle?: { expanded: boolean; onToggle: () => void; label: string } | undefined;
   /**
+   * Slim rows only. The most urgent status among rows this one hides (a
+   * collapsed Master's Cards), rolled up into its status slot.
+   */
+  hiddenAttention?: SidebarAttentionStatus | null | undefined;
+  /**
    * Slim rows only. Replaces the lifecycle button in the trailing slot with
    * a button that opens the row's context menu: on hover, or always on touch.
    */
@@ -1268,43 +1337,27 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             icon: "monitoring" as const,
             className: "text-foreground dark:text-white",
           }
-        : status === "approval"
-          ? {
-              label: "Approval",
-              icon: "approval" as const,
-              className: "text-amber-700 dark:text-amber-300",
-            }
-          : status === "input"
+        : status === "approval" || status === "input" || status === "failed"
+          ? SIDEBAR_ATTENTION_PRESENTATION[status]
+          : isWoke
             ? {
-                label: "Input",
-                icon: "input" as const,
-                className: "text-indigo-600 dark:text-indigo-300",
+                label: "Woke",
+                icon: "woke" as const,
+                className: "text-amber-700 dark:text-amber-300",
               }
-            : status === "failed"
+            : hasUnsentDraft
               ? {
-                  label: "Failed",
-                  icon: "failed" as const,
-                  className: "text-red-700 dark:text-red-300",
+                  label: "Draft",
+                  icon: null,
+                  className: "text-amber-700 dark:text-amber-300",
                 }
-              : isWoke
+              : isUnread
                 ? {
-                    label: "Woke",
-                    icon: "woke" as const,
-                    className: "text-amber-700 dark:text-amber-300",
+                    label: "Done",
+                    icon: "done" as const,
+                    className: "text-emerald-700 dark:text-emerald-300",
                   }
-                : hasUnsentDraft
-                  ? {
-                      label: "Draft",
-                      icon: null,
-                      className: "text-amber-700 dark:text-amber-300",
-                    }
-                  : isUnread
-                    ? {
-                        label: "Done",
-                        icon: "done" as const,
-                        className: "text-emerald-700 dark:text-emerald-300",
-                      }
-                    : null;
+                : null;
   const isWokeStatus = topStatus?.icon === "woke";
   const StatusIcon =
     topStatus?.icon != null && topStatus.icon !== "woke"
@@ -1678,17 +1731,23 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       />
     </span>
   ) : null;
-  const slimStatusIcon =
-    props.showStatusIcon && topStatus && StatusIcon ? (
-      <span
-        role="img"
-        aria-label={topStatus.label}
-        data-testid={`sidebar-status-${thread.id}`}
-        className={cn("inline-flex shrink-0 items-center justify-center", topStatus.className)}
-      >
-        <StatusIcon aria-hidden className="size-3" />
-      </span>
-    ) : null;
+  // A collapsed parent row (a Master over hidden Cards) rolls up what its
+  // hidden rows need when that outranks its own status.
+  const rolledUpAttention =
+    props.hiddenAttention != null &&
+    mostUrgentAttentionStatus([props.hiddenAttention, status]) !== status
+      ? props.hiddenAttention
+      : null;
+  const slimStatusIcon = !props.showStatusIcon ? null : rolledUpAttention ? (
+    <SidebarAttentionRollup status={rolledUpAttention} />
+  ) : topStatus && StatusIcon && topStatus.icon !== null && topStatus.icon !== "woke" ? (
+    <SidebarStatusGlyph
+      label={topStatus.label}
+      icon={topStatus.icon}
+      className={topStatus.className}
+      testId={`sidebar-status-${thread.id}`}
+    />
+  ) : null;
   // Same pen the new-thread draft rows lead with, so both kinds of unsent
   // work read the same way in the list.
   const draftIndicator =
