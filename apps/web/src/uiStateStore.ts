@@ -353,6 +353,27 @@ function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMetho
     : { ...state, pullRequestMergeMethod: method };
 }
 
+/**
+ * The keys a sidebar project's expansion is stored under, most specific
+ * first: its grouped (logical) key, each member's physical key, and each
+ * member's legacy cwd key. resolveProjectExpanded reads the first one set;
+ * setProjectExpanded writes them all, so every sidebar resolves the same
+ * choice however it keys the project.
+ */
+export function projectExpansionPreferenceKeys(project: {
+  readonly projectKey: string;
+  readonly memberProjects: ReadonlyArray<{
+    readonly physicalProjectKey: string;
+    readonly workspaceRoot: string;
+  }>;
+}): string[] {
+  return [
+    project.projectKey,
+    ...project.memberProjects.map((member) => member.physicalProjectKey),
+    ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
+  ];
+}
+
 export function resolveProjectExpanded(
   projectExpandedById: Readonly<Record<string, boolean>>,
   preferenceKeys: readonly string[],

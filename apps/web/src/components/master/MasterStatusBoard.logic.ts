@@ -1,3 +1,10 @@
+import {
+  mostUrgentAttentionStatus,
+  type SidebarAttentionStatus,
+  type SidebarThreadStatus,
+} from "../Sidebar.logic";
+import { resolveProjectExpanded } from "../../uiStateStore";
+
 export interface MasterBoardThread {
   readonly id: string;
   readonly environmentId: string;
@@ -276,11 +283,14 @@ export function isDisclosureOpen(disclosure: Disclosure, key: string): boolean {
 }
 
 /**
- * Disclosure as the UI store persists it across reloads: a project under its
- * physical project key in `projectExpandedById` (the entry the legacy sidebar
- * reads and writes), everything else (a Master's Cards, the shelves) under its
- * disclosure key in `masterWorkspaceExpandedById`. `projectStoreKeys` maps a
- * project's disclosure key to its store key.
+ * Disclosure as the UI store persists it across reloads: a project in
+ * `projectExpandedById` through the same key resolution the legacy sidebar
+ * uses (its grouped key, then each member's physical key, then each legacy
+ * cwd key: `projectExpansionPreferenceKeys`, read with
+ * `resolveProjectExpanded`), so both sidebars agree on every project;
+ * everything else (a Master's Cards, the shelves) under its disclosure key in
+ * `masterWorkspaceExpandedById`. `projectStoreKeys` maps a project's
+ * disclosure key to its preference keys.
  */
 export interface PersistedDisclosure {
   readonly projectExpandedById: Readonly<Record<string, boolean>>;
@@ -289,15 +299,14 @@ export interface PersistedDisclosure {
 
 export function readPersistedDisclosure(
   persisted: PersistedDisclosure,
-  projectStoreKeys: ReadonlyMap<string, string>,
+  projectStoreKeys: ReadonlyMap<string, readonly string[]>,
 ): Disclosure {
   const disclosure = new Map<string, boolean>();
   for (const [key, open] of Object.entries(persisted.masterWorkspaceExpandedById)) {
     if (!key.startsWith("project:")) disclosure.set(key, open);
   }
-  for (const [key, storeKey] of projectStoreKeys) {
-    const open = persisted.projectExpandedById[storeKey];
-    if (open !== undefined) disclosure.set(key, open);
+  for (const [key, preferenceKeys] of projectStoreKeys) {
+    disclosure.set(key, resolveProjectExpanded(persisted.projectExpandedById, preferenceKeys));
   }
   return disclosure;
 }
@@ -306,23 +315,39 @@ export function readPersistedDisclosure(
 export function persistedDisclosureWrites(
   before: Disclosure,
   after: Disclosure,
-  projectStoreKeys: ReadonlyMap<string, string>,
+  projectStoreKeys: ReadonlyMap<string, readonly string[]>,
 ): Array<{
   readonly slot: "project" | "masterWorkspace";
-  readonly key: string;
+  readonly keys: readonly string[];
   readonly open: boolean;
 }> {
-  const writes: Array<{ slot: "project" | "masterWorkspace"; key: string; open: boolean }> = [];
+  const writes: Array<{
+    slot: "project" | "masterWorkspace";
+    keys: readonly string[];
+    open: boolean;
+  }> = [];
   for (const [key, open] of after) {
-    if (before.get(key) === open) continue;
+    if (isDisclosureOpen(before, key) === open && before.has(key)) continue;
     if (key.startsWith("project:")) {
-      const storeKey = projectStoreKeys.get(key);
-      if (storeKey !== undefined) writes.push({ slot: "project", key: storeKey, open });
+      const preferenceKeys = projectStoreKeys.get(key);
+      if (preferenceKeys !== undefined)
+        writes.push({ slot: "project", keys: preferenceKeys, open });
     } else {
-      writes.push({ slot: "masterWorkspace", key, open });
+      writes.push({ slot: "masterWorkspace", keys: [key], open });
     }
   }
   return writes;
+}
+
+/**
+ * What a collapsible group's header rolls up: the most urgent status among
+ * the rows it hides, only while it is collapsed (open, the rows show it).
+ */
+export function collapsedAttention(
+  open: boolean,
+  statuses: Iterable<SidebarThreadStatus>,
+): SidebarAttentionStatus | null {
+  return open ? null : mostUrgentAttentionStatus(statuses);
 }
 
 /** Records the same choice for several groups (a toggle, or collapse/expand all). */

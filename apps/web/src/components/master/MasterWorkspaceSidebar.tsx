@@ -54,7 +54,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "~/terminal
 import { useProjects, useServerConfigs } from "~/state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useClientSettings } from "~/hooks/useSettings";
-import { useUiStateStore } from "~/uiStateStore";
+import { projectExpansionPreferenceKeys, useUiStateStore } from "~/uiStateStore";
 import { derivePhysicalProjectKey, selectProjectGroupingSettings } from "~/logicalProject";
 import {
   deriveProviderEntriesByEnvironment,
@@ -83,7 +83,6 @@ import {
   SidebarThreadRow,
 } from "../Sidebar";
 import {
-  mostUrgentAttentionStatus,
   resolveAdjacentThreadId,
   resolveSidebarThreadStatus,
   sortPinnedThreadsForSidebar,
@@ -92,6 +91,7 @@ import {
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
   deriveMasterWorkspace,
+  collapsedAttention,
   disclosureKey,
   isDisclosureOpen,
   onNavigate,
@@ -173,9 +173,9 @@ interface RowContext {
 // standard row's inline lifecycle buttons stay off.
 const noLifecycleAction = () => {};
 
-// What a collapsed group hides that needs the user, most urgent first.
-function hiddenAttention(threads: readonly ThreadRow[]) {
-  return mostUrgentAttentionStatus(threads.map(resolveSidebarThreadStatus));
+// A collapsible group's roll-up of the rows it hides, only while collapsed.
+function hiddenAttention(open: boolean, threads: readonly ThreadRow[]) {
+  return collapsedAttention(open, threads.map(resolveSidebarThreadStatus));
 }
 
 // Sub-level headings inside a project keep the rows' empty icon slot, so their
@@ -290,7 +290,7 @@ function MasterBoard({
       }
     : undefined;
   // Collapsed, the Master rolls up what its hidden Cards need.
-  const attention = open ? null : hiddenAttention(cards);
+  const attention = hiddenAttention(open, cards);
   return (
     <>
       {structural ? (
@@ -517,44 +517,6 @@ function MasterWorkspaceSidebar() {
     () => new Map(projects.map((project) => [`${project.environmentId}:${project.id}`, project])),
     [projects],
   );
-  // Disclosure records persist in the UI store across reloads: projects in
-  // projectExpandedById (under the same physical key the legacy sidebar
-  // uses), Masters' Cards and the shelves in masterWorkspaceExpandedById.
-  const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
-  const masterWorkspaceExpandedById = useUiStateStore((state) => state.masterWorkspaceExpandedById);
-  const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
-  const setMasterWorkspaceExpanded = useUiStateStore((state) => state.setMasterWorkspaceExpanded);
-  const projectStoreKeys = useMemo(
-    () =>
-      new Map(
-        projects.map((project) => [
-          disclosureKey.project({ environmentId: project.environmentId, projectId: project.id }),
-          derivePhysicalProjectKey(project),
-        ]),
-      ),
-    [projects],
-  );
-  const disclosure = useMemo(
-    () =>
-      readPersistedDisclosure(
-        { projectExpandedById, masterWorkspaceExpandedById },
-        projectStoreKeys,
-      ),
-    [masterWorkspaceExpandedById, projectExpandedById, projectStoreKeys],
-  );
-  const writeDisclosure = useCallback(
-    (next: Disclosure) => {
-      for (const write of persistedDisclosureWrites(disclosure, next, projectStoreKeys)) {
-        if (write.slot === "project") setProjectExpanded([write.key], write.open);
-        else setMasterWorkspaceExpanded([write.key], write.open);
-      }
-    },
-    [disclosure, projectStoreKeys, setMasterWorkspaceExpanded, setProjectExpanded],
-  );
-  const setDisclosureState = useCallback(
-    (update: (current: Disclosure) => Disclosure) => writeDisclosure(update(disclosure)),
-    [disclosure, writeDisclosure],
-  );
   const projectPresentationByKey = useMemo(() => {
     const presentations = new Map<
       string,
@@ -570,6 +532,50 @@ function MasterWorkspaceSidebar() {
     }
     return presentations;
   }, [projectGroups]);
+  // Disclosure records persist in the UI store across reloads: projects in
+  // projectExpandedById under the legacy sidebar's own preference keys (so
+  // both sidebars resolve the same choice), Masters' Cards and the shelves in
+  // masterWorkspaceExpandedById.
+  const projectExpandedById = useUiStateStore((state) => state.projectExpandedById);
+  const masterWorkspaceExpandedById = useUiStateStore((state) => state.masterWorkspaceExpandedById);
+  const setProjectExpanded = useUiStateStore((state) => state.setProjectExpanded);
+  const setMasterWorkspaceExpanded = useUiStateStore((state) => state.setMasterWorkspaceExpanded);
+  const projectStoreKeys = useMemo(
+    () =>
+      new Map(
+        projects.map((project) => {
+          const group = projectPresentationByKey.get(
+            `${project.environmentId}:${project.id}`,
+          )?.project;
+          return [
+            disclosureKey.project({ environmentId: project.environmentId, projectId: project.id }),
+            group ? projectExpansionPreferenceKeys(group) : [derivePhysicalProjectKey(project)],
+          ] as const;
+        }),
+      ),
+    [projectPresentationByKey, projects],
+  );
+  const disclosure = useMemo(
+    () =>
+      readPersistedDisclosure(
+        { projectExpandedById, masterWorkspaceExpandedById },
+        projectStoreKeys,
+      ),
+    [masterWorkspaceExpandedById, projectExpandedById, projectStoreKeys],
+  );
+  const writeDisclosure = useCallback(
+    (next: Disclosure) => {
+      for (const write of persistedDisclosureWrites(disclosure, next, projectStoreKeys)) {
+        if (write.slot === "project") setProjectExpanded(write.keys, write.open);
+        else setMasterWorkspaceExpanded(write.keys, write.open);
+      }
+    },
+    [disclosure, projectStoreKeys, setMasterWorkspaceExpanded, setProjectExpanded],
+  );
+  const setDisclosureState = useCallback(
+    (update: (current: Disclosure) => Disclosure) => writeDisclosure(update(disclosure)),
+    [disclosure, writeDisclosure],
+  );
   const projectTitleByKey = useMemo(
     () =>
       new Map(
@@ -1028,7 +1034,7 @@ function MasterWorkspaceSidebar() {
                     if (!presentation) return null;
                     const open = isProjectOpen(group);
                     // Collapsed, the header rolls up what its hidden rows need.
-                    const attention = open ? null : hiddenAttention(navigableRows(group));
+                    const attention = hiddenAttention(open, navigableRows(group));
                     return (
                       <Fragment key={projectKey}>
                         <SidebarSectionHeader

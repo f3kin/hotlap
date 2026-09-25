@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  PERSISTED_STATE_KEY,
   parsePersistedState,
+  persistState,
+  projectExpansionPreferenceKeys,
+  resolveProjectExpanded,
   setMasterWorkspaceExpanded,
   setProjectExpanded,
   type PersistedUiState,
@@ -9,6 +13,7 @@ import {
 } from "../../uiStateStore";
 
 import {
+  collapsedAttention,
   deriveMasterBoard,
   deriveMasterWorkspace,
   isCardThreadTitle,
@@ -155,6 +160,26 @@ describe("projectWorkSummary", () => {
   });
 });
 
+// Saves with the real persistState into an in-memory localStorage and reads
+// the result back with parsePersistedState, as the app does on start.
+function reloadThroughStorage(state: UiState): UiState {
+  const items = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+    removeItem: (key: string) => void items.delete(key),
+  };
+  vi.stubGlobal("window", { localStorage: storage });
+  try {
+    persistState(state);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+  return parsePersistedState(
+    JSON.parse(items.get(PERSISTED_STATE_KEY) ?? "{}") as PersistedUiState,
+  );
+}
+
 describe("collapsible groups", () => {
   // A small workspace: a pinned Master with a Card; orchard with a Master, its
   // Card, a chat and an orphan Card; lighthouse with a Master and an archived
@@ -200,7 +225,23 @@ describe("collapsible groups", () => {
 
   // The sidebar's disclosure, driven through the same entry points the
   // component calls: onNavigate for every navigation, setDisclosure for toggles.
-  const projectStoreKeys = new Map(projects.map((key) => [key, `physical:${key}`]));
+  // Each project stored as the legacy sidebar keys it under repository
+  // grouping: a grouped key that differs from its physical key, then the
+  // physical key, then the legacy cwd key.
+  const projectStoreKeys = new Map(
+    model.activeProjects.map((group) => [
+      disclosureKey.project(group),
+      projectExpansionPreferenceKeys({
+        projectKey: `repo:${group.projectId}`,
+        memberProjects: [
+          {
+            physicalProjectKey: `physical:${group.projectId}`,
+            workspaceRoot: `/tmp/${group.projectId}`,
+          },
+        ],
+      }),
+    ]),
+  );
   function sidebar() {
     // The persisted UI store, written and read through the same adapter the
     // component uses; the last reported route lives in memory.
@@ -212,8 +253,8 @@ describe("collapsible groups", () => {
       for (const change of persistedDisclosureWrites(current(), next, projectStoreKeys)) {
         store =
           change.slot === "project"
-            ? setProjectExpanded(store, [change.key], change.open)
-            : setMasterWorkspaceExpanded(store, [change.key], change.open);
+            ? setProjectExpanded(store, change.keys, change.open)
+            : setMasterWorkspaceExpanded(store, change.keys, change.open);
       }
     };
     const go = (target: string | null, source: NavigationSource) => {
@@ -243,19 +284,19 @@ describe("collapsible groups", () => {
       },
       // The router effect re-running on an unchanged route (a re-render).
       rerender: () => go(active, "route"),
-      // A reload: the store comes back from what persistState wrote, the
-      // in-memory landing is gone, and the router lands on the same route.
+      // A reload: the real save function writes the store, it is read back
+      // the way the app reads it at start, the in-memory route is gone, and
+      // the router lands on the same route.
       reload() {
-        store = parsePersistedState(
-          JSON.parse(
-            JSON.stringify({
-              projectExpandedById: store.projectExpandedById,
-              masterWorkspaceExpandedById: store.masterWorkspaceExpandedById,
-            }),
-          ) as PersistedUiState,
-        );
+        store = reloadThroughStorage(store);
         route = null;
         go(active, "route");
+      },
+      get store() {
+        return store;
+      },
+      set store(next: UiState) {
+        store = next;
       },
       toggle(key: string) {
         write(setDisclosure(current(), [key], !isDisclosureOpen(current(), key)));
@@ -328,6 +369,25 @@ describe("collapsible groups", () => {
     expect(view.open(orchard)).toBe(false);
     view.navigate(leave);
     expect(view.open(orchard)).toBe(false);
+  });
+
+  it("shares project collapse with the legacy sidebar through its grouped key", () => {
+    const orchardKeys = projectStoreKeys.get(orchard)!;
+    const view = sidebar();
+    // The legacy sidebar collapsed orchard under its grouped key only.
+    view.store = setProjectExpanded(view.store, [`repo:orchard`], false);
+    expect(view.open(orchard)).toBe(false);
+    // Reopening it here reaches the legacy sidebar, which reads the grouped key first.
+    view.toggle(orchard);
+    expect(resolveProjectExpanded(view.store.projectExpandedById, orchardKeys)).toBe(true);
+    expect(view.store.projectExpandedById["repo:orchard"]).toBe(true);
+  });
+
+  it("reads very old cwd-format project state", () => {
+    const view = sidebar();
+    view.store = parsePersistedState({ collapsedProjectCwds: ["/tmp/orchard"] });
+    expect(view.open(orchard)).toBe(false);
+    expect(view.open(lighthouse)).toBe(true);
   });
 
   it("starts projects and Masters open and the quiet shelves collapsed", () => {
@@ -454,6 +514,14 @@ describe("collapsible groups", () => {
         for (const key of userCollapsed) expect(view.open(key), `${label} ${key}`).toBe(false);
       }
     }
+  });
+});
+
+describe("collapsedAttention", () => {
+  it("rolls up what a group hides only while it is collapsed", () => {
+    expect(collapsedAttention(false, ["ready", "failed", "approval"])).toBe("approval");
+    expect(collapsedAttention(true, ["ready", "failed", "approval"])).toBeNull();
+    expect(collapsedAttention(false, ["ready", "working"])).toBeNull();
   });
 });
 
