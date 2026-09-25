@@ -308,6 +308,49 @@ describe("environment RPC", () => {
     }),
   );
 
+  it.effect("counts the wait for a reconnecting session as request time", () =>
+    Effect.gen(function* () {
+      const observations: string[] = [];
+      const client = {
+        [WS_METHODS.cloudGetRelayClientStatus]: () =>
+          Effect.succeed({ status: "available", version: "2026.6.0" }),
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.update(supervisor.state, (state) => ({
+        ...state,
+        desired: true,
+        phase: "backoff" as const,
+      }));
+
+      const resultFiber = yield* request(WS_METHODS.cloudGetRelayClientStatus, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.provideService(
+          EnvironmentRpcRequestObserver,
+          EnvironmentRpcRequestObserver.of({
+            observe: ({ method }) =>
+              Effect.sync(() => {
+                observations.push(`start:${method}`);
+                return Effect.sync(() => {
+                  observations.push(`finish:${method}`);
+                });
+              }),
+          }),
+        ),
+        Effect.forkChild,
+      );
+      for (let i = 0; i < 20; i += 1) yield* Effect.yieldNow;
+      // The slow-request toast starts counting while the request waits.
+      expect(observations).toEqual([`start:${WS_METHODS.cloudGetRelayClientStatus}`]);
+
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+      yield* Fiber.join(resultFiber);
+      expect(observations).toEqual([
+        `start:${WS_METHODS.cloudGetRelayClientStatus}`,
+        `finish:${WS_METHODS.cloudGetRelayClientStatus}`,
+      ]);
+    }),
+  );
+
   it.effect("binds finite streaming commands to one active session", () =>
     Effect.gen(function* () {
       const firstEvents = yield* Queue.unbounded<RelayClientInstallProgressEvent>();
