@@ -140,6 +140,21 @@ describe("projectScripts helpers", () => {
       T3CODE_PROJECT_ROOT: "/repo",
       T3CODE_WORKTREE_PATH: "/repo/worktree-a",
     });
+    expect(env.T3CODE_THREAD_ID).toBeUndefined();
+  });
+
+  it("adds the launching thread ID only when one is supplied", () => {
+    const env = projectScriptRuntimeEnv({
+      project: { cwd: "/repo" },
+      worktreePath: "/repo/worktree-a",
+      threadId: "thread-123",
+    });
+
+    expect(env).toMatchObject({
+      T3CODE_PROJECT_ROOT: "/repo",
+      T3CODE_WORKTREE_PATH: "/repo/worktree-a",
+      T3CODE_THREAD_ID: "thread-123",
+    });
   });
 
   it("allows overriding runtime env values", () => {
