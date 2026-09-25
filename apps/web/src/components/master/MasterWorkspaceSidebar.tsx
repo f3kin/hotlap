@@ -458,8 +458,8 @@ function MasterWorkspaceSidebar() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeSearchIndex, setActiveSearchIndex] = useState(0);
-  // The thread the last navigation landed on (in memory: a reload lands again).
-  const [landedOn, setLandedOn] = useState<string | null>(null);
+  // The route the router last reported (in memory: after a reload it lands again).
+  const [route, setRoute] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ key: string; title: string } | null>(null);
 
   const capability = useCallback(
@@ -599,12 +599,12 @@ function MasterWorkspaceSidebar() {
   // thread that arrives late is still revealed.
   const navigateDisclosureTo = useCallback(
     (target: string | null, source: NavigationSource) => {
-      const next = onNavigate(shownWorkspace, { disclosure, landedOn }, rowKey, target, source);
+      const next = onNavigate(shownWorkspace, { disclosure, route }, rowKey, target, source);
       if (next === null) return;
       writeDisclosure(next.disclosure);
-      if (next.landedOn !== landedOn) setLandedOn(next.landedOn);
+      if (next.route !== route) setRoute(next.route);
     },
-    [disclosure, landedOn, shownWorkspace, writeDisclosure],
+    [disclosure, route, shownWorkspace, writeDisclosure],
   );
   useLayoutEffect(() => {
     navigateDisclosureTo(activeKey, "route");

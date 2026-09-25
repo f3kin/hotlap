@@ -375,17 +375,22 @@ export function disclosureKeysHolding<T extends MasterBoardThread>(
   return null;
 }
 
-/** The sidebar's disclosure records plus the thread the last navigation landed on. */
+/**
+ * The sidebar's disclosure records plus the route the router last reported
+ * and acted on. The route is tracked on its own, apart from user navigation:
+ * between a click and the router catching up there is a render that still
+ * reports the old route, and it must not count as landing there again.
+ */
 export interface DisclosureState {
   readonly disclosure: Disclosure;
-  readonly landedOn: string | null;
+  readonly route: string | null;
 }
 
 /**
  * Where the navigation came from. "user" is an explicit request (a row click,
  * search select, keyboard next/previous or jump); "route" is the router
- * reporting the current route (initial load, deep link, back/forward, or a
- * re-render with the same route).
+ * reporting the current route (initial load, deep link, back/forward, a
+ * reload, or a re-render with the same route).
  */
 export type NavigationSource = "user" | "route";
 
@@ -393,10 +398,11 @@ export type NavigationSource = "user" | "route";
  * The one navigation entry point, for every UI path and for the tests. A
  * navigation writes "open" for the groups holding the landing thread. An
  * explicit user navigation always does, even to the thread that is already
- * active (so searching for it reveals it); the router only acts on a route it
- * has not landed on yet, so a re-render never reopens what the user just
- * collapsed. Null while the thread is not in the workspace yet: the caller
- * keeps its state and the router retries once the thread arrives.
+ * active (so searching for it reveals it). The router acts only on a route
+ * other than the one it last reported, so a re-render, or the render between
+ * a click and the route change, never reopens what the user collapsed. Null
+ * while a routed thread is not in the workspace yet: the caller keeps its
+ * state and the router retries once the thread arrives.
  */
 export function onNavigate<T extends MasterBoardThread>(
   model: MasterWorkspaceModel<T>,
@@ -405,14 +411,12 @@ export function onNavigate<T extends MasterBoardThread>(
   target: string | null,
   source: NavigationSource,
 ): DisclosureState | null {
-  if (target === null) return state.landedOn === null ? state : { ...state, landedOn: null };
-  if (source === "route" && target === state.landedOn) return state;
-  const holding = disclosureKeysHolding(model, threadKeyOf, target);
-  if (holding === null) return null;
+  if (source === "route" && target === state.route) return state;
+  const holding = target === null ? [] : disclosureKeysHolding(model, threadKeyOf, target);
+  if (holding === null) return source === "route" ? null : state;
   const disclosure = setDisclosure(state.disclosure, holding, true);
-  return disclosure === state.disclosure && state.landedOn === target
-    ? state
-    : { disclosure, landedOn: target };
+  const route = source === "route" ? target : state.route;
+  return disclosure === state.disclosure && route === state.route ? state : { disclosure, route };
 }
 
 /**

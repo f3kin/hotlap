@@ -203,9 +203,9 @@ describe("collapsible groups", () => {
   const projectStoreKeys = new Map(projects.map((key) => [key, `physical:${key}`]));
   function sidebar() {
     // The persisted UI store, written and read through the same adapter the
-    // component uses; the landed-on thread lives in memory.
+    // component uses; the last reported route lives in memory.
     let store: UiState = parsePersistedState({});
-    let landedOn: string | null = null;
+    let route: string | null = null;
     let active: string | null = null;
     const current = () => readPersistedDisclosure(store, projectStoreKeys);
     const write = (next: Disclosure) => {
@@ -217,10 +217,10 @@ describe("collapsible groups", () => {
       }
     };
     const go = (target: string | null, source: NavigationSource) => {
-      const next = onNavigate(model, { disclosure: current(), landedOn }, keyOf, target, source);
+      const next = onNavigate(model, { disclosure: current(), route }, keyOf, target, source);
       if (next === null) return;
       write(next.disclosure);
-      landedOn = next.landedOn;
+      route = next.route;
     };
     const view = {
       get disclosure() {
@@ -232,7 +232,12 @@ describe("collapsible groups", () => {
       // A user navigation (row click, search select, keyboard): openThread
       // calls onNavigate, then the route changes and the router effect runs.
       navigate(target: TestThread, source: NavigationSource = "user") {
-        if (source === "user") go(keyOf(target), "user");
+        if (source === "user") {
+          go(keyOf(target), "user");
+          // The render between the click and the router catching up still
+          // reports the old route.
+          go(active, "route");
+        }
         active = keyOf(target);
         go(active, "route");
       },
@@ -249,7 +254,7 @@ describe("collapsible groups", () => {
             }),
           ) as PersistedUiState,
         );
-        landedOn = null;
+        route = null;
         go(active, "route");
       },
       toggle(key: string) {
@@ -313,6 +318,16 @@ describe("collapsible groups", () => {
     expect(view.shows(heater)).toBe(false);
     view.navigate(heater);
     expect(view.shows(heater)).toBe(true);
+  });
+
+  it("keeps orchard collapsed when a visible row in another project is clicked", () => {
+    const view = sidebar();
+    view.navigate(greenhouse);
+    view.toggle(orchard);
+    view.navigate(keeper);
+    expect(view.open(orchard)).toBe(false);
+    view.navigate(leave);
+    expect(view.open(orchard)).toBe(false);
   });
 
   it("starts projects and Masters open and the quiet shelves collapsed", () => {
