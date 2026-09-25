@@ -15,6 +15,7 @@ import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -1364,13 +1365,19 @@ const makeSupervisedConnection = Effect.fn("FakeServer.makeSupervisedConnection"
     { initiallyDesired: true },
   ).pipe(Effect.provide(dependencies));
   const phases: string[] = [];
+  const failures: string[] = [];
   yield* SubscriptionRef.changes(supervisor.state).pipe(
-    Stream.runForEach((state) => Effect.sync(() => phases.push(state.phase))),
+    Stream.runForEach((state) =>
+      Effect.sync(() => {
+        phases.push(state.phase);
+        if (state.lastFailure !== null) failures.push(state.lastFailure.message);
+      }),
+    ),
     Effect.forkScoped,
   );
   yield* settle();
   expect(phases.at(-1)).toBe("connected");
-  return { supervisor, phases, wakeups };
+  return { supervisor, phases, failures, wakeups };
 });
 
 describe("supervised session against a stalling server", () => {
@@ -1413,7 +1420,7 @@ describe("supervised session against a stalling server", () => {
   it.effect("keeps reconnecting after a health check is answered with an interrupt", () =>
     Effect.gen(function* () {
       const server = makeFakeServer();
-      const { phases, wakeups } = yield* makeSupervisedConnection(server);
+      const { phases, failures, wakeups } = yield* makeSupervisedConnection(server);
 
       server.interruptProbes();
       yield* Queue.offer(wakeups, "application-active");
@@ -1425,6 +1432,63 @@ describe("supervised session against a stalling server", () => {
 
       expect(server.sockets.length).toBeGreaterThan(1);
       expect(phases.at(-1)).toBe("connected");
+      expect(failures[0]).toContain("interrupted the connection check");
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("fails a waiting request when its environment is removed", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const scope = yield* Scope.make();
+      const { supervisor } = yield* makeSupervisedConnection(server).pipe(Scope.provide(scope));
+
+      server.setMode("down");
+      yield* advance(5_000);
+      const requestFiber = yield* EnvironmentRpc.request(WS_METHODS.serverProbe, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkScoped,
+      );
+      yield* advance(1_000);
+      expect(requestFiber.pollUnsafe()).toBeUndefined();
+
+      yield* Scope.close(scope, Exit.void);
+      yield* advance(1_000);
+      const exit = requestFiber.pollUnsafe();
+      expect(
+        exit === undefined
+          ? "still waiting"
+          : Exit.isFailure(exit)
+            ? Cause.pretty(exit.cause)
+            : "succeeded",
+      ).toContain("EnvironmentRpcUnavailableError");
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("gives up on a request that waits 30 seconds for a reconnect", () =>
+    Effect.gen(function* () {
+      const server = makeFakeServer();
+      const { supervisor } = yield* makeSupervisedConnection(server);
+
+      server.setMode("down");
+      yield* advance(5_000);
+      const requestFiber = yield* EnvironmentRpc.request(WS_METHODS.serverProbe, {}).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkScoped,
+      );
+      yield* advance(29_000);
+      expect(requestFiber.pollUnsafe()).toBeUndefined();
+      yield* advance(2_000);
+      const exit = requestFiber.pollUnsafe();
+      expect(
+        exit === undefined
+          ? "still waiting"
+          : Exit.isFailure(exit)
+            ? Cause.pretty(exit.cause)
+            : "succeeded",
+      ).toContain("EnvironmentRpcUnavailableError");
+      server.setMode("up");
+      yield* advance(30_000);
+      expect(server.received.filter((entry) => entry.tag === WS_METHODS.serverProbe)).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 

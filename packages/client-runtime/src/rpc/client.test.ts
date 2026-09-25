@@ -415,6 +415,34 @@ describe("environment RPC", () => {
     }),
   );
 
+  it.effect("resubscribes on the same session after the server interrupts one stream", () =>
+    Effect.gen(function* () {
+      const subscriptions: string[] = [];
+      const client = {
+        [WS_METHODS.subscribeTerminalEvents]: () => {
+          subscriptions.push("subscribed");
+          return subscriptions.length === 1 ? Stream.failCause(Cause.interrupt(1)) : Stream.never;
+        },
+      } as unknown as WsRpcProtocolClient;
+      const { activeSession, supervisor } = yield* makeHarness();
+      yield* SubscriptionRef.set(activeSession, Option.some(session(client)));
+
+      const subscriptionFiber = yield* subscribe(WS_METHODS.subscribeTerminalEvents, {}).pipe(
+        Stream.runDrain,
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.forkChild,
+      );
+      for (let i = 0; i < 50; i += 1) yield* Effect.yieldNow;
+      expect(subscriptions).toEqual(["subscribed"]);
+
+      yield* TestClock.adjust("3 seconds");
+      for (let i = 0; i < 50; i += 1) yield* Effect.yieldNow;
+      expect(subscriptions).toEqual(["subscribed", "subscribed"]);
+      expect(subscriptionFiber.pollUnsafe()).toBeUndefined();
+      yield* Fiber.interrupt(subscriptionFiber);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("switches durable subscriptions when the supervisor replaces the session", () =>
     Effect.gen(function* () {
       const subscriptions: string[] = [];
