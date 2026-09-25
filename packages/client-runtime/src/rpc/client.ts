@@ -156,16 +156,20 @@ export const request = Effect.fn("EnvironmentRpc.request")(function* <
     "environment.id": supervisor.target.environmentId,
     "rpc.method": tag,
   });
-  const session = yield* currentSession();
   const observer = yield* EnvironmentRpcRequestObserver;
-  const method = session.client[tag] as (
-    input: EnvironmentRpcInput<TTag>,
-  ) => Effect.Effect<EnvironmentRpcSuccess<TTag>, EnvironmentRpcFailure<TTag>>;
+  // Observed before resolving the session, so time spent waiting for a
+  // reconnect counts towards the slow-request warning.
   const completeObservation = yield* observer.observe({
     environmentId: supervisor.target.environmentId,
     method: tag,
   });
-  return yield* method(input).pipe(Effect.ensuring(completeObservation));
+  return yield* Effect.gen(function* () {
+    const session = yield* currentSession();
+    const method = session.client[tag] as (
+      input: EnvironmentRpcInput<TTag>,
+    ) => Effect.Effect<EnvironmentRpcSuccess<TTag>, EnvironmentRpcFailure<TTag>>;
+    return yield* method(input);
+  }).pipe(Effect.ensuring(completeObservation));
 });
 
 export function runStream<TTag extends EnvironmentStreamCommandRpcTag>(
