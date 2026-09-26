@@ -111,6 +111,46 @@ describe("DesktopPreReadyPlatform", () => {
     );
   }
 
+  for (const [flag, expected] of [
+    ["1", true],
+    ["", false],
+  ] as const) {
+    it.effect(
+      `${expected ? "uses" : "keeps"} the ${expected ? "mock" : "real"} macOS keychain when T3CODE_MOCK_KEYCHAIN is ${flag ? `"${flag}"` : "unset"}`,
+      () => {
+        vi.stubEnv("T3CODE_MOCK_KEYCHAIN", flag);
+        return DesktopPreReadyPlatform.make.pipe(
+          Effect.provideService(HostProcessPlatform, "darwin"),
+          Effect.tap(() =>
+            Effect.sync(() =>
+              assert.equal(
+                appendSwitchMock.mock.calls.some(([name]) => name === "use-mock-keychain"),
+                expected,
+              ),
+            ),
+          ),
+          Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
+        );
+      },
+    );
+  }
+
+  it.effect("never uses the mock keychain off macOS", () => {
+    vi.stubEnv("T3CODE_MOCK_KEYCHAIN", "1");
+    getSwitchValueMock.mockReturnValue("");
+    return DesktopPreReadyPlatform.make.pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.tap(() =>
+        Effect.sync(() =>
+          assert.isFalse(
+            appendSwitchMock.mock.calls.some(([name]) => name === "use-mock-keychain"),
+          ),
+        ),
+      ),
+      Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
+    );
+  });
+
   it.effect("keeps startup available when the early desktop entry cannot be written", () => {
     getSwitchValueMock.mockReturnValue("");
     mkdirSyncMock.mockImplementation(() => {

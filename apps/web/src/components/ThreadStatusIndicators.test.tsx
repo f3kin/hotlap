@@ -1,8 +1,16 @@
 import { ThreadId, type ThreadPullRequestLink } from "@t3tools/contracts";
+import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ThreadWorktreeIndicator, linkedPullRequestSnapshotStatus } from "./ThreadStatusIndicators";
+import {
+  ThreadPullRequestBadgeControl,
+  ThreadWorktreeIndicator,
+  linkedPullRequestSnapshotStatus,
+  prStatusIndicator,
+} from "./ThreadStatusIndicators";
+import { ComposerControl } from "./chat/ComposerControl";
+import { InlineButton } from "./ui/button";
 
 describe("ThreadWorktreeIndicator", () => {
   it("renders the worktree folder and branch in an accessible label", () => {
@@ -79,4 +87,63 @@ describe("linked pull request snapshots", () => {
       sourceControlProvider: { kind: "gitlab", name: "gitlab", baseUrl: "" },
     });
   });
+});
+
+describe("ThreadPullRequestBadgeControl", () => {
+  const merged = prStatusIndicator(
+    {
+      number: 370,
+      url: "https://github.com/example/orchard/pull/370",
+      title: "Change",
+      state: "merged",
+      isDraft: false,
+      headRef: "feature",
+      baseRef: "main",
+      updatedAt: "2026-01-02T00:00:00Z",
+    },
+    null,
+  );
+
+  function renderBadge(render: ReactElement) {
+    const html = renderToStaticMarkup(
+      <ThreadPullRequestBadgeControl
+        render={render}
+        badge={null}
+        number={370}
+        url="https://github.com/example/orchard/pull/370"
+        status={merged}
+        onOpenStack={() => {}}
+        onOpenPullRequest={() => {}}
+      />,
+    );
+    const link = html.match(/<a [^>]*class="([^"]*)"/)?.[1]?.split(" ") ?? [];
+    return { html, link };
+  }
+
+  it("sets the meta size and normal weight on the control itself, over the InlineButton's", () => {
+    const { link } = renderBadge(<InlineButton />);
+
+    expect(link).toContain("text-xs");
+    expect(link).toContain("font-normal");
+    expect(link).not.toContain("font-medium");
+  });
+
+  it.each([
+    ["an InlineButton", () => <InlineButton />],
+    ["a ComposerControl", () => <ComposerControl size="xs" />],
+  ])(
+    "keeps the state tone on the icon and number inside %s, whatever its hover colour",
+    (_, control) => {
+      const tone = merged!.colorClass;
+      const { html, link } = renderBadge(control());
+      // The glyph and number sit in a wrapper that carries the tone and no hover or focus
+      // colour, so the control's own hover:text-* can never repaint them.
+      const wrapper = html.match(/<span class="([^"]*)"><svg/)?.[1] ?? "";
+
+      expect(link.join(" ")).toContain("text-xs");
+      expect(wrapper).toContain(tone);
+      expect(wrapper).not.toMatch(/(hover|focus[a-z-]*):/);
+      expect(html).toMatch(/<svg[^>]*>.*<\/svg>#?370<\/span>/);
+    },
+  );
 });

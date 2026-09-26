@@ -20,6 +20,7 @@ import {
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
+  codexResumeDeclined,
   openCodexThread,
   readCodexThread,
   rollbackCodexThread,
@@ -944,6 +945,7 @@ describe("openCodexThread", () => {
         model: response.model,
         thread: { id: "saved-thread" },
       });
+      NodeAssert.equal(codexResumeDeclined("saved-thread", opened.thread.id), false);
       NodeAssert.deepStrictEqual(calls, [
         {
           method: "thread/resume",
@@ -1032,6 +1034,8 @@ describe("openCodexThread", () => {
       });
 
       NodeAssert.equal(opened.thread.id, "fresh-thread");
+      // The fresh thread has none of the conversation, so the start reports it.
+      NodeAssert.equal(codexResumeDeclined("stale-thread", opened.thread.id), true);
       NodeAssert.deepStrictEqual(
         calls.map((call) => call.method),
         ["thread/resume", "thread/start"],
