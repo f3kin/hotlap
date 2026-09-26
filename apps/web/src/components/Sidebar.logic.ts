@@ -783,6 +783,21 @@ export type SidebarThreadStatus =
   | "failed"
   | "ready";
 
+/** The statuses that need the user, most urgent first (the rows' own order). */
+export const SIDEBAR_ATTENTION_STATUSES = ["approval", "input", "failed"] as const;
+export type SidebarAttentionStatus = (typeof SIDEBAR_ATTENTION_STATUSES)[number];
+
+/**
+ * The most urgent status among these that needs the user, or null: what a
+ * collapsed group rolls up from the rows it hides.
+ */
+export function mostUrgentAttentionStatus(
+  statuses: Iterable<SidebarThreadStatus>,
+): SidebarAttentionStatus | null {
+  const present = new Set(statuses);
+  return SIDEBAR_ATTENTION_STATUSES.find((status) => present.has(status)) ?? null;
+}
+
 export function shouldRecedeSidebarThread(input: {
   status: SidebarThreadStatus;
   isUnread: boolean;
