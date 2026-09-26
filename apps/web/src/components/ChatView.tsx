@@ -361,7 +361,11 @@ import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSki
 import { vcsEnvironment } from "../state/vcs";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useProjectClone } from "../state/projectClones";
-import { projectCloneDisplayName, projectCloneProgressSummary } from "@t3tools/contracts";
+import {
+  projectCloneDisplayName,
+  projectCloneProgressSummary,
+  turnFailureReasonForSession,
+} from "@t3tools/contracts";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   useProject,
@@ -386,6 +390,7 @@ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd, worktreeSetupAgentStarted } from "./chat/MessagesTimeline.logic";
 import { resolveComposerTimelineInset, resolveScrollToEndClearance } from "./composerFooterLayout";
 import { ChatHeader } from "./chat/ChatHeader";
+import { MasterStatusBoardSlot } from "./master/MasterStatusBoard";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { expandedImageKey, type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -2014,6 +2019,12 @@ export default function ChatView(props: ChatViewProps) {
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
+  // The banner shows session.lastError, so its reason is that session's; a local
+  // dispatch error has none. Covers turn-start failures, which never settle a turn.
+  const threadErrorReason =
+    isServerThread && localServerError == null
+      ? turnFailureReasonForSession(activeServerThread?.session)
+      : null;
   // Dismissals can only mask the shown error, never clear it: a server thread
   // keeps its error in session.lastError, so clearing the local shadow would
   // just fall through to the persisted one. Mask the current error until a
@@ -4695,6 +4706,7 @@ export default function ChatView(props: ChatViewProps) {
           cwd: activeProject.workspaceRoot,
         },
         worktreePath: targetWorktreePath,
+        threadId: activeThreadId,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
       const targetTerminalId = shouldCreateNewTerminal
@@ -5725,6 +5737,10 @@ export default function ChatView(props: ChatViewProps) {
             input: {
               threadId: input.threadId,
               ...metadataUpdate,
+              // A switch made elsewhere since this view loaded wins over it.
+              ...(metadataUpdate.modelSelection !== undefined
+                ? { expectedModelSelection: serverThread.modelSelection }
+                : {}),
             },
           }),
           () => undefined,
@@ -7691,6 +7707,7 @@ export default function ChatView(props: ChatViewProps) {
                 threadId,
                 message: { messageId, role: "user", text: "/compact", attachments: [] },
                 modelSelection: context.selectedModelSelection,
+                expectedModelSelection: context.selectedModelSelection,
                 runtimeMode,
                 interactionMode: context.interactionMode,
                 ...providerAccountRoutingConsentForSubmission({
@@ -8966,6 +8983,8 @@ export default function ChatView(props: ChatViewProps) {
             })(),
           },
           modelSelection: ctxSelectedModelSelection,
+          // Only a selection persisted above is asserted, matching that condition.
+          ...(ctxSelectedModel ? { expectedModelSelection: ctxSelectedModelSelection } : {}),
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
@@ -9602,6 +9621,7 @@ export default function ChatView(props: ChatViewProps) {
               attachments: [],
             },
             modelSelection: ctxSelectedModelSelection,
+            expectedModelSelection: ctxSelectedModelSelection,
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
@@ -10448,6 +10468,7 @@ export default function ChatView(props: ChatViewProps) {
             onDeleteProjectScript={deleteProjectScript}
           />
         </WorkspacePageHeader>
+        <MasterStatusBoardSlot activeThread={activeThread} />
 
         {/* Main content area with optional plan sidebar */}
         <div className="flex min-h-0 min-w-0 flex-1">
@@ -10483,6 +10504,7 @@ export default function ChatView(props: ChatViewProps) {
               />
               <ThreadErrorBanner
                 error={visibleThreadError}
+                reason={threadErrorReason}
                 onDismiss={() => {
                   setThreadError(activeThread.id, null);
                   dismissThreadErrorBannerForSession(threadErrorBannerKey);
