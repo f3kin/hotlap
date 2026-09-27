@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
+  cursorUsageWindowDetails,
   elapsedShare,
   formatDuration,
   formatResetsIn,
@@ -35,7 +36,7 @@ import {
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { UsageLimitsPooled } from "./UsageLimitsPooled";
+import { UsageLimitsByAccount } from "./UsageLimitsByAccount";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
 
 const PACE: Record<LimitPace, { readonly label: string; readonly icon: typeof GaugeIcon }> = {
@@ -149,7 +150,8 @@ function WindowBar({
 
 /**
  * One account's windows as rows: label and percent, bar, pace and countdown.
- * Compact rows fit the composer panel with narrower columns.
+ * Compact rows fit the composer panel with narrower columns. Full rows put the
+ * bar on its own line at narrow widths and never truncate a window's label.
  */
 export function LimitWindows({
   driver,
@@ -163,14 +165,42 @@ export function LimitWindows({
   readonly compact?: boolean;
 }) {
   const color = barColor(driver);
+  if (!compact) {
+    return (
+      <div className="flex flex-col gap-2 sm:gap-1">
+        {windows.map((window) => {
+          const pace = paceOf(window, now);
+          const resetsIn = formatResetsIn(window, now);
+          const details = driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
+          return (
+            <div
+              key={window.id}
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 sm:grid-cols-[11rem_minmax(0,1fr)_8rem] sm:gap-x-4"
+            >
+              <span className="col-start-1 row-start-1 flex min-w-0 items-baseline gap-2 text-xs">
+                <span className="flex min-w-0 flex-col break-words text-muted-foreground">
+                  <span>{details?.label ?? window.label}</span>
+                  {details ? <span>{details.description}</span> : null}
+                </span>
+                <span className="ms-auto shrink-0 font-medium text-foreground tabular-nums">
+                  {remainingPercent(window)}% left
+                </span>
+              </span>
+              <div className="col-span-2 row-start-2 sm:col-span-1 sm:col-start-2 sm:row-start-1">
+                <WindowBar color={color} window={window} now={now} />
+              </div>
+              <span className="col-start-2 row-start-1 flex items-center gap-2 text-xs whitespace-nowrap text-muted-foreground tabular-nums sm:col-start-3">
+                {pace ? <PaceIcon pace={pace} /> : null}
+                <span className="ms-auto shrink-0">{resetsIn ?? ""}</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
   return (
-    <div
-      className={
-        compact
-          ? "grid grid-cols-[minmax(0,9rem)_minmax(3rem,1fr)_auto] gap-x-3 gap-y-0.5"
-          : "grid grid-cols-[11rem_minmax(0,1fr)_7rem] gap-x-4 gap-y-1"
-      }
-    >
+    <div className="grid grid-cols-[minmax(0,9rem)_minmax(3rem,1fr)_auto] gap-x-3 gap-y-0.5">
       {windows.map((window) => {
         const pace = paceOf(window, now);
         const resetsIn = formatResetsIn(window, now);
@@ -316,7 +346,7 @@ export function ResetCredits({
 
 /**
  * Subscription quota across every connected environment's providers and hubs,
- * pooled per provider. The page advances `now` on explicit refresh rather than
+ * one row per account. The page advances `now` on explicit refresh rather than
  * ticking: a live clock would repaint the page for no decision-changing gain.
  */
 export function UsageLimitsSection({
@@ -333,5 +363,5 @@ export function UsageLimitsSection({
     selectedEnvironmentIds === null
       ? presentations
       : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
-  return <UsageLimitsPooled presentations={selected} now={now} cursorPrompt={cursorPrompt} />;
+  return <UsageLimitsByAccount presentations={selected} now={now} cursorPrompt={cursorPrompt} />;
 }
