@@ -1,4 +1,5 @@
 import {
+  CommandId,
   DEFAULT_SERVER_SETTINGS,
   EventId,
   MessageId,
@@ -189,6 +190,25 @@ const cancellingEvents: ReadonlyArray<OrchestrationEvent> = [
     payload: { threadId: THREAD_ID, settledAt: iso(START), updatedAt: iso(START) },
   },
 ];
+
+const instanceChanged = (instanceId: ProviderInstanceId): OrchestrationEvent => ({
+  ...domainBase,
+  type: "thread.meta-updated",
+  payload: {
+    threadId: THREAD_ID,
+    modelSelection: { instanceId, model: "claude-opus-5-5" },
+    updatedAt: iso(START),
+  },
+});
+
+/** The account switcher resending a limited message to another account. */
+const usageLimitResend: OrchestrationEvent = {
+  ...userMessage,
+  commandId: CommandId.make("server:usage-limit-resend:resend"),
+};
+
+const autoRoutedThread = (overrides: Partial<OrchestrationThreadShell> = {}) =>
+  makeThread({ providerRoutingMode: "auto", ...overrides });
 
 const threadDeleted: OrchestrationEvent = {
   ...domainBase,
@@ -745,6 +765,140 @@ describe("UsageLimitAutoResumeReactor", () => {
         );
         yield* advance(harness, reactor, 5 * MINUTE);
         assert.strictEqual((yield* lastRow(harness))?.summary, "Auto-resume cancelled");
+        assert.deepStrictEqual(yield* Ref.get(harness.sends), []);
+      }),
+    ),
+  );
+
+  it.effect("cancels as soon as the thread switches to another instance", () =>
+    run({}, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + 2 * HOUR }));
+        // Saving the same instance again changes nothing.
+        yield* publish(harness, reactor, instanceChanged(CLAUDE));
+        assert.propertyVal((yield* lastRow(harness))?.payload, "state", "waiting");
+
+        yield* publish(harness, reactor, instanceChanged(ProviderInstanceId.make("claude-work")));
+        assert.strictEqual((yield* lastRow(harness))?.summary, "Auto-resume cancelled");
+      }),
+    ),
+  );
+
+  it.effect("marks a resumed row stopped when Claude then fails", () =>
+    run({}, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + HOUR }));
+        yield* advance(harness, reactor, 5 * MINUTE);
+        const attemptTurnId = yield* latestAttemptTurnId(harness);
+        yield* emit(harness, reactor, turnStarted(attemptTurnId));
+        yield* emit(harness, reactor, turnCompleted(attemptTurnId, "failed"));
+
+        const [waiting, resumed, failed] = yield* rows(harness);
+        assert.propertyVal(resumed?.payload, "state", "resumed");
+        assert.strictEqual(failed?.id, waiting?.id);
+        assert.strictEqual(failed?.summary, "Auto-resume stopped: Claude failed");
+        assert.strictEqual(failed?.tone, "error");
+        assert.propertyVal(failed?.payload, "state", "stopped");
+      }),
+    ),
+  );
+
+  it.effect("keeps a resumed row once that turn completes", () =>
+    run({}, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + HOUR }));
+        yield* advance(harness, reactor, 5 * MINUTE);
+        const attemptTurnId = yield* latestAttemptTurnId(harness);
+        yield* emit(harness, reactor, turnStarted(attemptTurnId));
+        yield* emit(harness, reactor, turnCompleted(attemptTurnId, "completed"));
+        // A later failure of another turn is not the attempt's.
+        yield* emit(harness, reactor, turnCompleted("later-turn", "failed"));
+        assert.strictEqual((yield* lastRow(harness))?.summary, "Auto-resumed after usage limit");
+      }),
+    ),
+  );
+
+  it.effect("starts a new wait when a resumed turn hits the limit again", () =>
+    run({}, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + HOUR }));
+        yield* advance(harness, reactor, 5 * MINUTE);
+        const attemptTurnId = yield* latestAttemptTurnId(harness);
+        yield* emit(harness, reactor, turnStarted(attemptTurnId));
+        yield* emit(
+          harness,
+          reactor,
+          usageLimitError({ resetsAtMs: START + 3 * HOUR, turnId: attemptTurnId }),
+        );
+        yield* emit(harness, reactor, turnCompleted(attemptTurnId, "failed"));
+
+        const [first, resumed, second] = yield* rows(harness);
+        assert.strictEqual(resumed?.id, first?.id);
+        assert.notStrictEqual(second?.id, first?.id);
+        assert.propertyVal(second?.payload, "state", "waiting");
+        assert.strictEqual((yield* rows(harness)).length, 3);
+      }),
+    ),
+  );
+
+  it.effect("in Auto routing, leaves the limit to account switching", () =>
+    run({ thread: autoRoutedThread() }, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + 2 * HOUR }));
+        assert.deepStrictEqual(yield* rows(harness), []);
+        // Another account took the resent message.
+        yield* emit(harness, reactor, turnStarted("resent-turn"));
+        yield* advance(harness, reactor, 10 * MINUTE);
+        assert.deepStrictEqual(yield* rows(harness), []);
+        assert.deepStrictEqual(yield* Ref.get(harness.sends), []);
+      }),
+    ),
+  );
+
+  it.effect("in Auto routing, waits once no other account took the turn", () =>
+    run(
+      {
+        thread: autoRoutedThread({
+          session: { ...makeThread().session!, status: "running", activeTurnId: null },
+        }),
+      },
+      (harness, reactor) =>
+        Effect.gen(function* () {
+          yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + 2 * HOUR }));
+          yield* publish(harness, reactor, usageLimitResend);
+          // Account switching is still settling the turn.
+          yield* advance(harness, reactor, 30_000);
+          assert.deepStrictEqual(yield* rows(harness), []);
+
+          yield* Ref.set(harness.thread, Option.some(autoRoutedThread()));
+          yield* advance(harness, reactor, 30_000);
+          const waiting = yield* lastRow(harness);
+          assert.strictEqual(waiting?.createdAt, iso(START + MINUTE));
+          assert.deepStrictEqual(waiting?.payload, {
+            threadId: THREAD_ID,
+            instanceId: CLAUDE,
+            state: "waiting",
+            resetAt: iso(START + 2 * HOUR),
+            deadlineAt: iso(START + 2 * HOUR + 30 * MINUTE),
+          });
+          yield* advance(harness, reactor, 5 * MINUTE);
+          assert.strictEqual((yield* Ref.get(harness.sends)).length, 1);
+        }),
+    ),
+  );
+
+  it.effect.each([
+    { type: "user message", event: userMessage },
+    { type: "Stop", event: stopRequested(false) },
+    { type: "instance change", event: instanceChanged(CODEX) },
+    ...cancellingEvents.map((event) => ({ type: event.type, event })),
+  ])("in Auto routing, a $type before the wait starts drops it quietly", ({ event }) =>
+    run({ thread: autoRoutedThread() }, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + 2 * HOUR }));
+        yield* publish(harness, reactor, event);
+        yield* advance(harness, reactor, 10 * MINUTE);
+        assert.deepStrictEqual(yield* rows(harness), []);
         assert.deepStrictEqual(yield* Ref.get(harness.sends), []);
       }),
     ),

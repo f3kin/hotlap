@@ -13,6 +13,10 @@
  * Claude fails for another reason, or the deadline in
  * `UsageLimitAutoResumePolicy` passes. Each wait is one thread activity row,
  * updated in place, which is also what lets a restart pick the wait back up.
+ *
+ * On an Auto-routed thread, account switching gets the limit first: it may
+ * resend the message to another account. The limit is held without a row
+ * until the thread goes idle with no other account having taken the turn.
  */
 import {
   CommandId,
@@ -108,6 +112,18 @@ interface WaitingThread extends WaitRow {
   selfStartedTurnId: TurnId | undefined;
 }
 
+/** A limit on an Auto-routed thread, left to account switching until the thread goes idle. */
+interface PendingLimit {
+  readonly resetAtMs: number | undefined;
+  readonly instanceId: ProviderInstanceId;
+}
+
+/** A wait that ended resumed, until its turn ends; Claude can still fail it. */
+interface ResumedAttempt extends WaitRow {
+  readonly turnId: TurnId | undefined;
+  readonly resetAtMs: number | undefined;
+}
+
 type Input =
   | { readonly _tag: "restore" }
   | { readonly _tag: "tick" }
@@ -126,6 +142,9 @@ const GAVE_UP_SUMMARY = {
  */
 const CLIENT_CLOCK_SKEW_MS = 60_000;
 
+/** Prefix of the command account switching resends a limited message with. */
+const USAGE_LIMIT_RESEND_COMMAND_PREFIX = "server:usage-limit-resend:";
+
 const isAfter = (at: string | null, thresholdMs: number) =>
   at !== null && Date.parse(at) > thresholdMs;
 
@@ -140,6 +159,8 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
 
   const waitingThreads = new Map<ThreadId, WaitingThread>();
+  const pendingLimits = new Map<ThreadId, PendingLimit>();
+  const resumedAttempts = new Map<ThreadId, ResumedAttempt>();
   let commandCount = 0;
 
   const writeRow = Effect.fn("UsageLimitAutoResumeReactor.writeRow")(function* (
@@ -234,30 +255,53 @@ export const make = Effect.gen(function* () {
 
     // An attempt that outlived its wait (cancelled meanwhile) needs nothing.
     if (limit.autoResume || event.providerInstanceId === undefined) return;
+    // A resumed turn that hits the limit again gets a new wait below, not a failure.
+    resumedAttempts.delete(event.threadId);
     const settings = yield* settingsService.getSettings;
     if (!settings.autoResumeAfterUsageLimit) return;
 
+    const thread = yield* snapshots.getThreadShellById(event.threadId).pipe(Effect.option);
+    if (
+      Option.isSome(thread) &&
+      Option.isSome(thread.value) &&
+      thread.value.value.providerRoutingMode === "auto"
+    ) {
+      pendingLimits.set(event.threadId, {
+        resetAtMs: limit.resetsAtMs,
+        instanceId: event.providerInstanceId,
+      });
+      return;
+    }
+    yield* startWait(event.threadId, event.providerInstanceId, limit.resetsAtMs, nowMs);
+  });
+
+  const startWait = Effect.fn("UsageLimitAutoResumeReactor.startWait")(function* (
+    threadId: ThreadId,
+    instanceId: ProviderInstanceId,
+    resetAtMs: number | undefined,
+    nowMs: number,
+  ) {
     const row: WaitRow = {
-      activityId: EventId.make(`usage-limit-auto-resume:${event.threadId}:${nowMs}`),
+      activityId: EventId.make(`usage-limit-auto-resume:${threadId}:${nowMs}`),
       createdAt: toIso(nowMs),
-      instanceId: event.providerInstanceId,
+      instanceId,
     };
-    const cycle = startCycle(reading);
+    const cycle = startCycle({ nowMs, resetAtMs });
     if (cycle === null) {
-      return yield* writeRow(event.threadId, row, {
+      return yield* writeRow(threadId, row, {
         state: "stopped",
         summary: SUMMARY.tooFar,
-        resetAtMs: limit.resetsAtMs,
+        resetAtMs,
       });
     }
-    waitingThreads.set(event.threadId, {
+    waitingThreads.set(threadId, {
       ...row,
       cycle,
       attemptStartedAtMs: undefined,
       attemptTurnId: undefined,
       selfStartedTurnId: undefined,
     });
-    yield* writeRow(event.threadId, row, {
+    yield* writeRow(threadId, row, {
       state: "waiting",
       summary: SUMMARY.waiting,
       resetAtMs: cycle.resetAtMs,
@@ -270,6 +314,25 @@ export const make = Effect.gen(function* () {
   ) {
     const limit = readUsageLimitError(event);
     if (limit !== null) return yield* handleUsageLimit(event, limit);
+    // Another account took the turn, or the user's own message is running.
+    if (event.type === "turn.started") pendingLimits.delete(event.threadId);
+
+    const resumed = resumedAttempts.get(event.threadId);
+    if (
+      resumed !== undefined &&
+      event.type === "turn.completed" &&
+      event.turnId !== undefined &&
+      event.turnId === resumed.turnId
+    ) {
+      resumedAttempts.delete(event.threadId);
+      if (event.payload.state === "failed") {
+        return yield* writeRow(event.threadId, resumed, {
+          state: "stopped",
+          summary: SUMMARY.failed,
+          resetAtMs: resumed.resetAtMs,
+        });
+      }
+    }
 
     const waiting = waitingThreads.get(event.threadId);
     if (waiting === undefined) return;
@@ -279,6 +342,13 @@ export const make = Effect.gen(function* () {
         waiting.attemptStartedAtMs !== undefined ||
         (event.turnId !== undefined && event.turnId === waiting.attemptTurnId)
       ) {
+        resumedAttempts.set(event.threadId, {
+          activityId: waiting.activityId,
+          createdAt: waiting.createdAt,
+          instanceId: waiting.instanceId,
+          turnId: event.turnId,
+          resetAtMs: waiting.cycle.resetAtMs,
+        });
         return yield* finish(event.threadId, waiting, "resumed", SUMMARY.resumed);
       }
       waiting.selfStartedTurnId = event.turnId;
@@ -331,17 +401,51 @@ export const make = Effect.gen(function* () {
     yield* finish(threadId, waiting, "stopped", SUMMARY.cancelled);
   });
 
+  /** User actions end a held limit; account switching's own resend does not. */
+  const dropsPendingLimit = (event: OrchestrationEvent) => {
+    switch (event.type) {
+      case "thread.turn-start-requested":
+        return !event.commandId?.startsWith(USAGE_LIMIT_RESEND_COMMAND_PREFIX);
+      case "thread.meta-updated": {
+        const instanceId = event.payload.modelSelection?.instanceId;
+        const pending = pendingLimits.get(event.payload.threadId);
+        return instanceId !== undefined && instanceId !== pending?.instanceId;
+      }
+      case "thread.session-stop-requested":
+      case "thread.turn-interrupt-requested":
+      case "thread.checkpoint-revert-requested":
+      case "thread.archived":
+      case "thread.settled":
+      case "thread.deleted":
+        return true;
+      default:
+        return false;
+    }
+  };
+
   const handleDomainEvent = (event: OrchestrationEvent) => {
     // Guarded stops only reap idle sessions; the next attempt restarts the session.
     if (event.type === "thread.session-stop-requested" && event.payload.onlyIfIdle === true) {
       return Effect.void;
     }
+    if (!("threadId" in event.payload)) return Effect.void;
+    const threadId = event.payload.threadId;
+    if (dropsPendingLimit(event)) pendingLimits.delete(threadId);
     switch (event.type) {
       case "thread.session-stop-requested": {
         const waiting = waitingThreads.get(event.payload.threadId);
         return waiting === undefined
           ? Effect.void
           : cancelOnStop(event.payload.threadId, waiting, event.payload.createdAt);
+      }
+      case "thread.meta-updated": {
+        const waiting = waitingThreads.get(threadId);
+        const instanceId = event.payload.modelSelection?.instanceId;
+        return waiting === undefined ||
+          instanceId === undefined ||
+          instanceId === waiting.instanceId
+          ? Effect.void
+          : finish(threadId, waiting, "stopped", SUMMARY.cancelled);
       }
       case "thread.turn-start-requested":
       case "thread.turn-interrupt-requested":
@@ -355,6 +459,7 @@ export const make = Effect.gen(function* () {
       }
       case "thread.deleted":
         waitingThreads.delete(event.payload.threadId);
+        resumedAttempts.delete(event.payload.threadId);
         return Effect.void;
       default:
         return Effect.void;
@@ -420,9 +525,36 @@ export const make = Effect.gen(function* () {
       );
   });
 
+  /** Starts the wait for a held limit once account switching left the thread idle. */
+  const promotePendingLimit = Effect.fn("UsageLimitAutoResumeReactor.promotePendingLimit")(
+    function* (threadId: ThreadId, pending: PendingLimit, nowMs: number) {
+      const read = yield* snapshots.getThreadShellById(threadId).pipe(Effect.option);
+      if (Option.isNone(read)) return;
+      const thread = read.value;
+      if (Option.isNone(thread)) {
+        pendingLimits.delete(threadId);
+        return;
+      }
+      const status = thread.value.session?.status;
+      if (status === "running" || status === "starting") return;
+      pendingLimits.delete(threadId);
+      // The thread moved on without a turn starting there, so there is nothing to resume.
+      if (thread.value.modelSelection.instanceId !== pending.instanceId) return;
+      yield* startWait(threadId, pending.instanceId, pending.resetAtMs, nowMs);
+    },
+  );
+
   const tick = Effect.fn("UsageLimitAutoResumeReactor.tick")(function* () {
     const settings = yield* settingsService.getSettings;
     const nowMs = yield* Clock.currentTimeMillis;
+    // oxlint-disable-next-line unicorn/no-useless-spread
+    for (const [threadId, pending] of [...pendingLimits]) {
+      if (!settings.autoResumeAfterUsageLimit) {
+        pendingLimits.delete(threadId);
+        continue;
+      }
+      yield* promotePendingLimit(threadId, pending, nowMs);
+    }
     // Snapshot: finish removes entries while the loop yields.
     // oxlint-disable-next-line unicorn/no-useless-spread
     for (const [threadId, waiting] of [...waitingThreads]) {

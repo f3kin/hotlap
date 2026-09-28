@@ -7,13 +7,13 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 
 /** Attempts repeat at this interval while the limit holds. */
-export const AUTO_RESUME_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
+const AUTO_RESUME_RETRY_INTERVAL_MS = 5 * MINUTE_MS;
 /** One extra attempt lands this long after a known reset. */
 const RESET_GRACE_MS = MINUTE_MS;
 /** A cycle gives up this long after the latest known reset. */
 const GIVE_UP_AFTER_RESET_MS = 30 * MINUTE_MS;
 /** Without a known reset, a cycle gives up this long after it starts. */
-export const UNKNOWN_RESET_GIVE_UP_MS = 6 * HOUR_MS;
+const UNKNOWN_RESET_GIVE_UP_MS = 6 * HOUR_MS;
 /** No wait lasts longer than this, however often the reset moves. */
 const MAX_WAIT_MS = 24 * HOUR_MS;
 /** Resets further away than this (weekly limits) are not waited for. */

@@ -90,11 +90,13 @@ as working. The warning's timestamp shows when the displayed wait started.
 When a turn stops on a usage limit instead, T3 Code waits and asks Claude to
 continue where it left off. It retries every 5 minutes and once just after the
 reset, and gives up 30 minutes after the reset (6 hours when Claude gives no
-reset time, and never more than 24 hours after the wait began). A banner above the composer shows the wait; **Cancel** it or send a
-message to end it early. Archiving, settling, or reverting the thread, or moving
-it to another Claude provider, also ends it. Limits that reset more than 12
-hours away are not waited for. Turn this off with **Auto-resume after usage
-limits** in general settings.
+reset time, and never more than 24 hours after the wait began). On a thread set
+to **Auto**, another account gets the message first, and the wait starts only
+when none can take it. A banner above the composer shows the wait; **Cancel** it
+or send a message to end it early. Archiving, settling, or reverting the thread,
+or moving it to another Claude provider, also ends it. Limits that reset more
+than 12 hours away are not waited for. Turn this off with **Auto-resume after
+usage limits** in general settings.
 
 When Claude rejects a message outright on a usage limit, a thread set to
 **Auto** moves to another account and sends it again (see
