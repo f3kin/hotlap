@@ -16,7 +16,7 @@
  *
  * On an Auto-routed thread, account switching gets the limit first: it may
  * resend the message to another account. The limit is held without a row
- * until the thread goes idle with no other account having taken the turn.
+ * until the thread stays idle with no other account having taken the turn.
  */
 import {
   CommandId,
@@ -116,6 +116,11 @@ interface WaitingThread extends WaitRow {
 interface PendingLimit {
   readonly resetAtMs: number | undefined;
   readonly instanceId: ProviderInstanceId;
+  /**
+   * Set when a tick found the thread idle. Switching resends moments after the
+   * failed turn settles, so a wait starts only after two idle ticks in a row.
+   */
+  idleSeen: boolean;
 }
 
 /** A wait that ended resumed, until its turn ends; Claude can still fail it. */
@@ -141,6 +146,18 @@ const GAVE_UP_SUMMARY = {
  * A message counts as newer than a wait only past this margin.
  */
 const CLIENT_CLOCK_SKEW_MS = 60_000;
+
+/** Domain events that end or change a wait; the worker ignores the rest. */
+const DOMAIN_EVENT_TYPES: ReadonlySet<OrchestrationEvent["type"]> = new Set([
+  "thread.session-stop-requested",
+  "thread.meta-updated",
+  "thread.turn-start-requested",
+  "thread.turn-interrupt-requested",
+  "thread.checkpoint-revert-requested",
+  "thread.archived",
+  "thread.settled",
+  "thread.deleted",
+]);
 
 /** Prefix of the command account switching resends a limited message with. */
 const USAGE_LIMIT_RESEND_COMMAND_PREFIX = "server:usage-limit-resend:";
@@ -269,6 +286,7 @@ export const make = Effect.gen(function* () {
       pendingLimits.set(event.threadId, {
         resetAtMs: limit.resetsAtMs,
         instanceId: event.providerInstanceId,
+        idleSeen: false,
       });
       return;
     }
@@ -535,8 +553,15 @@ export const make = Effect.gen(function* () {
         pendingLimits.delete(threadId);
         return;
       }
-      const status = thread.value.session?.status;
-      if (status === "running" || status === "starting") return;
+      const session = thread.value.session;
+      const idle =
+        session?.status !== "running" &&
+        session?.status !== "starting" &&
+        session?.activeTurnId == null;
+      if (!idle || !pending.idleSeen) {
+        pending.idleSeen = idle;
+        return;
+      }
       pendingLimits.delete(threadId);
       // The thread moved on without a turn starting there, so there is nothing to resume.
       if (thread.value.modelSelection.instanceId !== pending.instanceId) return;
@@ -658,7 +683,11 @@ export const make = Effect.gen(function* () {
       ),
     );
     yield* forkParked(
-      Stream.runForEach(domainEvents, (event) => worker.enqueue({ _tag: "domain", event })),
+      Stream.runForEach(domainEvents, (event) =>
+        DOMAIN_EVENT_TYPES.has(event.type)
+          ? worker.enqueue({ _tag: "domain", event })
+          : Effect.void,
+      ),
     );
     yield* forkParked(
       worker.enqueue({ _tag: "restore" }).pipe(

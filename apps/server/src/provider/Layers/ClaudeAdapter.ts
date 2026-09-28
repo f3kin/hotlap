@@ -5495,7 +5495,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     // After the attempt settles: a parked turn would otherwise hide a login swap.
     context = yield* restartIfLoginChanged(context);
-    if (input.autoResume === true && context.turnState !== undefined) {
+    // A stale background turn is closed below, as for a user send.
+    if (
+      input.autoResume === true &&
+      context.turnState !== undefined &&
+      context.turnState.synthetic !== true
+    ) {
       return yield* new ProviderAdapterValidationError({
         provider: PROVIDER,
         operation: "sendTurn",

@@ -5104,6 +5104,69 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("closes a stale background turn instead of refusing an auto-resume attempt", () => {
+    const { queries, layer } = makeLoginSwapHarness();
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const backgroundTurnStarted = yield* Deferred.make<void>();
+      const backgroundTurnCompleted = yield* Deferred.make<ProviderRuntimeEvent>();
+      let backgroundTurnId: ProviderRuntimeEvent["turnId"];
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.type === "turn.started" && event.raw?.method === "claude/synthetic-turn-start") {
+          backgroundTurnId = event.turnId;
+          return Deferred.succeed(backgroundTurnStarted, undefined);
+        }
+        if (event.type === "turn.completed" && event.turnId === backgroundTurnId) {
+          return Deferred.succeed(backgroundTurnCompleted, event);
+        }
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { resume: string }).resume;
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "first", attachments: [] });
+      queries[0]?.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: sessionId,
+        uuid: "result-first",
+      } as unknown as SDKMessage);
+      queries[0]?.emit({
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-background",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-background",
+          content: [{ type: "text", text: "Background work finished" }],
+        },
+      } as unknown as SDKMessage);
+      yield* Deferred.await(backgroundTurnStarted);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+
+      const completed = yield* Deferred.await(backgroundTurnCompleted);
+      assert(completed.type === "turn.completed");
+      assert.equal(completed.payload.state, "completed");
+      assert.equal(queries.length, 1);
+      eventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
+    );
+  });
+
   it.effect("completes an open background turn before a login change restarts Claude", () => {
     const { writeLogin, queries, layer } = makeLoginSwapHarness();
 

@@ -96,13 +96,14 @@ export type RuntimeSessionExitKind = typeof RuntimeSessionExitKind.Type;
 
 const RuntimeErrorClass = Schema.Literals([
   "provider_error",
-  // The account hit a usage limit. Account switching reads this to resend elsewhere.
+  /**
+   * The account hit a usage limit. `detail.resetsAt` (epoch ms) carries the reset when known.
+   * Account switching reads this to resend elsewhere.
+   */
   "usage_limit",
   "transport_error",
   "permission_error",
   "validation_error",
-  /** The account hit a usage limit. `detail.resetsAt` (epoch ms) carries the reset when known. */
-  "usage_limit",
   "unknown",
 ]);
 export type RuntimeErrorClass = typeof RuntimeErrorClass.Type;

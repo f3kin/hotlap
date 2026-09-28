@@ -871,9 +871,12 @@ describe("UsageLimitAutoResumeReactor", () => {
           assert.deepStrictEqual(yield* rows(harness), []);
 
           yield* Ref.set(harness.thread, Option.some(autoRoutedThread()));
+          // Idle at one tick is not enough: switching may be about to resend.
+          yield* advance(harness, reactor, 30_000);
+          assert.deepStrictEqual(yield* rows(harness), []);
           yield* advance(harness, reactor, 30_000);
           const waiting = yield* lastRow(harness);
-          assert.strictEqual(waiting?.createdAt, iso(START + MINUTE));
+          assert.strictEqual(waiting?.createdAt, iso(START + 1.5 * MINUTE));
           assert.deepStrictEqual(waiting?.payload, {
             threadId: THREAD_ID,
             instanceId: CLAUDE,
@@ -884,6 +887,20 @@ describe("UsageLimitAutoResumeReactor", () => {
           yield* advance(harness, reactor, 5 * MINUTE);
           assert.strictEqual((yield* Ref.get(harness.sends)).length, 1);
         }),
+    ),
+  );
+
+  it.effect("in Auto routing, a resend right after an idle tick starts no wait", () =>
+    run({ thread: autoRoutedThread() }, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + 2 * HOUR }));
+        // The tick lands in the gap between the failed turn settling and the resend.
+        yield* advance(harness, reactor, 30_000);
+        yield* publish(harness, reactor, usageLimitResend);
+        yield* emit(harness, reactor, turnStarted("resent-turn"));
+        yield* advance(harness, reactor, 10 * MINUTE);
+        assert.deepStrictEqual(yield* rows(harness), []);
+      }),
     ),
   );
 
