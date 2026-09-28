@@ -10,7 +10,7 @@ export type ProviderRoutingAutoBlocker =
   | "account-not-pooled"
   | "pool-too-small";
 
-export const PROVIDER_ROUTING_AUTO_BLOCKER_MESSAGES: Record<ProviderRoutingAutoBlocker, string> = {
+const PROVIDER_ROUTING_AUTO_BLOCKER_MESSAGES: Record<ProviderRoutingAutoBlocker, string> = {
   "not-configured": "Turn on automatic account switching in this project's settings.",
   threshold: "Set a switch-at percentage for this project.",
   "account-unavailable": "This account is not available for switching.",

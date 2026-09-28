@@ -468,8 +468,8 @@ interface ClaudeSessionContext {
   announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
   /** Resolved by completeTurn while Stop waits for Claude to abort the turn. */
   interruptedTurnSettled: Deferred.Deferred<void> | undefined;
-  /** The subscription login this CLI process started with; see `readClaudeLoginIdentity`. */
-  readonly loginIdentity: string | undefined;
+  /** The subscription login this CLI process runs as; see `readClaudeLoginIdentity`. */
+  loginIdentity: string | undefined;
   stopped: boolean;
 }
 
@@ -5223,6 +5223,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
     const loginIdentity = yield* readLoginIdentity;
     if (loginIdentity === undefined || loginIdentity === context.loginIdentity) return context;
+    // No login was readable at start (e.g. the file was mid-write), so this is not a swap.
+    if (context.loginIdentity === undefined) {
+      context.loginIdentity = loginIdentity;
+      return context;
+    }
     const threadId = context.session.threadId;
     yield* Effect.logInfo("claude.session.login-changed", { threadId });
     // Only a background (synthetic) turn can be open here; it finished its work, so close it

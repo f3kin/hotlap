@@ -4239,7 +4239,8 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("waits briefly for the old account to flush the conversation, then gives up", () => {
+  // Real clock: the copy retries read the disk, which a test clock cannot wait for.
+  it.live("waits briefly for the old account to flush the conversation, then gives up", () => {
     const fromConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-from-"));
     const toConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-to-"));
     const sessionId = "5d0c1d0e-0000-4000-8000-000000000002";
@@ -4256,31 +4257,18 @@ describe("ClaudeAdapterLive", () => {
         });
       });
     return Effect.gen(function* () {
-      // Each copy attempt reads the disk, so step the clock one attempt at a time.
-      const attempts = (count: number) =>
-        Effect.gen(function* () {
-          for (let index = 0; index < count; index += 1) {
-            yield* Effect.yieldNow;
-            yield* Effect.yieldNow;
-            yield* TestClock.adjust("100 millis");
-          }
-        });
       const late = yield* Effect.forkChild(start(sessionId));
-      yield* attempts(3);
+      yield* Effect.sleep("300 millis");
       NodeFS.mkdirSync(NodePath.join(fromConfigDir, "projects", "-late"), { recursive: true });
       NodeFS.writeFileSync(
         NodePath.join(fromConfigDir, "projects", "-late", `${sessionId}.jsonl`),
         "late\n",
       );
-      yield* attempts(2);
       const session = yield* Fiber.join(late);
       assert.deepInclude(session.resumeCursor, { resume: sessionId, configDir: toConfigDir });
 
-      const missing = yield* Effect.forkChild(
-        start("5d0c1d0e-0000-4000-8000-000000000003").pipe(Effect.flip),
-      );
-      yield* attempts(25);
-      assert.include((yield* Fiber.join(missing)).message, "conversation was not found");
+      const missing = yield* start("5d0c1d0e-0000-4000-8000-000000000003").pipe(Effect.flip);
+      assert.include(missing.message, "conversation was not found");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -4304,7 +4292,7 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect(
+  it.live(
     "starts a new conversation when a thread with no finished turns moves without a transcript",
     () => {
       const fromConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-from-"));
@@ -4314,26 +4302,18 @@ describe("ClaudeAdapterLive", () => {
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
         // The first message hit the limit before the old account wrote anything to disk.
-        const starting = yield* Effect.forkChild(
-          adapter.startSession({
-            threadId: THREAD_ID,
-            provider: ProviderDriverKind.make("claudeAgent"),
-            runtimeMode: "full-access",
-            resumeCursor: {
-              resume: sessionId,
-              configDir: fromConfigDir,
-              resumeSessionAt: "assistant-limited",
-              turnCount: 1,
-              turnStartMessageIds: ["user-limited"],
-            },
-          }),
-        );
-        for (let attempt = 0; attempt < 25; attempt += 1) {
-          yield* Effect.yieldNow;
-          yield* Effect.yieldNow;
-          yield* TestClock.adjust("100 millis");
-        }
-        const session = yield* Fiber.join(starting);
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          resumeCursor: {
+            resume: sessionId,
+            configDir: fromConfigDir,
+            resumeSessionAt: "assistant-limited",
+            turnCount: 1,
+            turnStartMessageIds: ["user-limited"],
+          },
+        });
 
         const options = harness.getLastCreateQueryInput()?.options;
         assert.equal(options?.resume, undefined);
@@ -4379,7 +4359,7 @@ describe("ClaudeAdapterLive", () => {
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );
-    return { writeLogin, queries, layer };
+    return { configDir, writeLogin, queries, layer };
   };
 
   it.effect("restarts Claude on the next message after its login changes", () => {
@@ -4413,6 +4393,45 @@ describe("ClaudeAdapterLive", () => {
       assert.deepInclude(active?.resumeCursor, {
         resume: (session.resumeCursor as { resume: string }).resume,
       });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
+    );
+  });
+
+  it.effect("keeps Claude running when its login only becomes readable after start", () => {
+    const { configDir, writeLogin, queries, layer } = makeLoginSwapHarness();
+    // Caught mid-write at start, so no login was known yet.
+    NodeFS.writeFileSync(NodePath.join(configDir, ".claude.json"), "{");
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { resume: string }).resume;
+      const finish = (uuid: string) =>
+        queries.at(-1)?.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: sessionId,
+          uuid,
+        } as unknown as SDKMessage);
+
+      writeLogin("account-a");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "first", attachments: [] });
+      finish("result-first");
+      yield* Effect.yieldNow;
+      assert.equal(queries.length, 1);
+
+      // A real swap after that still restarts.
+      writeLogin("account-b");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "second", attachments: [] });
+      assert.equal(queries.length, 2);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(layer),

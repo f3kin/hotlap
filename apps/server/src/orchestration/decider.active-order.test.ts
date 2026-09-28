@@ -96,7 +96,7 @@ it.layer(NodeServices.layer)("active thread ordering", (it) => {
     }),
   );
 
-  it.effect("keeps a started Claude thread fixed when a client asks for automatic routing", () =>
+  it.effect("lets a started Claude thread switch to automatic routing", () =>
     Effect.gen(function* () {
       const claudeThread = {
         modelSelection: { instanceId: ProviderInstanceId.make("claude"), model: "claude-sonnet-5" },
@@ -132,16 +132,8 @@ it.layer(NodeServices.layer)("active thread ordering", (it) => {
           },
         }),
       });
+      // Its transcript moves with it, so a started thread can fail over too.
       expect(Array.isArray(started) ? started : [started]).toMatchObject([
-        { type: "thread.meta-updated", payload: { providerRoutingMode: "fixed" } },
-      ]);
-
-      // Before its first turn, a Claude thread can still pick an account automatically.
-      const unstarted = yield* decideOrchestrationCommand({
-        command,
-        readModel: makeReadModel(claudeThread),
-      });
-      expect(Array.isArray(unstarted) ? unstarted : [unstarted]).toMatchObject([
         { type: "thread.meta-updated", payload: { providerRoutingMode: "auto" } },
       ]);
     }),

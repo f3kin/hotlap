@@ -327,8 +327,7 @@ export function useThreadComposerState() {
         providerRoutingSaveRef.current = null;
         if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
           // The saved mode reaches the client one projection later. Keeping the
-          // intent until then stops a send in that gap from using the old mode;
-          // a thread the server pins instead clears through the locked rule.
+          // intent until then stops a send in that gap from using the old mode.
           return;
         }
         clearProjectedProviderRoutingIntent(threadKey, mode);

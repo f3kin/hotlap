@@ -84,8 +84,9 @@ import {
 } from "../../provider/providerAccountRouting.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 
-const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 import { formatUsageLimitWait } from "../../provider/providerUsageLimits.ts";
+
+const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationError);
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
@@ -2735,10 +2736,6 @@ const make = Effect.gen(function* () {
     const messageId = Option.isSome(turn) ? turn.value.pendingMessageId : null;
     const messageKey = messageId === null ? null : `${threadId}:${messageId}`;
     const alreadyLimited = messageKey !== null && usageLimitedInstancesByMessage.get(messageKey);
-    const pendingTurnStart = yield* (
-      projectionSnapshotQuery.getPendingTurnStartByThreadId?.(threadId) ??
-        Effect.succeed(Option.none())
-    );
     const settings = yield* serverSettingsService.getSettings;
     const turnStart =
       messageId === null
@@ -2748,6 +2745,11 @@ const make = Effect.gen(function* () {
       messageId === null
         ? Option.none()
         : yield* orchestrationEventStore.findTurnStartRequest({ threadId, messageId });
+    // Read last, so a message the user sent during the reads above wins over the resend.
+    const pendingTurnStart = yield* (
+      projectionSnapshotQuery.getPendingTurnStartByThreadId?.(threadId) ??
+        Effect.succeed(Option.none())
+    );
     const canResend =
       messageId !== null &&
       messageKey !== null &&
