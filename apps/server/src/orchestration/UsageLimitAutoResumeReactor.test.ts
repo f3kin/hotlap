@@ -984,6 +984,22 @@ describe("UsageLimitAutoResumeReactor", () => {
     ),
   );
 
+  it.effect("keeps waiting when an attempt closes a turn Claude left open", () =>
+    run({}, (harness, reactor) =>
+      Effect.gen(function* () {
+        yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + HOUR }));
+        yield* emit(harness, reactor, turnStarted("cli-turn"));
+        yield* advance(harness, reactor, 5 * MINUTE);
+        assert.strictEqual((yield* Ref.get(harness.sends)).length, 1);
+
+        yield* emit(harness, reactor, turnCompleted("cli-turn", "completed"));
+        yield* attemptLimited(harness, reactor);
+        assert.propertyVal((yield* lastRow(harness))?.payload, "state", "waiting");
+        assert.strictEqual((yield* rows(harness)).length, 1);
+      }),
+    ),
+  );
+
   it.effect("picks a waiting cycle back up after a restart", () =>
     run(
       {

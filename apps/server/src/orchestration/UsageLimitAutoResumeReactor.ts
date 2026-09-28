@@ -516,6 +516,8 @@ export const make = Effect.gen(function* () {
     }
     waiting.attemptStartedAtMs = nowMs;
     waiting.cycle = scheduleNextAttempt(waiting.cycle, nowMs);
+    // The send closes any turn Claude left open, which says nothing about the limit.
+    waiting.selfStartedTurnId = undefined;
     yield* providerService
       .sendTurn({
         threadId,
