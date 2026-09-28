@@ -82,6 +82,24 @@ export function withDispatchingMessage(
 }
 
 /**
+ * Forget a settled send of one message: its dispatch marker and, unless that
+ * turn is still active, its admission. A retry of the message then starts clean.
+ */
+export function withoutSettledMessage(
+  runtimePayload: Record<string, unknown>,
+  messageId: MessageId,
+): Record<string, unknown> {
+  const { lastAdmittedMessageId, lastAdmittedTurnId, ...rest } = withDispatchingMessage(
+    runtimePayload,
+    messageId,
+    false,
+  );
+  return lastAdmittedMessageId === messageId && rest.activeTurnId !== lastAdmittedTurnId
+    ? rest
+    : { ...rest, lastAdmittedMessageId, lastAdmittedTurnId };
+}
+
+/**
  * Read what the runtime payload proves about one message. A confirmed admission
  * wins over a dispatch marker; `turnId: null` means it may have been sent.
  */

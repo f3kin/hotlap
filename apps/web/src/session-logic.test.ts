@@ -513,6 +513,33 @@ describe("deriveWorkLogEntries", () => {
     ]);
   });
 
+  it("names the accounts on account switch rows", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "route-switch",
+        kind: "provider.account.routed",
+        summary: "Switched provider account",
+        payload: {
+          previousProviderInstanceLabel: "Codex Work",
+          providerInstanceLabel: "Codex Personal",
+          reason: "usage-threshold",
+        },
+        sequence: 0,
+      }),
+      makeActivity({
+        id: "route-legacy",
+        kind: "provider.account.routed",
+        summary: "Switched provider account",
+        sequence: 1,
+      }),
+    ]);
+
+    expect(entries.map((entry) => [entry.id, entry.label])).toEqual([
+      ["route-switch", "Switched provider account: Codex Work → Codex Personal"],
+      ["route-legacy", "Switched provider account"],
+    ]);
+  });
+
   it("keeps the latest task progress without emitting plan-update log entries", () => {
     const activities = [
       makeActivity({ id: "before", kind: "tool.completed", summary: "Read files", sequence: 0 }),

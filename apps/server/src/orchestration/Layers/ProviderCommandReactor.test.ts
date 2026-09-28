@@ -61,7 +61,7 @@ import { ProviderSessionDirectory } from "../../provider/Services/ProviderSessio
 import {
   ProviderSessionDirectoryLive,
   readPersistedTurnAdmission,
-  withDispatchingMessage,
+  withoutSettledMessage,
 } from "../../provider/Layers/ProviderSessionDirectory.ts";
 import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
@@ -144,7 +144,7 @@ const routingClaudeProvider = (input: {
 }): ServerProvider => ({
   ...routingCodexProvider({ instanceId: input.instanceId, usedPercent: 0 }),
   driver: ProviderDriverKind.make("claudeAgent"),
-  continuation: { groupKey: `claude:home:${input.instanceId}` },
+  continuation: { groupKey: "claude:transcript-copy" },
   models: [
     {
       slug: "claude-sonnet-5",
@@ -274,6 +274,8 @@ describe("ProviderCommandReactor", () => {
     readonly unreadableHistory?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly providerAccountRouteDispatchFailures?: number;
+    /** Fails the turn start a usage-limit resend dispatches. */
+    readonly failUsageLimitResend?: boolean;
     readonly backgroundLiveness?: "working" | "monitoring";
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly serverActivation?: Effect.Effect<void>;
@@ -551,7 +553,7 @@ describe("ProviderCommandReactor", () => {
             },
             {
               updateRuntimePayload: (payload) =>
-                withDispatchingMessage(payload, clearInput.messageId, false),
+                withoutSettledMessage(payload, clearInput.messageId),
             },
           );
         }),
@@ -625,7 +627,9 @@ describe("ProviderCommandReactor", () => {
             continuationKey:
               driverKind === ProviderDriverKind.make("codex")
                 ? "codex:home:/shared-codex"
-                : `${driverKind}:instance:${instanceId}`,
+                : driverKind === ProviderDriverKind.make("claudeAgent")
+                  ? "claude:transcript-copy"
+                  : `${driverKind}:instance:${instanceId}`,
           },
         });
       },
@@ -663,6 +667,13 @@ describe("ProviderCommandReactor", () => {
           readThreadEvents: engine.readThreadEvents,
           getThreadReplayStats: engine.getThreadReplayStats,
           dispatch: (command) => {
+            if (
+              input?.failUsageLimitResend === true &&
+              command.type === "thread.turn.start" &&
+              command.commandId.startsWith("server:usage-limit-resend:")
+            ) {
+              return Effect.die(new Error("Injected usage-limit resend failure"));
+            }
             if (command.type === "thread.provider-account.route") {
               providerAccountRouteDispatchAttempts += 1;
               if (
@@ -2063,7 +2074,7 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
-  it("fixes a Claude thread after its one allowed initial placement", async () => {
+  it("keeps a Claude thread on Auto after its initial placement", async () => {
     const current = routingClaudeProvider({
       instanceId: "claude-personal",
       sessionUsedPercent: 97,
@@ -2108,10 +2119,10 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     const thread = (await harness.readModel()).threads[0];
     expect(thread?.modelSelection.instanceId).toBe(target.instanceId);
-    expect(thread?.providerRoutingMode).toBe("fixed");
+    expect(thread?.providerRoutingMode).toBe("auto");
   });
 
-  it("fixes a Claude thread after keeping its initial account", async () => {
+  it("keeps a Claude thread on Auto after keeping its initial account", async () => {
     const current = routingClaudeProvider({
       instanceId: "claude-personal",
       sessionUsedPercent: 20,
@@ -2156,7 +2167,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     const thread = (await harness.readModel()).threads[0];
     expect(thread?.modelSelection.instanceId).toBe(current.instanceId);
-    expect(thread?.providerRoutingMode).toBe("fixed");
+    expect(thread?.providerRoutingMode).toBe("auto");
     expect(thread?.activities.some((activity) => activity.kind === "provider.account.routed")).toBe(
       false,
     );
@@ -3007,6 +3018,505 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
+  /** A Claude thread whose first message was rejected on a usage limit by its current account. */
+  const hitClaudeUsageLimit = async (input: {
+    readonly targetSessionUsedPercent: number;
+    readonly threadProviderRoutingMode: "auto" | "fixed";
+    readonly failUsageLimitResend?: boolean;
+  }) => {
+    const threadId = ThreadId.make("thread-1");
+    const messageId = asMessageId("message-usage-limited");
+    const current = routingClaudeProvider({
+      instanceId: "claude-personal",
+      sessionUsedPercent: 20,
+      weeklyUsedPercent: 20,
+    });
+    const target = routingClaudeProvider({
+      instanceId: "claude-work",
+      sessionUsedPercent: input.targetSessionUsedPercent,
+      weeklyUsedPercent: 20,
+    });
+    const harness = await createHarness({
+      threadModelSelection: { instanceId: current.instanceId, model: "claude-sonnet-5" },
+      threadProviderRoutingMode: input.threadProviderRoutingMode,
+      providerRoutingPolicy: {
+        defaultMode: "auto",
+        usageThresholdPercent: 97,
+        instanceIdsByDriver: {
+          [ProviderDriverKind.make("claudeAgent")]: [current.instanceId, target.instanceId],
+        },
+      },
+      providerSnapshots: [current, target],
+      ...(input.failUsageLimitResend === true ? { failUsageLimitResend: true } : {}),
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-usage-limited"),
+        threadId,
+        message: { messageId, role: "user", text: "keep going", attachments: [] },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    await harness.admitTurn({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: current.instanceId,
+      turnId: asTurnId("turn-1"),
+    });
+    const limitMessage =
+      "Claude usage limit reached. Send the message again once the limit resets.";
+    await harness.emitRuntimeEvent({
+      type: "runtime.error",
+      eventId: EventId.make("evt-usage-limit"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: current.instanceId,
+      threadId,
+      turnId: asTurnId("turn-1"),
+      createdAt: ROUTING_NOW_ISO,
+      payload: { message: limitMessage, class: "usage_limit" },
+    });
+    // What ingestion records when the provider fails the turn.
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-usage-limited-turn-failed"),
+        threadId,
+        session: {
+          threadId,
+          status: "error",
+          providerName: "claudeAgent",
+          providerInstanceId: current.instanceId,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: limitMessage,
+          updatedAt: ROUTING_NOW_ISO,
+        },
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    return { harness, threadId, messageId, current, target, limitMessage };
+  };
+
+  it("resends a usage-limited Claude message on another account", async () => {
+    const { harness, messageId, target } = await hitClaudeUsageLimit({
+      targetSessionUsedPercent: 20,
+      threadProviderRoutingMode: "auto",
+    });
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await harness.drain();
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        modelSelection: expect.objectContaining({ instanceId: target.instanceId }),
+      }),
+    );
+    const thread = (await harness.readModel()).threads[0];
+    expect(thread?.modelSelection.instanceId).toBe(target.instanceId);
+    expect(thread?.providerRoutingMode).toBe("auto");
+    expect(thread?.session?.lastError).toBeNull();
+    // Same message, one bubble, one outcome row.
+    expect(thread?.messages.filter((message) => message.role === "user")).toEqual([
+      expect.objectContaining({ id: messageId }),
+    ]);
+    expect(
+      thread?.activities.filter((activity) => activity.kind === "provider.account.routed"),
+    ).toHaveLength(1);
+    expect(thread?.activities.some((activity) => activity.tone === "error")).toBe(false);
+  });
+
+  it("shows one message with the soonest reset when every account is usage-limited", async () => {
+    const { harness } = await hitClaudeUsageLimit({
+      targetSessionUsedPercent: 100,
+      threadProviderRoutingMode: "auto",
+    });
+
+    await waitFor(async () =>
+      (await harness.readModel()).threads[0]!.activities.some(
+        (activity) => activity.kind === "provider.account.route.failed",
+      ),
+    );
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0];
+    const errors = thread?.activities.filter((activity) => activity.tone === "error") ?? [];
+    expect(errors).toHaveLength(1);
+    const detail = (errors[0]?.payload as { detail?: string } | undefined)?.detail;
+    expect(detail).toMatch(
+      /^Every account in this project is at its usage limit.*soonest resets in \d/,
+    );
+    expect(thread?.session?.lastError).toBe(detail);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops with one message when the account it moved to is limited too", async () => {
+    const { harness, threadId, target, limitMessage } = await hitClaudeUsageLimit({
+      targetSessionUsedPercent: 20,
+      threadProviderRoutingMode: "auto",
+    });
+    // The resend is admitted on the new account before its turn can fail.
+    await waitFor(async () => {
+      const session = (await harness.readModel()).threads[0]?.session;
+      return session?.status === "running" && session.providerInstanceId === target.instanceId;
+    });
+
+    await harness.emitRuntimeEvent({
+      type: "runtime.error",
+      eventId: EventId.make("evt-usage-limit-target"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: target.instanceId,
+      threadId,
+      turnId: asTurnId("turn-1"),
+      createdAt: ROUTING_NOW_ISO,
+      payload: { message: limitMessage, class: "usage_limit" },
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-usage-limited-target-failed"),
+        threadId,
+        session: {
+          threadId,
+          status: "error",
+          providerName: "claudeAgent",
+          providerInstanceId: target.instanceId,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: limitMessage,
+          updatedAt: ROUTING_NOW_ISO,
+        },
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+
+    await waitFor(async () =>
+      (await harness.readModel()).threads[0]!.activities.some(
+        (activity) => activity.kind === "provider.account.route.failed",
+      ),
+    );
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0];
+    expect(thread?.activities.filter((activity) => activity.tone === "error")).toEqual([
+      expect.objectContaining({
+        kind: "provider.account.route.failed",
+        payload: expect.objectContaining({
+          detail: expect.stringMatching(/^Every account in this project is at its usage limit/),
+        }),
+      }),
+    ]);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the usage-limit error on a thread fixed to its account", async () => {
+    const { harness, limitMessage } = await hitClaudeUsageLimit({
+      targetSessionUsedPercent: 20,
+      threadProviderRoutingMode: "fixed",
+    });
+
+    await waitFor(async () =>
+      (await harness.readModel()).threads[0]!.activities.some(
+        (activity) => activity.kind === "runtime.error",
+      ),
+    );
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0];
+    expect(thread?.activities.filter((activity) => activity.tone === "error")).toEqual([
+      expect.objectContaining({ kind: "runtime.error", payload: { message: limitMessage } }),
+    ]);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("records one outcome for each usage-limited turn when a second send fails before the first settles", async () => {
+    const threadId = ThreadId.make("thread-1");
+    const current = routingClaudeProvider({
+      instanceId: "claude-personal",
+      sessionUsedPercent: 20,
+      weeklyUsedPercent: 20,
+    });
+    const harness = await createHarness({
+      threadModelSelection: { instanceId: current.instanceId, model: "claude-sonnet-5" },
+      threadProviderRoutingMode: "fixed",
+      providerSnapshots: [current],
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-usage-limited-first"),
+        threadId,
+        message: {
+          messageId: asMessageId("message-usage-limited-first"),
+          role: "user",
+          text: "first",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    await harness.admitTurn({
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: current.instanceId,
+      turnId: asTurnId("turn-1"),
+    });
+    const limitMessage =
+      "Claude usage limit reached. Send the message again once the limit resets.";
+    // Both sends fail on the limit before ingestion settles the thread.
+    for (const turnId of ["turn-1", "turn-2"]) {
+      await harness.emitRuntimeEvent({
+        type: "runtime.error",
+        eventId: EventId.make(`evt-usage-limit-${turnId}`),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: current.instanceId,
+        threadId,
+        turnId: asTurnId(turnId),
+        createdAt: ROUTING_NOW_ISO,
+        payload: { message: limitMessage, class: "usage_limit" },
+      });
+    }
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-usage-limited-turns-failed"),
+        threadId,
+        session: {
+          threadId,
+          status: "error",
+          providerName: "claudeAgent",
+          providerInstanceId: current.instanceId,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: limitMessage,
+          updatedAt: ROUTING_NOW_ISO,
+        },
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+
+    await waitFor(async () =>
+      (await harness.readModel()).threads[0]!.activities.some(
+        (activity) => activity.kind === "runtime.error",
+      ),
+    );
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0];
+    expect(
+      thread?.activities
+        .filter((activity) => activity.kind === "runtime.error")
+        .map((activity) => activity.turnId)
+        .toSorted(),
+    ).toEqual([asTurnId("turn-1"), asTurnId("turn-2")]);
+  });
+
+  it("shows the usage-limit error when the resend cannot be dispatched", async () => {
+    const { harness, limitMessage } = await hitClaudeUsageLimit({
+      targetSessionUsedPercent: 20,
+      threadProviderRoutingMode: "auto",
+      failUsageLimitResend: true,
+    });
+
+    await waitFor(async () =>
+      (await harness.readModel()).threads[0]!.activities.some(
+        (activity) => activity.kind === "runtime.error",
+      ),
+    );
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0];
+    expect(thread?.activities.filter((activity) => activity.tone === "error")).toEqual([
+      expect.objectContaining({ kind: "runtime.error", payload: { message: limitMessage } }),
+    ]);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resend a fork's first message without the inherited conversation", async () => {
+    const current = routingClaudeProvider({
+      instanceId: "claude-personal",
+      sessionUsedPercent: 20,
+      weeklyUsedPercent: 20,
+    });
+    const target = routingClaudeProvider({
+      instanceId: "claude-work",
+      sessionUsedPercent: 20,
+      weeklyUsedPercent: 20,
+    });
+    const harness = await createHarness({
+      threadModelSelection: { instanceId: current.instanceId, model: "claude-sonnet-5" },
+      threadProviderRoutingMode: "auto",
+      providerRoutingPolicy: {
+        defaultMode: "auto",
+        usageThresholdPercent: 97,
+        instanceIdsByDriver: {
+          [ProviderDriverKind.make("claudeAgent")]: [current.instanceId, target.instanceId],
+        },
+      },
+      providerSnapshots: [current, target],
+    });
+    const sourceThreadId = ThreadId.make("thread-1");
+    const sourceTurnId = asTurnId("turn-fork-source");
+    const sourceAnswerId = asMessageId("message-fork-source-answer");
+    const forkThreadId = ThreadId.make("thread-fork-limited");
+    // The provider's turn id for the fork's first send (the harness sendTurn returns turn-1).
+    const forkTurnId = asTurnId("turn-1");
+    const setSession = (
+      threadId: ThreadId,
+      tag: string,
+      session: {
+        readonly status: "running" | "ready" | "error";
+        readonly providerInstanceId: ProviderInstanceId;
+        readonly activeTurnId: TurnId | null;
+        readonly lastError: string | null;
+      },
+    ) =>
+      harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-fork-limit-${tag}`),
+          threadId,
+          session: {
+            threadId,
+            providerName: "claudeAgent",
+            runtimeMode: "approval-required",
+            updatedAt: ROUTING_NOW_ISO,
+            ...session,
+          },
+          createdAt: ROUTING_NOW_ISO,
+        }),
+      );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-fork-limit-source-turn"),
+        threadId: sourceThreadId,
+        message: {
+          messageId: asMessageId("message-fork-limit-source-question"),
+          role: "user",
+          text: "Which setting should we use?",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    await setSession(sourceThreadId, "source-running", {
+      status: "running",
+      providerInstanceId: current.instanceId,
+      activeTurnId: sourceTurnId,
+      lastError: null,
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("cmd-fork-limit-source-answer-delta"),
+        threadId: sourceThreadId,
+        messageId: sourceAnswerId,
+        delta: "Use the inherited setting.",
+        turnId: sourceTurnId,
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.message.assistant.complete",
+        commandId: CommandId.make("cmd-fork-limit-source-answer-complete"),
+        threadId: sourceThreadId,
+        messageId: sourceAnswerId,
+        turnId: sourceTurnId,
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await setSession(sourceThreadId, "source-ready", {
+      status: "ready",
+      providerInstanceId: current.instanceId,
+      activeTurnId: null,
+      lastError: null,
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("cmd-fork-limit-create"),
+        threadId: forkThreadId,
+        sourceThreadId,
+        sourceMessageId: sourceAnswerId,
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-fork-limit-first-turn"),
+        threadId: forkThreadId,
+        message: {
+          messageId: asMessageId("message-fork-limit-first-turn"),
+          role: "user",
+          text: "Continue from there.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        allowProviderAccountRouting: true,
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await harness.drain();
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      threadId: forkThreadId,
+      input: expect.stringContaining("## Assistant\n\nUse the inherited setting."),
+    });
+    const forkInstanceId =
+      (await harness.readModel()).threads.find((thread) => thread.id === forkThreadId)?.session
+        ?.providerInstanceId ?? current.instanceId;
+    await setSession(forkThreadId, "fork-running", {
+      status: "running",
+      providerInstanceId: forkInstanceId,
+      activeTurnId: forkTurnId,
+      lastError: null,
+    });
+    const limitMessage =
+      "Claude usage limit reached. Send the message again once the limit resets.";
+    await harness.emitRuntimeEvent({
+      type: "runtime.error",
+      eventId: EventId.make("evt-fork-usage-limit"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: forkInstanceId,
+      threadId: forkThreadId,
+      turnId: forkTurnId,
+      createdAt: ROUTING_NOW_ISO,
+      payload: { message: limitMessage, class: "usage_limit" },
+    });
+    await setSession(forkThreadId, "fork-failed", {
+      status: "error",
+      providerInstanceId: forkInstanceId,
+      activeTurnId: null,
+      lastError: limitMessage,
+    });
+
+    const forkThread = async () =>
+      (await harness.readModel()).threads.find((thread) => thread.id === forkThreadId);
+    await waitFor(
+      async () =>
+        harness.sendTurn.mock.calls.length > 2 ||
+        (await forkThread())?.activities.some((activity) => activity.tone === "error") === true,
+    );
+    await harness.drain();
+    // A resend would reach the provider without the fork's inherited conversation.
+    expect(harness.sendTurn.mock.calls.slice(2).map((call) => call[0])).toEqual([]);
+    expect(
+      (await forkThread())?.activities.filter((activity) => activity.tone === "error"),
+    ).toEqual([
+      expect.objectContaining({ kind: "runtime.error", payload: { message: limitMessage } }),
+    ]);
+  });
+
   it("restores the initial Claude account when the atomic route commit fails", async () => {
     const current = routingClaudeProvider({
       instanceId: "claude-personal",
@@ -3076,7 +3586,7 @@ describe("ProviderCommandReactor", () => {
     );
     const thread = (await harness.readModel()).threads[0];
     expect(thread?.modelSelection.instanceId).toBe(current.instanceId);
-    expect(thread?.providerRoutingMode).toBe("fixed");
+    expect(thread?.providerRoutingMode).toBe("auto");
     expect(thread?.session?.providerInstanceId).toBe(current.instanceId);
     expect(thread?.activities).toContainEqual(
       expect.objectContaining({ kind: "provider.account.route.failed", tone: "error" }),
@@ -3086,7 +3596,7 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
-  it("keeps an imported Claude thread on the account that recorded its session", async () => {
+  it("keeps an imported Claude thread on its account while that account has room", async () => {
     const current = routingClaudeProvider({
       instanceId: "claude-personal",
       sessionUsedPercent: 99,
@@ -3151,8 +3661,8 @@ describe("ProviderCommandReactor", () => {
     ]);
     const thread = (await harness.readModel()).threads[0];
     expect(thread?.modelSelection.instanceId).toBe(current.instanceId);
-    // The thread can never route, so the stored mode stops advertising Auto.
-    expect(thread?.providerRoutingMode).toBe("fixed");
+    // Moving a started Claude thread costs its prompt cache, so it waits for a real limit.
+    expect(thread?.providerRoutingMode).toBe("auto");
     expect(
       thread?.activities.some((activity) => activity.kind.startsWith("provider.account.route")),
     ).toBe(false);

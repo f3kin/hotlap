@@ -465,37 +465,13 @@ export function resolveProviderRoutingModeAfterSelection(
 }
 
 /**
- * Whether the server has pinned this thread to Fixed. Claude cannot move a
- * conversation to another account once a turn exists, so the server pins Claude
- * threads with a `latestTurn`. A blocked first send leaves messages and a session
- * but no turn, and stays routable.
- */
-export function isProviderRoutingPinnedToFixed(input: {
-  readonly thread:
-    | Pick<ThreadShell, "latestTurn" | "modelSelection" | "session">
-    | null
-    | undefined;
-  readonly providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>;
-}): boolean {
-  const thread = input.thread;
-  if (!thread || thread.latestTurn === null) return false;
-  const driver =
-    input.providers.find((provider) => provider.instanceId === thread.modelSelection.instanceId)
-      ?.driver ?? thread.session?.providerName;
-  return driver === "claudeAgent";
-}
-
-/**
  * Resolves a thread's account switching mode from the composer's pending choice
- * (`intent`) and the thread's own mode. On a thread pinned to Fixed any pending
- * choice is stale and must not re-enable Auto.
+ * (`intent`) and the thread's own mode.
  */
 export function resolveThreadProviderRoutingMode(input: {
   readonly intent: ProviderRoutingMode | null | undefined;
   readonly threadMode: ProviderRoutingMode;
-  readonly pinnedToFixed: boolean;
 }): { readonly intent: ProviderRoutingMode | null; readonly mode: ProviderRoutingMode } {
-  if (input.pinnedToFixed) return { intent: null, mode: "fixed" };
   const intent = input.intent ?? null;
   return { intent, mode: intent ?? input.threadMode };
 }
@@ -1328,6 +1304,7 @@ export interface LocalDispatchSnapshot {
   latestTurnStartFailureId: string | null;
 }
 
+/** A turn-start failure, or an account-route failure that ended the send before any turn started. */
 export function latestTurnStartFailureId(
   activeThread: Thread | undefined,
   latestUserMessageId: ChatMessage["id"] | null,
@@ -1335,12 +1312,17 @@ export function latestTurnStartFailureId(
   if (latestUserMessageId === null) return null;
   return (
     activeThread?.activities.findLast((activity) => {
-      if (activity.kind !== "provider.turn.start.failed") return false;
       const payload =
         typeof activity.payload === "object" && activity.payload !== null
-          ? (activity.payload as { readonly requestId?: unknown })
+          ? (activity.payload as {
+              readonly requestId?: unknown;
+              readonly terminalTurnStart?: unknown;
+            })
           : null;
-      return payload?.requestId === latestUserMessageId;
+      const endsTurnStart =
+        activity.kind === "provider.turn.start.failed" ||
+        (activity.kind === "provider.account.route.failed" && payload?.terminalTurnStart === true);
+      return endsTurnStart && payload?.requestId === latestUserMessageId;
     })?.id ?? null
   );
 }

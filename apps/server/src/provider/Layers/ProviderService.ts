@@ -81,7 +81,11 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-import { readPersistedTurnAdmission, withDispatchingMessage } from "./ProviderSessionDirectory.ts";
+import {
+  readPersistedTurnAdmission,
+  withDispatchingMessage,
+  withoutSettledMessage,
+} from "./ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
@@ -1607,11 +1611,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               );
             }
           }
+          // Reaching here with another instance of the same provider means the
+          // continuation keys matched, so the conversation moves with the thread.
+          const carriesPersistedCursor =
+            persistedBinding?.providerInstanceId === resolvedInstanceId ||
+            (options?.allowIncompatibleUnstartedReplacement !== true &&
+              persistedBinding?.provider === resolvedProvider);
+          const persistedResumeCursor = carriesPersistedCursor
+            ? persistedBinding?.resumeCursor
+            : undefined;
+          // An older cursor can lack state only its own instance knows, such as where the
+          // conversation is stored, so that instance fills it in before another takes over.
+          const previousAdapter =
+            persistedResumeCursor != null &&
+            persistedBinding?.providerInstanceId !== undefined &&
+            persistedBinding.providerInstanceId !== resolvedInstanceId
+              ? yield* registry
+                  .getByInstance(persistedBinding.providerInstanceId)
+                  .pipe(Effect.option, Effect.map(Option.getOrUndefined))
+              : undefined;
           const effectiveResumeCursor =
             input.resumeCursor ??
-            (persistedBinding?.providerInstanceId === resolvedInstanceId
-              ? persistedBinding.resumeCursor
-              : undefined);
+            previousAdapter?.completeResumeCursor?.(persistedResumeCursor) ??
+            persistedResumeCursor;
           const effectiveCwd =
             input.cwd ??
             (persistedBinding?.providerInstanceId === resolvedInstanceId
@@ -1622,8 +1644,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             "provider.resume_cursor.source":
               input.resumeCursor !== undefined
                 ? "request"
-                : effectiveResumeCursor !== undefined &&
-                    persistedBinding?.providerInstanceId === resolvedInstanceId
+                : effectiveResumeCursor !== undefined
                   ? "persisted"
                   : "none",
             "provider.resume_cursor.present": effectiveResumeCursor !== undefined,
@@ -2495,8 +2516,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         providerInstanceId: binding.value.providerInstanceId,
       },
       {
-        // Removes only this send's entry, so an overlapping send keeps its marker.
-        updateRuntimePayload: (payload) => withDispatchingMessage(payload, input.messageId, false),
+        // Removes only this send's entries, so an overlapping send keeps its marker.
+        updateRuntimePayload: (payload) => withoutSettledMessage(payload, input.messageId),
       },
     );
   });

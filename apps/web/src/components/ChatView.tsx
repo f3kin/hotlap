@@ -487,7 +487,6 @@ import {
   resolveThreadMetadataUpdateForNextTurn,
   providerAccountRoutingConsentForSubmission,
   resolveProviderRoutingModeAfterSelection,
-  isProviderRoutingPinnedToFixed,
   resolveThreadProviderRoutingMode,
   resolveNewThreadProviderRoutingMode,
   resolveSendEnvMode,
@@ -2765,30 +2764,19 @@ export default function ChatView(props: ChatViewProps) {
       mode: activeServerThread.providerRoutingMode ?? "fixed",
     };
   }, [activeServerThread]);
-  const providerRoutingPinnedToFixed = isProviderRoutingPinnedToFixed({
-    thread: activeServerThread,
-    providers: providerStatuses,
-  });
   const providerRoutingMode = resolveThreadProviderRoutingMode({
     intent: composerProviderRoutingMode,
     threadMode: activeServerThread?.providerRoutingMode ?? fallbackDraftProviderRoutingMode,
-    pinnedToFixed: providerRoutingPinnedToFixed,
   }).mode;
-  /** Reads the live composer routing choice, dropping it where the server pins Fixed. */
+  /** Reads the live composer routing choice. */
   const readProviderRoutingMode = useCallback(
     () =>
       resolveThreadProviderRoutingMode({
         intent: useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
           ?.providerRoutingMode,
         threadMode: activeServerThread?.providerRoutingMode ?? fallbackDraftProviderRoutingMode,
-        pinnedToFixed: providerRoutingPinnedToFixed,
       }),
-    [
-      activeServerThread,
-      composerDraftTarget,
-      fallbackDraftProviderRoutingMode,
-      providerRoutingPinnedToFixed,
-    ],
+    [activeServerThread, composerDraftTarget, fallbackDraftProviderRoutingMode],
   );
   const handleProviderRoutingModeChange = useCallback(
     async (mode: ProviderRoutingMode) => {
@@ -2855,12 +2843,6 @@ export default function ChatView(props: ChatViewProps) {
   useEffect(() => {
     if (!activeServerThread || composerProviderRoutingMode === null) return;
     const authoritativeMode = activeServerThread.providerRoutingMode ?? "fixed";
-    // The server pins Claude threads with a turn to Fixed, so any pending choice is stale.
-    if (providerRoutingPinnedToFixed) {
-      setComposerDraftProviderRoutingMode(composerDraftTarget, null);
-      providerRoutingSaveRef.current = null;
-      return;
-    }
     const pendingSave = providerRoutingSaveRef.current;
     if (pendingSave?.threadKey === activeThreadKey) {
       if (
@@ -2886,7 +2868,6 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey,
     composerDraftTarget,
     composerProviderRoutingMode,
-    providerRoutingPinnedToFixed,
     setComposerDraftProviderRoutingMode,
   ]);
   useEffect(() => {

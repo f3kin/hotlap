@@ -20,7 +20,10 @@ import {
   type WorkLogToolLifecycleStatus,
 } from "@t3tools/client-runtime/work-log/presentation";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
-import { providerAccountRouteFailureDescription } from "@t3tools/client-runtime/provider-account-route-notifications";
+import {
+  providerAccountRouteFailureDescription,
+  providerAccountRoutedDetail,
+} from "@t3tools/client-runtime/provider-account-route-notifications";
 import {
   isToolLifecycleItemType,
   type AssetResource,
@@ -584,7 +587,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     id: activity.id,
     createdAt: activity.createdAt,
     turnId: activity.turnId,
-    label: taskLabel || activity.summary,
+    label: taskLabel || routedAccountLabel(activity, payload) || activity.summary,
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -1235,6 +1238,16 @@ function isCommandToolDetail(payload: Record<string, unknown> | null, heading: s
 }
 
 // Route failures may carry raw causes; show only what the toast would show.
+/** Timeline rows show their label, so name the accounts there: "Switched provider account: Work → Personal". */
+function routedAccountLabel(
+  activity: OrchestrationThreadActivity,
+  payload: Record<string, unknown> | null,
+): string | null {
+  if (activity.kind !== "provider.account.routed") return null;
+  const accounts = providerAccountRoutedDetail(payload);
+  return accounts === null ? null : `${activity.summary}: ${accounts}`;
+}
+
 function extractRouteFailureDetail(payload: Record<string, unknown> | null): string {
   return providerAccountRouteFailureDescription(payload);
 }

@@ -167,9 +167,10 @@ export interface ProviderServiceShape {
   ) => Effect.Effect<boolean, ProviderServiceError>;
 
   /**
-   * Drop the dispatch marker of a send recovery has settled. The marker only has
-   * to outlive a crash mid-send, so leaving it behind would refuse a later retry
-   * of the same message and grow the durable payload for the session's life.
+   * Drop what the runtime payload recorded about a settled send: its dispatch
+   * marker and its finished admission. Both only have to outlive a crash
+   * mid-send, so leaving them behind would refuse or misattribute a later retry
+   * of the same message (such as a resend on another account).
    */
   readonly clearSettledDispatchMarker?: (input: {
     readonly threadId: ThreadId;

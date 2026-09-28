@@ -52,6 +52,10 @@ import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import type { ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
+// Where an unconfigured Claude instance keeps its conversations; resume cursors record it.
+const DEFAULT_CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR?.trim()
+  ? NodePath.resolve(process.env.CLAUDE_CONFIG_DIR.trim())
+  : NodePath.join(NodeOS.homedir(), ".claude");
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -2683,6 +2687,11 @@ describe("ClaudeAdapterLive", () => {
       const errors = events.filter((event) => event.type === "runtime.error");
       assert.equal(errors.length, 1);
       assert.equal(errors[0]?.payload.message, expected);
+      // Account switching resends only on this class.
+      assert.equal(
+        errors[0]?.payload.class,
+        expected === usageLimitMessage ? "usage_limit" : "provider_error",
+      );
       assert.equal(completedTurn(events).state, "failed");
       assert.equal(completedTurn(events).errorMessage, expected);
     }).pipe(
@@ -4192,6 +4201,282 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("copies the conversation in when a thread resumes from another Claude account", () => {
+    const fromConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-from-"));
+    const toConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-to-"));
+    const sessionId = "5d0c1d0e-0000-4000-8000-000000000001";
+    NodeFS.mkdirSync(NodePath.join(fromConfigDir, "projects", "-tmp-project"), { recursive: true });
+    NodeFS.writeFileSync(
+      NodePath.join(fromConfigDir, "projects", "-tmp-project", `${sessionId}.jsonl`),
+      "transcript\n",
+    );
+    const harness = makeHarness({ claudeConfig: { homePath: toConfigDir } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: { resume: sessionId, configDir: fromConfigDir },
+      });
+
+      assert.equal(
+        NodeFS.readFileSync(
+          NodePath.join(toConfigDir, "projects", "-tmp-project", `${sessionId}.jsonl`),
+          "utf8",
+        ),
+        "transcript\n",
+      );
+      assert.equal(harness.getLastCreateQueryInput()?.options.resume, sessionId);
+      // The cursor now points at this account, so the next move copies from here.
+      assert.deepInclude(session.resumeCursor, { resume: sessionId, configDir: toConfigDir });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("waits briefly for the old account to flush the conversation, then gives up", () => {
+    const fromConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-from-"));
+    const toConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-to-"));
+    const sessionId = "5d0c1d0e-0000-4000-8000-000000000002";
+    const harness = makeHarness({ claudeConfig: { homePath: toConfigDir } });
+    const start = (resume: string) =>
+      Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        return yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          // Earlier finished turns live only in the transcript, so it must come along.
+          resumeCursor: { resume, configDir: fromConfigDir, turnCount: 2 },
+        });
+      });
+    return Effect.gen(function* () {
+      // Each copy attempt reads the disk, so step the clock one attempt at a time.
+      const attempts = (count: number) =>
+        Effect.gen(function* () {
+          for (let index = 0; index < count; index += 1) {
+            yield* Effect.yieldNow;
+            yield* Effect.yieldNow;
+            yield* TestClock.adjust("100 millis");
+          }
+        });
+      const late = yield* Effect.forkChild(start(sessionId));
+      yield* attempts(3);
+      NodeFS.mkdirSync(NodePath.join(fromConfigDir, "projects", "-late"), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(fromConfigDir, "projects", "-late", `${sessionId}.jsonl`),
+        "late\n",
+      );
+      yield* attempts(2);
+      const session = yield* Fiber.join(late);
+      assert.deepInclude(session.resumeCursor, { resume: sessionId, configDir: toConfigDir });
+
+      const missing = yield* Effect.forkChild(
+        start("5d0c1d0e-0000-4000-8000-000000000003").pipe(Effect.flip),
+      );
+      yield* attempts(25);
+      assert.include((yield* Fiber.join(missing)).message, "conversation was not found");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("marks an older cursor with the account it lived in before it moves", () => {
+    const configDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-home-"));
+    const sessionId = "5d0c1d0e-0000-4000-8000-000000000005";
+    const harness = makeHarness({ claudeConfig: { homePath: configDir } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      // Saved before cursors recorded their home, when a conversation never left its account.
+      assert.deepEqual(adapter.completeResumeCursor?.({ resume: sessionId, turnCount: 2 }), {
+        resume: sessionId,
+        turnCount: 2,
+        configDir,
+      });
+      const recorded = { resume: sessionId, configDir: "/elsewhere" };
+      assert.equal(adapter.completeResumeCursor?.(recorded), recorded);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "starts a new conversation when a thread with no finished turns moves without a transcript",
+    () => {
+      const fromConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-from-"));
+      const toConfigDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-to-"));
+      const sessionId = "5d0c1d0e-0000-4000-8000-000000000004";
+      const harness = makeHarness({ claudeConfig: { homePath: toConfigDir } });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        // The first message hit the limit before the old account wrote anything to disk.
+        const starting = yield* Effect.forkChild(
+          adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+            resumeCursor: {
+              resume: sessionId,
+              configDir: fromConfigDir,
+              resumeSessionAt: "assistant-limited",
+              turnCount: 1,
+              turnStartMessageIds: ["user-limited"],
+            },
+          }),
+        );
+        for (let attempt = 0; attempt < 25; attempt += 1) {
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust("100 millis");
+        }
+        const session = yield* Fiber.join(starting);
+
+        const options = harness.getLastCreateQueryInput()?.options;
+        assert.equal(options?.resume, undefined);
+        assert.equal(options?.resumeSessionAt, undefined);
+        assert.isString(options?.sessionId);
+        assert.notEqual(options?.sessionId, sessionId);
+        assert.deepInclude(session.resumeCursor, {
+          resume: options?.sessionId,
+          configDir: toConfigDir,
+          turnCount: 0,
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  /** A Claude account whose login another tool can swap; one fake query per CLI process. */
+  const makeLoginSwapHarness = () => {
+    const configDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-login-"));
+    const writeLogin = (accountUuid: string) =>
+      NodeFS.writeFileSync(
+        NodePath.join(configDir, ".claude.json"),
+        `{"oauthAccount":{"accountUuid":"${accountUuid}","organizationUuid":"org"}}`,
+      );
+    writeLogin("account-a");
+    const queries: FakeClaudeQuery[] = [];
+    const layer = Layer.effect(
+      ClaudeAdapter,
+      Effect.gen(function* () {
+        return yield* makeClaudeAdapter(decodeClaudeSettings({ homePath: configDir }), {
+          modelCatalog: Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
+          createQuery: () => {
+            const query = new FakeClaudeQuery();
+            queries.push(query);
+            return query;
+          },
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    return { writeLogin, queries, layer };
+  };
+
+  it.effect("restarts Claude on the next message after its login changes", () => {
+    const { writeLogin, queries, layer } = makeLoginSwapHarness();
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "first", attachments: [] });
+      queries[0]?.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: (session.resumeCursor as { resume: string }).resume,
+        uuid: "result-first",
+      } as unknown as SDKMessage);
+      yield* Effect.yieldNow;
+      assert.equal(queries.length, 1);
+
+      writeLogin("account-b");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "second", attachments: [] });
+
+      assert.equal(queries.length, 2);
+      assert.equal(queries[0]?.closeCalls, 1);
+      const [active] = yield* adapter.listSessions();
+      assert.deepInclude(active?.resumeCursor, {
+        resume: (session.resumeCursor as { resume: string }).resume,
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
+    );
+  });
+
+  it.effect("completes an open background turn before a login change restarts Claude", () => {
+    const { writeLogin, queries, layer } = makeLoginSwapHarness();
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const backgroundTurnStarted = yield* Deferred.make<void>();
+      const backgroundTurnCompleted = yield* Deferred.make<ProviderRuntimeEvent>();
+      let backgroundTurnId: ProviderRuntimeEvent["turnId"];
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        if (event.type === "turn.started" && event.raw?.method === "claude/synthetic-turn-start") {
+          backgroundTurnId = event.turnId;
+          return Deferred.succeed(backgroundTurnStarted, undefined);
+        }
+        if (event.type === "turn.completed" && event.turnId === backgroundTurnId) {
+          return Deferred.succeed(backgroundTurnCompleted, event);
+        }
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { resume: string }).resume;
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "first", attachments: [] });
+      queries[0]?.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: sessionId,
+        uuid: "result-first",
+      } as unknown as SDKMessage);
+      // A background agent answering between prompts opens a turn of its own.
+      queries[0]?.emit({
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-background",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-background",
+          content: [{ type: "text", text: "Background work finished" }],
+        },
+      } as unknown as SDKMessage);
+      yield* Deferred.await(backgroundTurnStarted);
+
+      writeLogin("account-b");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "second", attachments: [] });
+
+      const completed = yield* Deferred.await(backgroundTurnCompleted);
+      assert(completed.type === "turn.completed");
+      assert.equal(completed.payload.state, "completed");
+      assert.equal(queries.length, 2);
+      eventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
     );
   });
 
@@ -6413,6 +6698,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(session.resumeCursor, {
         threadId: RESUME_THREAD_ID,
         resume: "550e8400-e29b-41d4-a716-446655440000",
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         resumeSessionAt: "assistant-99",
         turnCount: 3,
       });
@@ -6754,6 +7040,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: "550e8400-e29b-41d4-a716-446655440020",
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 1,
         turnStartMessageIds: [`fork-${firstTurnId}`],
       });
@@ -6879,6 +7166,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: CLAUDE_FORK_SESSION_ID,
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 1,
         turnStartMessageIds: [`fork-${firstTurnId}`],
       });
@@ -6938,6 +7226,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: CLAUDE_FORK_SESSION_ID,
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 1,
         turnStartMessageIds: [`fork-${firstTurnId}`],
       });
@@ -7003,6 +7292,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: CLAUDE_FORK_SESSION_ID,
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 1,
         turnStartMessageIds: [`fork-${firstTurnId}`],
       });
@@ -7093,6 +7383,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: CLAUDE_FORK_SESSION_ID,
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 1,
         turnStartMessageIds: [`fork-${firstTurnId}`],
       });
@@ -7154,6 +7445,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: CLAUDE_FORK_SESSION_ID,
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 1,
         turnStartMessageIds: [`fork-${firstTurnId}`],
       });
@@ -7231,6 +7523,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual((yield* adapter.listSessions())[0]?.resumeCursor, {
         threadId: session.threadId,
         resume: CLAUDE_FORK_SESSION_ID,
+        configDir: DEFAULT_CLAUDE_CONFIG_DIR,
         turnCount: 2,
         turnStartMessageIds: [`fork-${firstTurnId}`, `fork-${secondTurnId}`],
       });

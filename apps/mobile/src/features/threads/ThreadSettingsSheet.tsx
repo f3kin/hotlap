@@ -257,6 +257,8 @@ type ThreadSettingsSessionProps = {
   /** Why Auto cannot be turned on for this thread, shown under the switch. */
   readonly providerRoutingAutoDisabledReason?: string | null;
   readonly providerAccountLabel: string;
+  /** Signed-in email for the current account, when the provider reports one. */
+  readonly providerAccountEmail?: string | null;
   readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
 };
 
@@ -316,6 +318,8 @@ type ThreadSettingsSessionValue = {
   /** Why Auto cannot be turned on for this thread, shown under the switch. */
   readonly providerRoutingAutoDisabledReason?: string | null;
   readonly providerAccountLabel: string;
+  /** Signed-in email for the current account, when the provider reports one. */
+  readonly providerAccountEmail?: string | null;
   readonly onUpdateProviderRoutingMode: (mode: ProviderRoutingMode) => void;
   readonly displayedDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
   readonly providerExpansionOverrides: ReadonlySet<string>;
@@ -478,6 +482,7 @@ function ThreadSettingsSessionProvider(
       providerRoutingCanEnableAuto: props.providerRoutingCanEnableAuto,
       providerRoutingAutoDisabledReason: props.providerRoutingAutoDisabledReason ?? null,
       providerAccountLabel: props.providerAccountLabel,
+      providerAccountEmail: props.providerAccountEmail ?? null,
       onUpdateProviderRoutingMode: props.onUpdateProviderRoutingMode,
       displayedDescriptors,
       favoriteKeys,
@@ -517,6 +522,7 @@ function ThreadSettingsSessionProvider(
       props.onUpdateRuntimeMode,
       props.onUpdateProviderRoutingMode,
       props.providerAccountLabel,
+      props.providerAccountEmail,
       props.providerGroups,
       props.providerRoutingMode,
       props.providerRoutingSupported,
@@ -734,9 +740,16 @@ function ThreadSettingsOptionsItem(props: {
             <View className="min-h-11 flex-row items-center gap-2 border-b border-border-subtle bg-card px-4 py-2">
               <Text className="text-sm font-t3-medium text-foreground">Account</Text>
               <View className="flex-1" />
-              <Text className="shrink text-sm text-foreground-muted" numberOfLines={1}>
-                {session.providerAccountLabel}
-              </Text>
+              <View className="shrink items-end">
+                <Text className="text-sm text-foreground-muted" numberOfLines={1}>
+                  {session.providerAccountLabel}
+                </Text>
+                {session.providerAccountEmail ? (
+                  <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+                    {session.providerAccountEmail}
+                  </Text>
+                ) : null}
+              </View>
             </View>
             <SwitchRow
               label="Automatic account switching"
@@ -1441,7 +1454,9 @@ export function NewTaskThreadSettingsRouteScreen() {
       providerRoutingMode={flow.providerRoutingMode}
       providerRoutingSupported={flow.providerRoutingSupported}
       providerRoutingCanEnableAuto={flow.providerRoutingCanEnableAuto}
+      providerRoutingAutoDisabledReason={flow.providerRoutingAutoDisabledReason}
       providerAccountLabel={flow.providerAccountLabel}
+      providerAccountEmail={flow.providerAccountEmail}
       onUpdateProviderRoutingMode={flow.setProviderRoutingMode}
     >
       <ThreadSettingsPickerNavigator onClose={() => navigation.goBack()} />

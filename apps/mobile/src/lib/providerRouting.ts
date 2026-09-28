@@ -1,6 +1,6 @@
+import type { ProviderRoutingAutoBlocker } from "@t3tools/client-runtime/provider-account-routing";
 import type {
   ModelSelection,
-  OrchestrationThreadShell,
   ProviderInstanceId,
   ProviderRoutingMode,
   ServerProvider,
@@ -19,24 +19,25 @@ function isRunnableRoutingProvider(provider: ServerProvider): boolean {
   );
 }
 
-export function canEnableProviderRoutingAuto(
+/** The first thing standing between the current account and Auto, or null. Mirrors the web rule. */
+export function providerRoutingAutoBlocker(
   providers: ReadonlyArray<ServerProvider>,
   instanceIdsByDriver: Readonly<Record<string, ReadonlyArray<ProviderInstanceId>>>,
   usageThresholdPercent: number | null,
   selectedInstanceId: ProviderInstanceId,
-): boolean {
+): ProviderRoutingAutoBlocker | null {
   if (
     usageThresholdPercent === null ||
     !Number.isInteger(usageThresholdPercent) ||
     usageThresholdPercent < 1 ||
     usageThresholdPercent > 100
   ) {
-    return false;
+    return "threshold";
   }
   const selectedProvider = providers.find(
     (provider) => provider.instanceId === selectedInstanceId && isRunnableRoutingProvider(provider),
   );
-  if (!selectedProvider) return false;
+  if (!selectedProvider) return "account-unavailable";
 
   const runnableIds = new Set(
     providers
@@ -47,10 +48,10 @@ export function canEnableProviderRoutingAuto(
       .map((provider) => provider.instanceId),
   );
   const configuredIds = instanceIdsByDriver[selectedProvider.driver] ?? [];
-  return (
-    configuredIds.includes(selectedProvider.instanceId) &&
-    new Set(configuredIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
-  );
+  if (!configuredIds.includes(selectedProvider.instanceId)) return "account-not-pooled";
+  return new Set(configuredIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
+    ? null
+    : "pool-too-small";
 }
 
 export function routingModeAfterManualModelSelection(
@@ -61,30 +62,12 @@ export function routingModeAfterManualModelSelection(
   return currentMode === "auto" && currentInstanceId !== nextInstanceId ? "fixed" : currentMode;
 }
 
-/**
- * Claude only picks an account before its first turn, so the server pins
- * started Claude threads to Fixed. A first send that never became a turn
- * leaves Auto available.
- */
-export function isProviderAccountLocked(
-  thread: Pick<OrchestrationThreadShell, "latestTurn" | "session" | "modelSelection">,
-  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>,
-): boolean {
-  if (thread.latestTurn === null) return false;
-  const driver =
-    providers.find((provider) => provider.instanceId === thread.modelSelection.instanceId)
-      ?.driver ?? thread.session?.providerName;
-  return driver === "claudeAgent";
-}
-
 export function resolveProviderRoutingModeForSubmission(input: {
   readonly draftMode?: ProviderRoutingMode;
   readonly authoritativeMode: ProviderRoutingMode;
   readonly authoritativeInstanceId: ProviderInstanceId;
   readonly selectedInstanceId: ProviderInstanceId;
-  readonly accountLocked: boolean;
 }): ProviderRoutingMode {
-  if (input.accountLocked) return "fixed";
   return (
     input.draftMode ??
     routingModeAfterManualModelSelection(
@@ -106,10 +89,8 @@ export function shouldClearProviderRoutingIntent(input: {
   readonly saveStatus: "none" | "pending";
   readonly intendedMode: ProviderRoutingMode | undefined;
   readonly authoritativeMode: ProviderRoutingMode;
-  readonly accountLocked: boolean;
 }): boolean {
   if (input.intendedMode === undefined) return false;
-  if (input.accountLocked) return true;
   return input.saveStatus === "none" && input.intendedMode === input.authoritativeMode;
 }
 

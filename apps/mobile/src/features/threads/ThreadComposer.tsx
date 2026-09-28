@@ -1,6 +1,7 @@
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useAtomValue } from "@effect/atom-react";
+import { providerRoutingAutoBlockerMessage } from "@t3tools/client-runtime/provider-account-routing";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import { pastedTextDisposition, replaceTextSelection } from "@t3tools/client-runtime/text-paste";
 import {
@@ -52,8 +53,8 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
-import { canEnableProviderRoutingAuto, isProviderAccountLocked } from "../../lib/providerRouting";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
+import { providerRoutingAutoBlocker } from "../../lib/providerRouting";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import {
@@ -367,22 +368,21 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     (selectedProviderStatus?.driver === "codex" ||
       selectedProviderStatus?.driver === "claudeAgent"),
   );
-  // The server pins started Claude threads to Fixed; mirror it so the switch never lies.
-  const providerAccountLocked = isProviderAccountLocked(
-    props.selectedThread,
-    props.serverConfig?.providers ?? [],
-  );
+  // Why Auto is unavailable, so the settings sheet can say it instead of just
+  // showing a dead switch. Only meaningful once routing applies to this thread.
+  const providerRoutingAutoBlockerKind =
+    providerRoutingSupported && selectedProviderStatus
+      ? projectSettings.sources.providerRoutingPolicy === "project"
+        ? providerRoutingAutoBlocker(
+            props.serverConfig?.providers ?? [],
+            projectSettings.settings.providerRoutingPolicy.instanceIdsByDriver,
+            projectSettings.settings.providerRoutingPolicy.usageThresholdPercent,
+            currentModelSelection.instanceId,
+          )
+        : "not-configured"
+      : null;
   const providerRoutingCanEnableAuto = Boolean(
-    providerRoutingSupported &&
-    !providerAccountLocked &&
-    selectedProviderStatus &&
-    projectSettings.sources.providerRoutingPolicy === "project" &&
-    canEnableProviderRoutingAuto(
-      props.serverConfig?.providers ?? [],
-      projectSettings.settings.providerRoutingPolicy.instanceIdsByDriver,
-      projectSettings.settings.providerRoutingPolicy.usageThresholdPercent,
-      currentModelSelection.instanceId,
-    ),
+    providerRoutingSupported && selectedProviderStatus && providerRoutingAutoBlockerKind === null,
   );
   const composerOwnerKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
   const openDraftDocument = (attachment: ComposerDocumentAttachment) => {
@@ -635,15 +635,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         props.onUpdateModelSelection({ ...currentModelSelection, options }),
       runtimeMode: currentRuntimeMode,
       onUpdateRuntimeMode: props.onUpdateRuntimeMode,
-      providerRoutingMode: providerAccountLocked
-        ? "fixed"
-        : (props.selectedThread.providerRoutingMode ?? "fixed"),
+      providerRoutingMode: props.selectedThread.providerRoutingMode ?? "fixed",
       providerRoutingSupported,
       providerRoutingCanEnableAuto,
-      providerRoutingAutoDisabledReason: providerAccountLocked
-        ? "Claude threads keep their account once started."
-        : null,
+      providerRoutingAutoDisabledReason: providerRoutingAutoBlockerMessage(
+        providerRoutingAutoBlockerKind,
+      ),
       providerAccountLabel: selectedProviderStatus?.displayName ?? currentModelSelection.instanceId,
+      providerAccountEmail: selectedProviderStatus?.auth.email?.trim() || null,
       onUpdateProviderRoutingMode: props.onUpdateProviderRoutingMode,
     }),
     [
@@ -653,11 +652,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.onUpdateRuntimeMode,
       props.onUpdateProviderRoutingMode,
       props.selectedThread.providerRoutingMode,
-      providerAccountLocked,
       providerOptionDescriptors,
       providerRoutingSupported,
+      providerRoutingAutoBlockerKind,
       providerRoutingCanEnableAuto,
       selectedProviderStatus?.displayName,
+      selectedProviderStatus?.auth.email,
       settingsOwnerId,
       threadProviderGroups,
     ],

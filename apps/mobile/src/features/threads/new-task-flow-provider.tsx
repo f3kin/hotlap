@@ -37,8 +37,8 @@ import {
   resolveSelectableModelSelection,
 } from "../../lib/modelOptions";
 import {
-  canEnableProviderRoutingAuto,
   eligibleProjectDefaultProviderRoutingMode,
+  providerRoutingAutoBlocker,
   resolveNewTaskProviderRoutingMode,
 } from "../../lib/providerRouting";
 import { scopedProjectKey } from "../../lib/scopedEntities";
@@ -85,6 +85,7 @@ import {
   setPendingConnectionError,
   useSavedRemoteConnections,
 } from "../../state/use-remote-environment-registry";
+import { providerRoutingAutoBlockerMessage } from "@t3tools/client-runtime/provider-account-routing";
 import { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { type VcsRef } from "@t3tools/client-runtime/state/vcs";
 import {
@@ -172,7 +173,9 @@ type NewTaskFlowContextValue = {
   readonly providerRoutingMode: ProviderRoutingMode;
   readonly providerRoutingSupported: boolean;
   readonly providerRoutingCanEnableAuto: boolean;
+  readonly providerRoutingAutoDisabledReason: string | null;
   readonly providerAccountLabel: string;
+  readonly providerAccountEmail: string | null;
   readonly planModeEnabled: boolean;
   readonly expandedProvider: string | null;
   readonly environments: ReadonlyArray<{
@@ -549,16 +552,21 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     (selectedProviderStatus?.driver === "codex" ||
       selectedProviderStatus?.driver === "claudeAgent"),
   );
+  // Why Auto is unavailable, so the settings sheet explains it instead of
+  // showing a dead switch.
+  const providerRoutingAutoBlockerKind =
+    providerRoutingSupported && selectedProviderStatus
+      ? projectSettings.sources.providerRoutingPolicy === "project"
+        ? providerRoutingAutoBlocker(
+            selectedEnvironmentServerConfig?.providers ?? [],
+            projectSettings.settings.providerRoutingPolicy.instanceIdsByDriver,
+            projectSettings.settings.providerRoutingPolicy.usageThresholdPercent,
+            selectedProviderStatus.instanceId,
+          )
+        : "not-configured"
+      : null;
   const providerRoutingCanEnableAuto = Boolean(
-    providerRoutingSupported &&
-    projectSettings.sources.providerRoutingPolicy === "project" &&
-    selectedProviderStatus &&
-    canEnableProviderRoutingAuto(
-      selectedEnvironmentServerConfig?.providers ?? [],
-      projectSettings.settings.providerRoutingPolicy.instanceIdsByDriver,
-      projectSettings.settings.providerRoutingPolicy.usageThresholdPercent,
-      selectedProviderStatus.instanceId,
-    ),
+    providerRoutingSupported && selectedProviderStatus && providerRoutingAutoBlockerKind === null,
   );
   const defaultProviderRoutingMode: ProviderRoutingMode =
     providerRoutingSupported && projectSettings.sources.providerRoutingPolicy === "project"
@@ -1244,8 +1252,12 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       providerRoutingMode,
       providerRoutingSupported,
       providerRoutingCanEnableAuto,
+      providerRoutingAutoDisabledReason: providerRoutingAutoBlockerMessage(
+        providerRoutingAutoBlockerKind,
+      ),
       providerAccountLabel:
         selectedProviderStatus?.displayName ?? selectedModel?.instanceId ?? "Unavailable",
+      providerAccountEmail: selectedProviderStatus?.auth.email?.trim() || null,
       planModeEnabled,
       expandedProvider,
       environments,
@@ -1304,6 +1316,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       providerRoutingMode,
       providerRoutingSupported,
       providerRoutingCanEnableAuto,
+      providerRoutingAutoBlockerKind,
       loadBranches,
       loadMoreBranches,
       projectScopes,

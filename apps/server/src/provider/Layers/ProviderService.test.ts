@@ -1158,7 +1158,17 @@ const secondaryAccountInstanceId = ProviderInstanceId.make("codex-secondary-acco
 const primaryAccount = makeFakeCodexAdapter(CODEX_DRIVER);
 const secondaryAccount = makeFakeCodexAdapter(CODEX_DRIVER);
 const accountRegistryBase = makeStaticInstanceRegistry([
-  [primaryAccountInstanceId, primaryAccount.adapter],
+  [
+    primaryAccountInstanceId,
+    {
+      ...primaryAccount.adapter,
+      // Cursors saved before they recorded their home lack it; only this account knows it.
+      completeResumeCursor: (resumeCursor) =>
+        typeof resumeCursor === "object" && resumeCursor !== null && !("home" in resumeCursor)
+          ? { ...resumeCursor, home: "primary-home" }
+          : resumeCursor,
+    },
+  ],
   [secondaryAccountInstanceId, secondaryAccount.adapter],
 ]);
 const accountRegistry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
@@ -1429,6 +1439,70 @@ mcpHandoff.layer("ProviderServiceLive MCP handoff", (it) => {
           .map((session) => session.providerInstanceId),
         [secondaryAccountInstanceId],
       );
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }),
+  );
+
+  it.effect(
+    "moves a stopped thread's conversation to another account with the same resume state",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("thread-stopped-account-move");
+        mcpHandoffBindings.delete(threadId);
+
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: primaryAccountInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-stopped-account-move"),
+          runtimeMode: "full-access",
+        });
+        yield* provider.stopSession({ threadId });
+        secondaryAccount.startSession.mockClear();
+
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: secondaryAccountInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-stopped-account-move"),
+          runtimeMode: "full-access",
+        });
+
+        assert.deepEqual(secondaryAccount.startSession.mock.calls[0]?.[0].resumeCursor, {
+          opaque: `resume-${String(threadId)}`,
+          home: "primary-home",
+        });
+        McpProviderSession.clearMcpProviderSession(threadId);
+      }),
+  );
+
+  it.effect("keeps a moved cursor's own resume state when it already has it", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-complete-account-move");
+      mcpHandoffBindings.set(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: primaryAccountInstanceId,
+        status: "stopped",
+        resumeCursor: { opaque: "recorded", home: "earlier-home" },
+      });
+      secondaryAccount.startSession.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: secondaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-complete-account-move"),
+        runtimeMode: "full-access",
+      });
+
+      assert.deepEqual(secondaryAccount.startSession.mock.calls[0]?.[0].resumeCursor, {
+        opaque: "recorded",
+        home: "earlier-home",
+      });
+      mcpHandoffBindings.delete(threadId);
       McpProviderSession.clearMcpProviderSession(threadId);
     }),
   );

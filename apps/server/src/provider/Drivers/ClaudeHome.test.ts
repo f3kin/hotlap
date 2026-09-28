@@ -3,13 +3,15 @@ import * as NodeOS from "node:os";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import {
   claudeSignedOutMessage,
+  copyClaudeSession,
   makeClaudeCapabilitiesCacheKey,
-  makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
+  readClaudeLoginIdentity,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 
@@ -24,15 +26,10 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         expect(yield* resolveClaudeHomePath({ homePath: "~/.claude" })).toBe(resolved);
         expect(yield* resolveClaudeHomePath({ homePath: resolved })).toBe(resolved);
         expect(yield* makeClaudeEnvironment({ homePath: "" })).toBe(process.env);
-
-        const key = `claude:home:${resolved}`;
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: "" })).toBe(key);
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: "~/.claude" })).toBe(key);
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: resolved })).toBe(key);
       }),
     );
 
-    it.effect("resolves configured Claude HOME and stamps continuation/cache keys with it", () =>
+    it.effect("resolves configured Claude HOME and stamps the cache key with it", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const homePath = "~/.claude-work";
@@ -40,7 +37,6 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
 
         expect(yield* resolveClaudeHomePath({ homePath })).toBe(resolved);
         expect((yield* makeClaudeEnvironment({ homePath })).CLAUDE_CONFIG_DIR).toBe(resolved);
-        expect(yield* makeClaudeContinuationGroupKey({ homePath })).toBe(`claude:home:${resolved}`);
         expect(yield* makeClaudeCapabilitiesCacheKey({ binaryPath: "claude", homePath })).toBe(
           `claude\0${resolved}\0`,
         );
@@ -54,9 +50,6 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const environment = { CLAUDE_CONFIG_DIR: inherited };
 
         expect(yield* resolveClaudeHomePath({ homePath: "" }, environment)).toBe(inherited);
-        expect(yield* makeClaudeContinuationGroupKey({ homePath: "" }, environment)).toBe(
-          `claude:home:${inherited}`,
-        );
 
         const explicit = path.resolve(NodeOS.homedir(), ".claude-work");
         expect(yield* resolveClaudeHomePath({ homePath: "~/.claude-work" }, environment)).toBe(
@@ -83,6 +76,89 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const second = yield* makeClaudeCapabilitiesCacheKey(config, "/repo-b");
         expect(first).not.toBe(second);
       }),
+    );
+
+    it.effect("copies a session transcript and its sidecar into another Claude home", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped();
+        const from = path.join(root, "personal");
+        const to = path.join(root, "work");
+        const sessionId = "0b7c8f0e-3f7a-4c1e-9a55-1f2d3c4b5a69";
+        const project = path.join(from, "projects", "-repo");
+        yield* fileSystem.makeDirectory(path.join(project, sessionId, "subagents"), {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(path.join(project, `${sessionId}.jsonl`), "new\n");
+        yield* fileSystem.writeFileString(
+          path.join(project, sessionId, "subagents", "a.jsonl"),
+          "a",
+        );
+        // An older copy from an earlier move is replaced, not kept.
+        yield* fileSystem.makeDirectory(path.join(to, "projects", "-repo"), { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(to, "projects", "-repo", `${sessionId}.jsonl`),
+          "old\n",
+        );
+
+        expect(yield* copyClaudeSession({ fromConfigDir: from, toConfigDir: to, sessionId })).toBe(
+          true,
+        );
+        expect(
+          yield* fileSystem.readFileString(
+            path.join(to, "projects", "-repo", `${sessionId}.jsonl`),
+          ),
+        ).toBe("new\n");
+        expect(
+          yield* fileSystem.readFileString(
+            path.join(to, "projects", "-repo", sessionId, "subagents", "a.jsonl"),
+          ),
+        ).toBe("a");
+        expect(
+          yield* copyClaudeSession({
+            fromConfigDir: from,
+            toConfigDir: to,
+            sessionId: "5d0c1d0e-0000-4000-8000-000000000000",
+          }),
+        ).toBe(false);
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("reports an unreadable Claude home instead of a missing conversation", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped();
+        const sessionId = "5d0c1d0e-0000-4000-8000-000000000000";
+        const copy = (fromConfigDir: string) =>
+          copyClaudeSession({ fromConfigDir, toConfigDir: path.join(root, "to"), sessionId });
+
+        // A home that never ran Claude has nothing to copy.
+        expect(yield* copy(path.join(root, "never-used"))).toBe(false);
+        yield* fileSystem.makeDirectory(path.join(root, "broken"));
+        yield* fileSystem.writeFileString(path.join(root, "broken", "projects"), "");
+        const error = yield* Effect.flip(copy(path.join(root, "broken")));
+        expect(error.reason._tag).not.toBe("NotFound");
+      }).pipe(Effect.scoped),
+    );
+
+    it.effect("reads the signed-in subscription account from the config dir", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const configDir = yield* fileSystem.makeTempDirectoryScoped();
+        const env = { CLAUDE_CONFIG_DIR: configDir };
+
+        expect(yield* readClaudeLoginIdentity(env)).toBeUndefined();
+        yield* fileSystem.writeFileString(
+          path.join(configDir, ".claude.json"),
+          '{"projects":{},"oauthAccount":{"accountUuid":"acct-1","organizationUuid":"org-1","emailAddress":"a@b"}}',
+        );
+        expect(yield* readClaudeLoginIdentity(env)).toBe("acct-1:org-1");
+        yield* fileSystem.writeFileString(path.join(configDir, ".claude.json"), "{not json");
+        expect(yield* readClaudeLoginIdentity(env)).toBeUndefined();
+      }).pipe(Effect.scoped),
     );
   });
 });

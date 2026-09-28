@@ -89,6 +89,13 @@ export interface ProviderAdapterShape<TError> {
   readonly compaction?: ProviderCompaction<TError>;
 
   /**
+   * Adds this instance's own resume state that an older persisted cursor lacks, so another
+   * instance of the same driver can take the conversation over. Omitted when cursors are
+   * self-contained.
+   */
+  readonly completeResumeCursor?: (resumeCursor: unknown) => unknown;
+
+  /**
    * Interrupt an active turn.
    */
   readonly interruptTurn: (threadId: ThreadId, turnId?: TurnId) => Effect.Effect<void, TError>;

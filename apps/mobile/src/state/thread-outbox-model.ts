@@ -175,8 +175,7 @@ export function resolveQueuedThreadMetadataUpdate(
   const modelSelectionChanged = !modelSelectionsEqual(nextModelSelection, thread.modelSelection);
   const currentProviderRoutingMode = thread.providerRoutingMode ?? "fixed";
   // The queued routing mode is a snapshot, not a change request: toggles save
-  // straight to the server, which may also pin Auto threads on its own (Claude).
-  // Only a manual account change pins the thread here.
+  // straight to the server. Only a manual account change pins the thread here.
   const nextProviderRoutingMode = routingModeAfterManualModelSelection(
     currentProviderRoutingMode,
     thread.modelSelection.instanceId,

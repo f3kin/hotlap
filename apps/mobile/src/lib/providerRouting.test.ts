@@ -1,15 +1,9 @@
-import {
-  ProviderDriverKind,
-  ProviderInstanceId,
-  TurnId,
-  type ServerProvider,
-} from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  canEnableProviderRoutingAuto,
+  providerRoutingAutoBlocker,
   eligibleProjectDefaultProviderRoutingMode,
-  isProviderAccountLocked,
   providerAccountRoutingConsentForSubmission,
   reconcileDraftModelSelectionAfterAutomaticRoute,
   resolveProviderRoutingModeForSubmission,
@@ -61,7 +55,6 @@ describe("resolveProviderRoutingModeForSubmission", () => {
         authoritativeMode: "auto",
         authoritativeInstanceId: codexOne,
         selectedInstanceId: codexTwo,
-        accountLocked: false,
       }),
     ).toBe("fixed");
   });
@@ -73,7 +66,6 @@ describe("resolveProviderRoutingModeForSubmission", () => {
         authoritativeMode: "fixed",
         authoritativeInstanceId: codexOne,
         selectedInstanceId: codexOne,
-        accountLocked: false,
       }),
     ).toBe("auto");
   });
@@ -84,63 +76,26 @@ describe("resolveProviderRoutingModeForSubmission", () => {
         authoritativeMode: "auto",
         authoritativeInstanceId: codexOne,
         selectedInstanceId: codexTwo,
-        accountLocked: false,
       }),
     ).toBe("fixed");
   });
 
-  it("sends a started Claude thread as Fixed despite a stale Auto intent or projection", () => {
+  it("keeps Auto for a Claude thread, which can now switch accounts after starting", () => {
     expect(
       resolveProviderRoutingModeForSubmission({
         draftMode: "auto",
+        authoritativeMode: "fixed",
+        authoritativeInstanceId: claudeOne,
+        selectedInstanceId: claudeOne,
+      }),
+    ).toBe("auto");
+    expect(
+      resolveProviderRoutingModeForSubmission({
         authoritativeMode: "auto",
         authoritativeInstanceId: claudeOne,
         selectedInstanceId: claudeOne,
-        accountLocked: true,
       }),
-    ).toBe("fixed");
-  });
-});
-
-describe("isProviderAccountLocked", () => {
-  const providers = [
-    provider("claude-one", { driver: ProviderDriverKind.make("claudeAgent") }),
-    provider("codex-one"),
-  ];
-  const turn = {
-    turnId: TurnId.make("turn-1"),
-    state: "completed",
-    requestedAt: "2026-09-15T00:00:00.000Z",
-    startedAt: "2026-09-15T00:00:01.000Z",
-    completedAt: "2026-09-15T00:00:02.000Z",
-    assistantMessageId: null,
-  } as const;
-
-  it("locks a Claude thread once it has a turn", () => {
-    expect(
-      isProviderAccountLocked(
-        { latestTurn: turn, session: null, modelSelection: { instanceId: claudeOne, model: "m" } },
-        providers,
-      ),
-    ).toBe(true);
-  });
-
-  it("keeps Auto available for a Claude thread whose first send never became a turn", () => {
-    expect(
-      isProviderAccountLocked(
-        { latestTurn: null, session: null, modelSelection: { instanceId: claudeOne, model: "m" } },
-        providers,
-      ),
-    ).toBe(false);
-  });
-
-  it("does not lock started threads on providers that can switch accounts", () => {
-    expect(
-      isProviderAccountLocked(
-        { latestTurn: turn, session: null, modelSelection: { instanceId: codexOne, model: "m" } },
-        providers,
-      ),
-    ).toBe(false);
+    ).toBe("auto");
   });
 });
 
@@ -151,7 +106,6 @@ describe("shouldClearProviderRoutingIntent", () => {
         saveStatus: "pending",
         intendedMode: "auto",
         authoritativeMode: "fixed",
-        accountLocked: false,
       }),
     ).toBe(false);
   });
@@ -162,7 +116,6 @@ describe("shouldClearProviderRoutingIntent", () => {
         saveStatus: "none",
         intendedMode: "fixed",
         authoritativeMode: "fixed",
-        accountLocked: false,
       }),
     ).toBe(true);
     expect(
@@ -170,20 +123,8 @@ describe("shouldClearProviderRoutingIntent", () => {
         saveStatus: "none",
         intendedMode: "auto",
         authoritativeMode: "fixed",
-        accountLocked: false,
       }),
     ).toBe(false);
-  });
-
-  it("drops any Auto intent on a started Claude thread, even mid-save", () => {
-    expect(
-      shouldClearProviderRoutingIntent({
-        saveStatus: "pending",
-        intendedMode: "auto",
-        authoritativeMode: "fixed",
-        accountLocked: true,
-      }),
-    ).toBe(true);
   });
 
   it("has nothing to clear without an intent", () => {
@@ -192,7 +133,6 @@ describe("shouldClearProviderRoutingIntent", () => {
         saveStatus: "none",
         intendedMode: undefined,
         authoritativeMode: "fixed",
-        accountLocked: true,
       }),
     ).toBe(false);
   });
@@ -315,49 +255,63 @@ describe("legacy pending task routing", () => {
   });
 });
 
-describe("canEnableProviderRoutingAuto", () => {
-  it("allows two runnable configured accounts for the selected provider", () => {
+describe("providerRoutingAutoBlocker", () => {
+  it("names the reason Auto is unavailable so the settings sheet can explain it", () => {
+    const pair = [provider("codex-one"), provider("codex-two")];
+
+    expect(providerRoutingAutoBlocker(pair, { codex: [codexOne, codexTwo] }, null, codexOne)).toBe(
+      "threshold",
+    );
     expect(
-      canEnableProviderRoutingAuto(
-        [provider("codex-one"), provider("codex-two")],
+      providerRoutingAutoBlocker(
+        [provider("codex-one", { availability: "unavailable" }), provider("codex-two")],
         { codex: [codexOne, codexTwo] },
         80,
         codexOne,
       ),
-    ).toBe(true);
+    ).toBe("account-unavailable");
+    expect(providerRoutingAutoBlocker(pair, { codex: [codexTwo] }, 80, codexOne)).toBe(
+      "account-not-pooled",
+    );
+    expect(providerRoutingAutoBlocker(pair, { codex: [codexOne] }, 80, codexOne)).toBe(
+      "pool-too-small",
+    );
+    expect(
+      providerRoutingAutoBlocker(pair, { codex: [codexOne, codexTwo] }, 80, codexOne),
+    ).toBeNull();
   });
 
   it.each([
     ["deleted", null],
     ["unavailable", provider("codex-two", { availability: "unavailable" })],
     ["unready", provider("codex-two", { status: "error" })],
-  ])("rejects a configured %s second account", (_case, secondProvider) => {
+  ])("does not count a configured %s second account", (_case, secondProvider) => {
     const providers = [provider("codex-one"), ...(secondProvider ? [secondProvider] : [])];
 
     expect(
-      canEnableProviderRoutingAuto(providers, { codex: [codexOne, codexTwo] }, 80, codexOne),
-    ).toBe(false);
+      providerRoutingAutoBlocker(providers, { codex: [codexOne, codexTwo] }, 80, codexOne),
+    ).toBe("pool-too-small");
   });
 
-  it("rejects an unready selected account", () => {
+  it("rejects a signed-out selected account", () => {
     expect(
-      canEnableProviderRoutingAuto(
+      providerRoutingAutoBlocker(
         [provider("codex-one", { auth: { status: "unauthenticated" } }), provider("codex-two")],
         { codex: [codexOne, codexTwo] },
         80,
         codexOne,
       ),
-    ).toBe(false);
+    ).toBe("account-unavailable");
   });
 
-  it.each([null, 0, 101, 80.5])("rejects an unset or invalid threshold: %s", (threshold) => {
+  it.each([0, 101, 80.5])("rejects an invalid threshold: %s", (threshold) => {
     expect(
-      canEnableProviderRoutingAuto(
+      providerRoutingAutoBlocker(
         [provider("codex-one"), provider("codex-two")],
         { codex: [codexOne, codexTwo] },
         threshold,
         codexOne,
       ),
-    ).toBe(false);
+    ).toBe("threshold");
   });
 });

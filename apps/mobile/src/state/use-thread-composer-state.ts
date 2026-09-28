@@ -34,7 +34,6 @@ import { uuidv4 } from "../lib/uuid";
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
 import { isModelSelectionUnavailable } from "../lib/modelOptions";
 import {
-  isProviderAccountLocked,
   modelSelectionsMatch,
   reconcileDraftModelSelectionAfterAutomaticRoute,
   resolveProviderRoutingModeForSubmission,
@@ -285,14 +284,6 @@ export function useThreadComposerState() {
       : 0);
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
 
-  const selectedThreadAccountLocked = Boolean(
-    selectedThread &&
-    isProviderAccountLocked(
-      selectedThread,
-      selectedEnvironmentRuntime?.serverConfig?.providers ?? [],
-    ),
-  );
-
   const clearProjectedProviderRoutingIntent = useCallback(
     (threadKey: string, mode: ProviderRoutingMode) => {
       if (getComposerDraftSnapshot(threadKey).providerRoutingMode !== mode) return;
@@ -309,7 +300,6 @@ export function useThreadComposerState() {
         saveStatus: saveInFlight ? "pending" : "none",
         intendedMode: getComposerDraftSnapshot(selectedThreadKey).providerRoutingMode,
         authoritativeMode: selectedThread.providerRoutingMode ?? "fixed",
-        accountLocked: selectedThreadAccountLocked,
       })
     ) {
       return;
@@ -317,7 +307,7 @@ export function useThreadComposerState() {
     updateComposerDraftSettings(selectedThreadKey, { providerRoutingMode: undefined });
     // Dropping the ref also silences the in-flight save's result.
     if (saveInFlight) providerRoutingSaveRef.current = null;
-  }, [selectedThread, selectedThreadAccountLocked, selectedThreadKey]);
+  }, [selectedThread, selectedThreadKey]);
 
   const persistProviderRoutingModeIntent = useCallback(
     (threadKey: string, mode: ProviderRoutingMode) => {
@@ -585,7 +575,6 @@ export function useThreadComposerState() {
       authoritativeMode: thread.providerRoutingMode ?? "fixed",
       authoritativeInstanceId: thread.modelSelection.instanceId,
       selectedInstanceId: modelSelection.instanceId,
-      accountLocked: isProviderAccountLocked(thread, serverConfig?.providers ?? []),
     });
     const providerAccountRoutingSupported = Boolean(
       serverConfig &&
@@ -937,11 +926,10 @@ export function useThreadComposerState() {
       });
       explicitModelSelectionThreadKeysRef.current.add(selectedThreadKey);
       delete consumedDraftModelSelectionsRef.current[selectedThreadKey];
-      const currentProviderRoutingMode = selectedThreadAccountLocked
-        ? "fixed"
-        : (getComposerDraftSnapshot(selectedThreadKey).providerRoutingMode ??
-          selectedThread?.providerRoutingMode ??
-          "fixed");
+      const currentProviderRoutingMode =
+        getComposerDraftSnapshot(selectedThreadKey).providerRoutingMode ??
+        selectedThread?.providerRoutingMode ??
+        "fixed";
       if (
         selectedThreadShell &&
         selectedThread &&
@@ -958,7 +946,6 @@ export function useThreadComposerState() {
     [
       selectedEnvironmentRuntime?.serverConfig,
       selectedThread,
-      selectedThreadAccountLocked,
       selectedThreadKey,
       selectedThreadShell,
       persistProviderRoutingModeIntent,
@@ -996,12 +983,10 @@ export function useThreadComposerState() {
   const onUpdateProviderRoutingMode = useCallback(
     (providerRoutingMode: ProviderRoutingMode) => {
       if (!selectedThreadShell) return;
-      // The server pins started Claude threads to Fixed; the switch is disabled there too.
-      if (providerRoutingMode === "auto" && selectedThreadAccountLocked) return;
       const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
       persistProviderRoutingModeIntent(threadKey, providerRoutingMode);
     },
-    [persistProviderRoutingModeIntent, selectedThreadAccountLocked, selectedThreadShell],
+    [persistProviderRoutingModeIntent, selectedThreadShell],
   );
 
   return {

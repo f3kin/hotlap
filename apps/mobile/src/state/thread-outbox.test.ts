@@ -498,12 +498,12 @@ describe("thread outbox", () => {
     ).toEqual(codex);
   });
 
-  it("does not re-enable Auto after the server pinned the thread while a message was queued", () => {
+  it("does not re-enable Auto after the thread became Fixed while a message was queued", () => {
     const modelSelection = {
       instanceId: ProviderInstanceId.make("claude-work"),
       model: "claude-opus-4-6",
     };
-    // Queued while the thread was Auto; Claude then pinned it to Fixed server-side.
+    // Queued while the thread was Auto; the server then shows it as Fixed.
     const message = {
       ...queuedMessage({ messageId: "stale-auto", createdAt: "2026-09-15T10:00:00.000Z" }),
       modelSelection,

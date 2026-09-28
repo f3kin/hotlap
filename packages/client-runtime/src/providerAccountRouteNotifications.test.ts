@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createProviderAccountRouteNotificationTracker,
   providerAccountRouteFailureDescription,
+  providerAccountRoutedDetail,
 } from "./providerAccountRouteNotifications.js";
 
 function activity(
@@ -166,6 +167,20 @@ describe("provider account route notifications", () => {
     for (const detail of Object.values(PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS)) {
       expect(providerAccountRouteFailureDescription({ detail })).toBe(detail);
     }
+    // The server may add when the pool frees up, but not run words together.
+    const limited = PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.allAccountsLimited;
+    expect(
+      providerAccountRouteFailureDescription({ detail: `${limited} The soonest resets in 2h.` }),
+    ).toBe(`${limited} The soonest resets in 2h.`);
+    expect(providerAccountRouteFailureDescription({ detail: `${limited}extra` })).toBe(
+      "The account switch could not be completed.",
+    );
+    // Only the all-limited sentence gains a suffix; raw causes appended to others stay hidden.
+    expect(
+      providerAccountRouteFailureDescription({
+        detail: `${PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.targetStartFailed} spawn claude ENOENT`,
+      }),
+    ).toBe("The account switch could not be completed.");
     expect(providerAccountRouteFailureDescription({ detail: "   " })).toBe(
       "The account switch could not be completed.",
     );
@@ -271,5 +286,25 @@ describe("provider account route notifications", () => {
 
     tracker.observe("env:thread", [anchor], true);
     expect(tracker.observe("env:thread", [anchor, route, route], true)).toHaveLength(1);
+  });
+});
+
+describe("providerAccountRoutedDetail", () => {
+  it("names both accounts for a switch and the chosen account for initial placement", () => {
+    expect(
+      providerAccountRoutedDetail({
+        previousProviderInstanceLabel: "Codex Work",
+        providerInstanceLabel: "Codex Personal",
+        reason: "usage-threshold",
+      }),
+    ).toBe("Codex Work → Codex Personal");
+    expect(
+      providerAccountRoutedDetail({
+        previousProviderInstanceLabel: "Codex Personal",
+        providerInstanceLabel: "Codex Work",
+        initialPlacement: true,
+      }),
+    ).toBe("Codex Work");
+    expect(providerAccountRoutedDetail({ previousProviderInstanceLabel: "Codex Work" })).toBeNull();
   });
 });

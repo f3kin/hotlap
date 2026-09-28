@@ -6,6 +6,8 @@ import {
 } from "@t3tools/contracts";
 import { useMemo } from "react";
 
+import { providerRoutingAutoBlockerMessage } from "@t3tools/client-runtime/provider-account-routing";
+
 import { Checkbox } from "../ui/checkbox";
 import {
   NumberField,
@@ -18,9 +20,10 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsRow } from "./settingsLayout";
 import {
-  canEnableProviderRoutingAutoOnEveryTarget,
   deriveProviderRoutingOptions,
   mergeProviderRoutingOptions,
+  providerRoutingAutoBlockerForTargets,
+  providerRoutingSettingsStatusBlocker,
   providerRoutingThresholdPatch,
   resolveTargetProviderRoutingPolicyPatch,
   supportsProviderAccountRouting,
@@ -90,12 +93,15 @@ export function ProviderRoutingSettings() {
   const providersFor = (environmentId: EnvironmentId) =>
     targetEnvironments.find((environment) => environment?.environmentId === environmentId)
       ?.serverConfig?.providers ?? [];
-  const canEnableAuto = canEnableProviderRoutingAutoOnEveryTarget(
+  const autoBlocker = providerRoutingAutoBlockerForTargets(
     targets.map((target) => ({
       settings: target.settings,
       providers: providersFor(target.environmentId),
     })),
   );
+  // Auto is disabled in the select whenever something blocks it, so the reason is shown
+  // in Fixed mode too, except the switch-at percentage that only Auto needs.
+  const canEnableAuto = autoBlocker === null;
   const updateTargetPolicies = (patch: ProviderRoutingPolicyPatch) =>
     updatePolicy((targetSettings, environmentId) =>
       resolveTargetProviderRoutingPolicyPatch({
@@ -126,11 +132,11 @@ export function ProviderRoutingSettings() {
       title="Automatic account switching"
       description="Choose a pool of accounts. Hotlap uses the eligible account whose weekly limit resets first."
       status={
-        policy.defaultMode === "auto" && !canEnableAuto
-          ? policy.usageThresholdPercent === null
-            ? "Choose a usage threshold before enabling automatic switching."
-            : "Add at least two accounts for the same provider to switch automatically."
-          : undefined
+        mixed
+          ? undefined
+          : (providerRoutingAutoBlockerMessage(
+              providerRoutingSettingsStatusBlocker(policy.defaultMode, autoBlocker),
+            ) ?? undefined)
       }
       control={
         <Select
@@ -175,7 +181,10 @@ export function ProviderRoutingSettings() {
             >
               <NumberFieldGroup>
                 <NumberFieldDecrement aria-label="Decrease account switching threshold" />
-                <NumberFieldInput aria-label="Account switching usage threshold percentage" />
+                <NumberFieldInput
+                  aria-label="Account switching usage threshold percentage"
+                  placeholder="80"
+                />
                 <NumberFieldIncrement aria-label="Increase account switching threshold" />
               </NumberFieldGroup>
             </NumberField>
@@ -198,9 +207,9 @@ export function ProviderRoutingSettings() {
                 {displayEntries.map((entry) => {
                   const checked = selected.includes(entry.instanceId);
                   return (
-                    <div
+                    <label
                       key={entry.instanceId}
-                      className="flex min-w-0 items-center gap-2 rounded-lg border border-border/60 bg-background/40 px-2.5 py-2"
+                      className="flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-border/60 bg-background/40 px-2.5 py-2"
                     >
                       <Checkbox
                         checked={checked}
@@ -216,11 +225,18 @@ export function ProviderRoutingSettings() {
                           )
                         }
                       />
-                      <span className="min-w-0 flex-1 truncate text-sm">
-                        {entry.displayName}
-                        {entry.unavailable ? " (Unavailable)" : ""}
+                      <span className="grid min-w-0 flex-1">
+                        <span className="break-words text-sm">{entry.displayName}</span>
+                        {entry.email ? (
+                          <span className="break-all text-xs text-muted-foreground">
+                            {entry.email}
+                          </span>
+                        ) : null}
                       </span>
-                    </div>
+                      {entry.unavailable ? (
+                        <span className="shrink-0 text-xs text-muted-foreground">Unavailable</span>
+                      ) : null}
+                    </label>
                   );
                 })}
               </div>

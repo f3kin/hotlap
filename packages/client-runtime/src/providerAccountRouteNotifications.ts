@@ -35,21 +35,36 @@ function stringValue(payload: Readonly<Record<string, unknown>>, keys: ReadonlyA
 }
 
 const GENERIC_ROUTE_FAILURE_DESCRIPTION = "The account switch could not be completed.";
-const ALLOWED_ROUTE_FAILURE_DETAILS = new Set<string>(
-  Object.values(PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS),
-);
+const ALLOWED_ROUTE_FAILURE_DETAILS = Object.values(PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS);
 
 /**
  * Route failure details are user-facing, so only the fixed set a current server
- * writes is shown. Anything else (raw causes from older servers, provider error
- * text persisted in old activities) becomes a generic description. Used by every
- * surface that renders `provider.account.route.failed`.
+ * writes is shown. The all-limited sentence may be followed by one the server adds
+ * (the soonest reset time). Anything else (raw causes from older servers, provider
+ * error text persisted in old activities) becomes a generic description. Used by
+ * every surface that renders `provider.account.route.failed`.
  */
 export function providerAccountRouteFailureDescription(payload: unknown): string {
   const detail = stringValue(record(payload), ["detail", "error", "message"]);
-  return detail !== null && ALLOWED_ROUTE_FAILURE_DETAILS.has(detail)
+  return detail !== null &&
+    (ALLOWED_ROUTE_FAILURE_DETAILS.some((allowed) => detail === allowed) ||
+      detail.startsWith(`${PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.allAccountsLimited} `))
     ? detail
     : GENERIC_ROUTE_FAILURE_DESCRIPTION;
+}
+
+/**
+ * Timeline detail for `provider.account.routed`: "Work → Personal" for a switch,
+ * or the chosen account for an initial placement. Null when labels are missing.
+ */
+export function providerAccountRoutedDetail(payload: unknown): string | null {
+  const values = record(payload);
+  const previous = stringValue(values, ["previousProviderInstanceLabel"]);
+  const target = stringValue(values, ["providerInstanceLabel"]);
+  if (target === null) return null;
+  const initialPlacement =
+    values.initialPlacement === true || values.reason === "initial-placement";
+  return initialPlacement || previous === null ? target : `${previous} → ${target}`;
 }
 
 function present(activity: OrchestrationThreadActivity): ProviderAccountRouteNotification | null {

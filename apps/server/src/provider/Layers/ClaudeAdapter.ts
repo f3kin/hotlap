@@ -28,6 +28,7 @@ import {
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { type ClaudeScopedLimitNames, claudeRateLimitEventToUpdate } from "./claudeUsageLimits.ts";
+import { formatUsageLimitWait } from "../providerUsageLimits.ts";
 import {
   ApprovalRequestId,
   classifyTaskAgentKind,
@@ -41,6 +42,7 @@ import {
   type ModelSelection,
   ProviderItemId,
   type ProviderRuntimeEvent,
+  type RuntimeErrorClass,
   type ProviderRuntimeTurnStatus,
   type ProviderSendTurnInput,
   type ProviderSession,
@@ -82,6 +84,7 @@ import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -90,7 +93,13 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import {
+  claudeSignedOutMessage,
+  copyClaudeSession,
+  makeClaudeEnvironment,
+  readClaudeLoginIdentity,
+  resolveClaudeHomePath,
+} from "../Drivers/ClaudeHome.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
@@ -252,6 +261,8 @@ type PromptQueueItem =
 interface ClaudeResumeState {
   readonly threadId?: ThreadId;
   readonly resume?: string;
+  /** The config dir holding the transcript. A different account copies it in before resuming. */
+  readonly configDir?: string;
   readonly resumeSessionAt?: string;
   readonly turnCount?: number;
   readonly turnStartMessageIds?: ReadonlyArray<string | null>;
@@ -457,6 +468,8 @@ interface ClaudeSessionContext {
   announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
   /** Resolved by completeTurn while Stop waits for Claude to abort the turn. */
   interruptedTurnSettled: Deferred.Deferred<void> | undefined;
+  /** The subscription login this CLI process started with; see `readClaudeLoginIdentity`. */
+  readonly loginIdentity: string | undefined;
   stopped: boolean;
 }
 
@@ -657,19 +670,11 @@ function describeClaudeUsageLimit(
     resetsAtMs === undefined || !Number.isFinite(nowMs) ? undefined : resetsAtMs - nowMs;
   const wait =
     waitMs !== undefined && waitMs > 0 && waitMs <= CLAUDE_USAGE_LIMIT_MAX_WAIT_MS
-      ? formatClaudeUsageLimitWait(waitMs)
+      ? formatUsageLimitWait(waitMs)
       : undefined;
   return `Claude usage limit reached. This turn is paused until the ${
     label ? `${label} ` : ""
   }limit resets${wait ? ` in ${wait}` : ""}.`;
-}
-
-function formatClaudeUsageLimitWait(waitMs: number): string {
-  const totalMinutes = Math.ceil(waitMs / 60_000);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours === 0) return `${totalMinutes}m`;
-  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
 function asRuntimeItemId(value: string): RuntimeItemId {
@@ -980,6 +985,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     threadId?: unknown;
     resume?: unknown;
     sessionId?: unknown;
+    configDir?: unknown;
     resumeSessionAt?: unknown;
     turnCount?: unknown;
     turnStartMessageIds?: unknown;
@@ -999,6 +1005,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   const resume = resumeCandidate && isUuid(resumeCandidate) ? resumeCandidate : undefined;
   const resumeSessionAt =
     typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
+  const configDir = typeof cursor.configDir === "string" ? cursor.configDir : undefined;
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
   const turnStartMessageIds =
     Array.isArray(cursor.turnStartMessageIds) &&
@@ -1009,6 +1016,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   return {
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
+    ...(configDir ? { configDir } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
     ...(turnStartMessageIds ? { turnStartMessageIds } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
@@ -2086,6 +2094,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
+  const claudeConfigDir = yield* resolveClaudeHomePath(claudeSettings, claudeEnvironment).pipe(
+    Effect.provideService(Path.Path, path),
+  );
+  const readLoginIdentity = readClaudeLoginIdentity(claudeEnvironment).pipe(
+    Effect.provideService(FileSystem.FileSystem, fileSystem),
+    Effect.provideService(Path.Path, path),
+  );
   const claudeSdkExecutablePath = yield* resolveClaudeSdkExecutablePath(
     claudeSettings.binaryPath,
     claudeEnvironment,
@@ -2194,7 +2209,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const resumeCursor = {
       threadId,
-      ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
+      ...(context.resumeSessionId
+        ? { resume: context.resumeSessionId, configDir: claudeConfigDir }
+        : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       turnCount: context.turnStartMessageIds.length,
       turnStartMessageIds: [...context.turnStartMessageIds],
@@ -2492,6 +2509,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: string,
     cause?: unknown,
+    errorClass: RuntimeErrorClass = "provider_error",
   ) {
     if (cause !== undefined) {
       void cause;
@@ -2507,7 +2525,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
       payload: {
         message,
-        class: "provider_error",
+        class: errorClass,
         ...(cause !== undefined ? { detail: cause } : {}),
       },
       providerRefs: nativeProviderRefs(context),
@@ -3486,15 +3504,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const turn = context.turnState;
+    const usageLimited =
+      turn !== undefined &&
+      turn.authenticationFailureMessage === undefined &&
+      (turn.rejectedRateLimitTypes.size > 0 || turn.latestAssistantRateLimited);
     const failureHint =
       turn?.authenticationFailureMessage ??
-      (turn && (turn.rejectedRateLimitTypes.size > 0 || turn.latestAssistantRateLimited)
+      (usageLimited
         ? "Claude usage limit reached. Send the message again once the limit resets."
         : undefined);
     const { status, errorMessage } = resultOutcome(message, failureHint);
 
     if (status === "failed") {
-      yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
+      yield* emitRuntimeError(
+        context,
+        errorMessage ?? "Claude turn failed.",
+        undefined,
+        usageLimited ? "usage_limit" : "provider_error",
+      );
     }
 
     yield* completeTurn(context, status, errorMessage, message);
@@ -4412,9 +4439,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
 
       const startedAt = yield* nowIso;
-      const resumeState = readClaudeResumeState(input.resumeCursor);
+      const cursorResumeState = readClaudeResumeState(input.resumeCursor);
       const threadId = input.threadId;
+      // A thread moving from another Claude account brings its transcript along.
+      // Without it the CLI cannot find the session, so a failed copy fails the start.
+      // The old CLI flushes the transcript just after reporting the failed turn
+      // that caused the move, so a missing file is retried briefly.
+      let transcriptMissing = false;
+      if (
+        cursorResumeState?.resume !== undefined &&
+        cursorResumeState.configDir !== undefined &&
+        cursorResumeState.configDir !== claudeConfigDir
+      ) {
+        const copied = yield* copyClaudeSession({
+          fromConfigDir: cursorResumeState.configDir,
+          toConfigDir: claudeConfigDir,
+          sessionId: cursorResumeState.resume,
+        }).pipe(
+          Effect.repeat({
+            until: (found) => found,
+            schedule: Schedule.max([Schedule.spaced("100 millis"), Schedule.recurs(20)]),
+          }),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId,
+                detail: "Failed to copy the Claude conversation into this account.",
+                cause,
+              }),
+          ),
+        );
+        // turnCount counts started turns, including the one being resent after a limit, so
+        // at most one means no earlier turn finished. The CLI may never have written a
+        // transcript for that thread, and there is nothing to lose by starting fresh.
+        if (!copied && (cursorResumeState.turnCount ?? 0) > 1) {
+          return yield* new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId,
+            detail: "The Claude conversation was not found in the account it last ran on.",
+          });
+        }
+        transcriptMissing = !copied;
+      }
+      const resumeState = transcriptMissing ? undefined : cursorResumeState;
       const existingResumeSessionId = resumeState?.resume;
+      const loginIdentity = yield* readLoginIdentity;
       const newSessionId = existingResumeSessionId === undefined ? yield* randomUUIDv4 : undefined;
       const sessionId = existingResumeSessionId ?? newSessionId;
 
@@ -5013,7 +5085,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(threadId ? { threadId } : {}),
         resumeCursor: {
           ...(threadId ? { threadId } : {}),
-          ...(sessionId ? { resume: sessionId } : {}),
+          ...(sessionId ? { resume: sessionId, configDir: claudeConfigDir } : {}),
           ...(resumeState?.resumeSessionAt ? { resumeSessionAt: resumeState.resumeSessionAt } : {}),
           turnCount: resumeState?.turnCount ?? 0,
           ...(resumeState?.turnStartMessageIds
@@ -5055,6 +5127,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastThreadStartedId: undefined,
         announcedUsageLimits: undefined,
         interruptedTurnSettled: undefined,
+        loginIdentity,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);
@@ -5134,8 +5207,43 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  /**
+   * A running CLI keeps the login it started with, so when another tool swaps
+   * this account's login the process is restarted on the same conversation.
+   * Only between turns, and never while background work would be cut off.
+   */
+  const restartIfLoginChanged = Effect.fn("restartIfLoginChanged")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    if (
+      (context.turnState !== undefined && context.turnState.synthetic !== true) ||
+      context.liveTaskIds.size > 0
+    ) {
+      return context;
+    }
+    const loginIdentity = yield* readLoginIdentity;
+    if (loginIdentity === undefined || loginIdentity === context.loginIdentity) return context;
+    const threadId = context.session.threadId;
+    yield* Effect.logInfo("claude.session.login-changed", { threadId });
+    // Only a background (synthetic) turn can be open here; it finished its work, so close it
+    // the way the next send would instead of letting the stop label it interrupted.
+    if (context.turnState) {
+      yield* completeTurn(context, "completed");
+    }
+    const retainedTurns = context.turns;
+    yield* stopSessionInternal(context, { emitExitEvent: false });
+    yield* startSession({
+      ...context.startInput,
+      runtimeMode: context.session.runtimeMode,
+      resumeCursor: context.session.resumeCursor,
+    });
+    const restarted = yield* requireSession(threadId);
+    restarted.turns.push(...retainedTurns);
+    return restarted;
+  });
+
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* requireSession(input.threadId);
+    const context = yield* restartIfLoginChanged(yield* requireSession(input.threadId));
     const modelCatalog = yield* modelCatalogEffect;
     const selectedModel =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
@@ -5583,12 +5691,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ),
   );
 
+  // Cursors saved before they recorded configDir always live in this account's home: the
+  // old per-home continuation key kept them from moving. Stamping it lets a move copy them.
+  const completeResumeCursor = (resumeCursor: unknown) => {
+    const resumeState = readClaudeResumeState(resumeCursor);
+    return typeof resumeCursor === "object" &&
+      resumeState?.resume !== undefined &&
+      resumeState.configDir === undefined
+      ? { ...resumeCursor, configDir: claudeConfigDir }
+      : resumeCursor;
+  };
+
   return {
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
     },
     compaction: { type: "slash-command", command: "/compact" },
+    completeResumeCursor,
     startSession,
     sendTurn,
     interruptTurn,

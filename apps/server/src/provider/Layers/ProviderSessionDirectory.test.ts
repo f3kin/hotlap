@@ -26,7 +26,11 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntime.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
-import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
+import {
+  ProviderSessionDirectoryLive,
+  readPersistedTurnAdmission,
+  withoutSettledMessage,
+} from "./ProviderSessionDirectory.ts";
 
 const importedSource = {
   provider: "codex",
@@ -665,4 +669,38 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
       NodeFS.rmSync(tempDir, { recursive: true, force: true });
     }),
   );
+});
+
+it("forgets a finished send so a retry of the same message starts clean", () => {
+  const messageId = MessageId.make("message-retried");
+  const settled = withoutSettledMessage(
+    {
+      cwd: "/repo",
+      activeTurnId: null,
+      lastAdmittedMessageId: messageId,
+      lastAdmittedTurnId: "turn-failed",
+      dispatchingMessageIds: [messageId, "message-other"],
+    },
+    messageId,
+  );
+  assert.deepEqual(settled, {
+    cwd: "/repo",
+    activeTurnId: null,
+    dispatchingMessageIds: ["message-other"],
+  });
+  assert.equal(readPersistedTurnAdmission(settled, messageId), null);
+
+  // A turn that is still running keeps its admission.
+  const running = withoutSettledMessage(
+    {
+      activeTurnId: "turn-live",
+      lastAdmittedMessageId: messageId,
+      lastAdmittedTurnId: "turn-live",
+    },
+    messageId,
+  );
+  assert.deepEqual(readPersistedTurnAdmission(running, messageId), {
+    turnId: TurnId.make("turn-live"),
+    active: true,
+  });
 });

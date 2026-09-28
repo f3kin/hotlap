@@ -1,8 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
 
 import {
+  isEveryProviderAccountLimited,
   isProviderAccountConfirmedUnusable,
   selectAutomaticProviderAccount,
+  soonestProviderAccountResetMs,
   type ProviderAccountRoutingInput,
   type ProviderAccountRoutingProvider,
   type ProviderAccountRoutingUsageWindow,
@@ -422,7 +425,7 @@ describe("selectAutomaticProviderAccount", () => {
     });
   });
 
-  it("does not route a started Claude thread until safe transcript handoff is proven", () => {
+  it("keeps a started Claude thread on its account past the threshold until it is blocked", () => {
     expect(
       selectAutomaticProviderAccount(
         input({
@@ -434,6 +437,63 @@ describe("selectAutomaticProviderAccount", () => {
           ],
         }),
       ),
+    ).toBeNull();
+  });
+
+  it("moves a started Claude thread off an account that rejected it on a usage limit", () => {
+    expect(
+      selectAutomaticProviderAccount(
+        input({
+          instanceIds: ["claude-personal", "claude-work"],
+          modelSelection: { instanceId: "claude-personal", model: "claude-opus" },
+          // Stored usage lags the rejection, so the rejection alone must count.
+          providers: [
+            claudeProvider("claude-personal", 20, 20),
+            claudeProvider("claude-work", 20, 20),
+          ],
+          limitedInstanceIds: ["claude-personal"],
+        }),
+      ),
+    ).toEqual({ targetInstanceIds: ["claude-work"], reason: "current-unusable" });
+  });
+
+  it("skips every account that already rejected the message", () => {
+    expect(
+      selectAutomaticProviderAccount(
+        input({
+          instanceIds: ["claude-personal", "claude-work", "claude-spare"],
+          modelSelection: { instanceId: "claude-work", model: "claude-opus" },
+          providers: [
+            claudeProvider("claude-personal", 10, 10),
+            claudeProvider("claude-work", 20, 20),
+            claudeProvider("claude-spare", 30, 30),
+          ],
+          limitedInstanceIds: ["claude-personal", "claude-work"],
+        }),
+      ),
+    ).toEqual({ targetInstanceIds: ["claude-spare"], reason: "current-unusable" });
+  });
+
+  it("tries any account not known to be exhausted once the current one rejected the message", () => {
+    const route = (work: ProviderAccountRoutingProvider, spare: ProviderAccountRoutingProvider) =>
+      selectAutomaticProviderAccount(
+        input({
+          instanceIds: ["claude-personal", "claude-work", "claude-spare"],
+          modelSelection: { instanceId: "claude-personal", model: "claude-opus" },
+          providers: [claudeProvider("claude-personal", 20, 20), work, spare],
+          limitedInstanceIds: ["claude-personal"],
+        }),
+      );
+    // Past the 80% threshold, then with no reading at all: both still beat failing,
+    // and the unread account goes last.
+    expect(
+      route(
+        claudeProvider("claude-work", 90, 20),
+        withoutUsageLimits(claudeProvider("claude-spare", 0, 0)),
+      ),
+    ).toEqual({ targetInstanceIds: ["claude-work", "claude-spare"], reason: "current-unusable" });
+    expect(
+      route(claudeProvider("claude-work", 100, 20), claudeProvider("claude-spare", 20, 100)),
     ).toBeNull();
   });
 
@@ -512,6 +572,63 @@ describe("selectAutomaticProviderAccount", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("isEveryProviderAccountLimited", () => {
+  it("counts only accounts that rejected the message or read as exhausted", () => {
+    const limited = (work: ProviderAccountRoutingProvider) =>
+      isEveryProviderAccountLimited({
+        instanceIds: ["claude-personal", "claude-work"],
+        providers: [claudeProvider("claude-personal", 20, 20), work],
+        limitedInstanceIds: ["claude-personal"],
+        nowMs: NOW,
+        maxUsageAgeMs: 5 * 60_000,
+      });
+    expect(limited(claudeProvider("claude-work", 100, 20))).toBe(true);
+    expect(limited(claudeProvider("claude-work", 90, 20))).toBe(false);
+    expect(limited(withoutUsageLimits(claudeProvider("claude-work", 100, 100)))).toBe(false);
+  });
+
+  it("counts an account removed from the providers as limited", () => {
+    expect(
+      isEveryProviderAccountLimited({
+        instanceIds: ["claude-personal", "claude-deleted"],
+        providers: [claudeProvider("claude-personal", 20, 20)],
+        limitedInstanceIds: ["claude-personal"],
+        nowMs: NOW,
+        maxUsageAgeMs: 5 * 60_000,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("soonestProviderAccountResetMs", () => {
+  it("returns when the first limited account is usable again", () => {
+    const inHours = (hours: number) =>
+      DateTime.formatIso(DateTime.makeUnsafe(NOW + hours * 3_600_000));
+    const limitedUntil = (instanceId: string, sessionReset: string, weeklyReset: string) =>
+      claudeProvider(instanceId, 0, 0, {
+        usageLimits: {
+          checkedAt: FRESH,
+          windows: [
+            usageWindow("five_hour", "session", 100, sessionReset),
+            usageWindow("seven_day", "weekly", 100, weeklyReset),
+          ],
+        },
+      });
+    expect(
+      soonestProviderAccountResetMs({
+        instanceIds: ["claude-personal", "claude-work", "claude-unknown"],
+        providers: [
+          // Blocked by both windows, so usable only once the later one resets.
+          limitedUntil("claude-personal", inHours(1), inHours(30)),
+          limitedUntil("claude-work", inHours(3), inHours(2)),
+          claudeProvider("claude-unknown", 100, 20, { usageLimits: undefined }),
+        ],
+        nowMs: NOW,
+      }),
+    ).toBe(NOW + 3 * 3_600_000);
   });
 });
 

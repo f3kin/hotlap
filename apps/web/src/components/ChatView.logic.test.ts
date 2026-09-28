@@ -71,7 +71,6 @@ import {
   resolveComposerSelectionAfterProviderRouting,
   resolveProviderRoutingAccountInstanceId,
   resolveProviderRoutingModeAfterSelection,
-  isProviderRoutingPinnedToFixed,
   resolveThreadProviderRoutingMode,
   providerAccountRoutingConsentForSubmission,
   resolveNewThreadProviderRoutingMode,
@@ -91,6 +90,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
+  latestTurnStartFailureId,
   shouldClearAcknowledgedProviderRoutingIntent,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
@@ -1127,50 +1127,9 @@ describe("resolveProviderRoutingModeAfterSelection", () => {
 });
 
 describe("resolveThreadProviderRoutingMode", () => {
-  const claudeProviders = [
-    {
-      instanceId: ProviderInstanceId.make("claude_work"),
-      driver: ProviderDriverKind.make("claudeAgent"),
-    },
-    { instanceId: ProviderInstanceId.make("codex"), driver: ProviderDriverKind.make("codex") },
-  ];
-  const claudeSelection = {
-    instanceId: ProviderInstanceId.make("claude_work"),
-    model: "claude-opus-5",
-  };
-  const claudeErrorSession = {
-    ...readySession,
-    status: "error" as const,
-    providerName: "claudeAgent",
-    providerInstanceId: ProviderInstanceId.make("claude_work"),
-    lastError: "No eligible provider account",
-  };
+  it("keeps the thread's Auto mode and routing consent without a pending choice", () => {
+    const resolved = resolveThreadProviderRoutingMode({ intent: null, threadMode: "auto" });
 
-  it("keeps Auto and routing consent on a Claude thread whose first send was blocked", () => {
-    // The blocked send left a message and an error session, but no turn, so the server stays Auto.
-    const thread = makeThread({
-      modelSelection: claudeSelection,
-      session: claudeErrorSession,
-      messages: [
-        {
-          id: MessageId.make("blocked-send"),
-          role: "user",
-          text: "Hello",
-          turnId: null,
-          streaming: false,
-          createdAt: now,
-          updatedAt: now,
-        },
-      ],
-    });
-    const pinnedToFixed = isProviderRoutingPinnedToFixed({ thread, providers: claudeProviders });
-    const resolved = resolveThreadProviderRoutingMode({
-      intent: null,
-      threadMode: "auto",
-      pinnedToFixed,
-    });
-
-    expect(pinnedToFixed).toBe(false);
     expect(resolved).toEqual({ intent: null, mode: "auto" });
     expect(
       providerAccountRoutingConsentForSubmission({
@@ -1181,72 +1140,19 @@ describe("resolveThreadProviderRoutingMode", () => {
     ).toEqual({ allowProviderAccountRouting: true });
   });
 
-  it("pins only Claude threads that have a turn, matching the server", () => {
-    const pinned = (overrides: Partial<Thread>) =>
-      isProviderRoutingPinnedToFixed({ thread: makeThread(overrides), providers: claudeProviders });
-
-    expect(pinned({ modelSelection: claudeSelection, latestTurn: completedTurn })).toBe(true);
-    expect(pinned({ modelSelection: claudeSelection })).toBe(false);
-    expect(pinned({ latestTurn: completedTurn })).toBe(false);
-    // An instance missing from the catalog falls back to the session's driver.
-    expect(
-      pinned({
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("claude_gone"),
-          model: "claude-opus-5",
-        },
-        session: claudeErrorSession,
-        latestTurn: completedTurn,
-      }),
-    ).toBe(true);
-    expect(isProviderRoutingPinnedToFixed({ thread: null, providers: claudeProviders })).toBe(
-      false,
-    );
-  });
-
-  it("lets the server's Fixed mode win over a stale Auto choice on a pinned Claude thread", () => {
-    const resolved = resolveThreadProviderRoutingMode({
+  it("lets a pending composer choice win over the thread's mode", () => {
+    expect(resolveThreadProviderRoutingMode({ intent: "auto", threadMode: "fixed" })).toEqual({
       intent: "auto",
-      threadMode: "fixed",
-      pinnedToFixed: true,
+      mode: "auto",
     });
-
-    expect(resolved).toEqual({ intent: null, mode: "fixed" });
-    // The next turn must neither persist Auto again nor opt into routing.
-    expect(
-      resolveThreadMetadataUpdateForNextTurn({
-        currentModelSelection: claudeSelection,
-        currentProviderRoutingMode: "fixed",
-        ...(resolved.intent ? { nextProviderRoutingMode: resolved.intent } : {}),
-        currentBranch: "main",
-      }),
-    ).toBeNull();
-    expect(
-      providerAccountRoutingConsentForSubmission({
-        submissionIntent: "foreground",
-        providerRoutingMode: resolved.mode,
-        supported: true,
-      }),
-    ).toEqual({});
-  });
-
-  it("shows Fixed for a pinned Claude thread even before an older server pins it", () => {
-    expect(
-      resolveThreadProviderRoutingMode({ intent: null, threadMode: "auto", pinnedToFixed: true }),
-    ).toEqual({ intent: null, mode: "fixed" });
-  });
-
-  it("keeps explicit choices where Auto can still apply", () => {
-    expect(
-      resolveThreadProviderRoutingMode({
-        intent: "auto",
-        threadMode: "fixed",
-        pinnedToFixed: false,
-      }),
-    ).toEqual({ intent: "auto", mode: "auto" });
-    expect(
-      resolveThreadProviderRoutingMode({ intent: null, threadMode: "auto", pinnedToFixed: false }),
-    ).toEqual({ intent: null, mode: "auto" });
+    expect(resolveThreadProviderRoutingMode({ intent: "fixed", threadMode: "auto" })).toEqual({
+      intent: "fixed",
+      mode: "fixed",
+    });
+    expect(resolveThreadProviderRoutingMode({ intent: undefined, threadMode: "fixed" })).toEqual({
+      intent: null,
+      mode: "fixed",
+    });
   });
 });
 
@@ -2455,6 +2361,38 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         latestTurnStartFailureId: "turn-start-failure-new",
       }),
     ).toBe(true);
+  });
+});
+
+describe("latestTurnStartFailureId", () => {
+  const routeFailure = (id: string, payload: Record<string, unknown>) => ({
+    id: EventId.make(id),
+    kind: "provider.account.route.failed",
+    tone: "error" as const,
+    summary: "Provider account switch failed",
+    payload: { detail: "No eligible provider account is available.", ...payload },
+    turnId: null,
+    createdAt: now,
+  });
+  const messageId = MessageId.make("message-1");
+
+  it("ends the local send when account routing blocked the message", () => {
+    const thread = makeThread({
+      activities: [
+        routeFailure("route-other-message", { requestId: "message-0", terminalTurnStart: true }),
+        routeFailure("route-blocked", { requestId: messageId, terminalTurnStart: true }),
+      ],
+    });
+
+    expect(latestTurnStartFailureId(thread, messageId)).toBe("route-blocked");
+  });
+
+  it("ignores route failures that still let the message run on the current account", () => {
+    const thread = makeThread({
+      activities: [routeFailure("route-fallback", { requestId: messageId })],
+    });
+
+    expect(latestTurnStartFailureId(thread, messageId)).toBeNull();
   });
 });
 

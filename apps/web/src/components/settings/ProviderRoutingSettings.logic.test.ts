@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   canEnableProviderRoutingAuto,
-  canEnableProviderRoutingAutoOnEveryTarget,
+  providerRoutingAutoBlocker,
+  providerRoutingAutoBlockerForTargets,
+  providerRoutingSettingsStatusBlocker,
   deriveProviderRoutingOptions,
   mergeProviderRoutingOptions,
   providerRoutingThresholdPatch,
@@ -51,6 +53,19 @@ describe("deriveProviderRoutingOptions", () => {
         displayName: "Work",
       },
     ]);
+  });
+
+  it("carries the signed-in email so pool rows can say which account an instance is", () => {
+    const options = deriveProviderRoutingOptions([
+      [
+        provider("codex_work", "codex", {
+          auth: { status: "authenticated", email: " work@example.com " },
+        }),
+        provider("codex_blank", "codex", { auth: { status: "authenticated", email: "  " } }),
+      ],
+    ]);
+
+    expect(options.map((option) => option.email)).toEqual(["work@example.com", undefined]);
   });
 });
 
@@ -128,6 +143,33 @@ describe("provider routing pool", () => {
     ).toBe(false);
   });
 
+  it("names the reason Auto is unavailable so the settings row can explain it", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const options = [
+      { instanceId: first, driver: codex, displayName: "Work" },
+      { instanceId: second, driver: codex, displayName: "Personal" },
+    ];
+    const selected = { instanceId: first };
+
+    expect(providerRoutingAutoBlocker(options, { [codex]: [first, second] }, null, selected)).toBe(
+      "threshold",
+    );
+    expect(
+      providerRoutingAutoBlocker(options, { [codex]: [first, second] }, 80, {
+        instanceId: ProviderInstanceId.make("codex_other"),
+      }),
+    ).toBe("account-unavailable");
+    expect(providerRoutingAutoBlocker(options, { [codex]: [second] }, 80, selected)).toBe(
+      "account-not-pooled",
+    );
+    expect(providerRoutingAutoBlocker(options, { [codex]: [first] }, 80, selected)).toBe(
+      "pool-too-small",
+    );
+    expect(
+      providerRoutingAutoBlocker(options, { [codex]: [first, second] }, 80, selected),
+    ).toBeNull();
+  });
+
   it("requires the project's selected account to belong to the eligible pool", () => {
     const codex = ProviderDriverKind.make("codex");
     const options = [
@@ -185,6 +227,14 @@ describe("provider routing pool", () => {
   });
 });
 
+describe("providerRoutingSettingsStatusBlocker", () => {
+  it("does not ask for a switch-at percentage while the project stays on Fixed", () => {
+    expect(providerRoutingSettingsStatusBlocker("fixed", "threshold")).toBeNull();
+    expect(providerRoutingSettingsStatusBlocker("auto", "threshold")).toBe("threshold");
+    expect(providerRoutingSettingsStatusBlocker("fixed", "pool-too-small")).toBe("pool-too-small");
+  });
+});
+
 describe("per-target routing validation", () => {
   const codex = ProviderDriverKind.make("codex");
   const claude = ProviderDriverKind.make("claudeAgent");
@@ -216,9 +266,12 @@ describe("per-target routing validation", () => {
     expect(
       resolveTargetProviderRoutingPolicyPatch({ ...laptopTarget, patch: { defaultMode: "auto" } }),
     ).toEqual({ defaultMode: "fixed" });
-    expect(canEnableProviderRoutingAutoOnEveryTarget([serverTarget])).toBe(true);
-    expect(canEnableProviderRoutingAutoOnEveryTarget([serverTarget, laptopTarget])).toBe(false);
-    expect(canEnableProviderRoutingAutoOnEveryTarget([])).toBe(false);
+    expect(providerRoutingAutoBlockerForTargets([serverTarget])).toBeNull();
+    // The laptop's signed-out second account is what makes Auto impossible there.
+    expect(providerRoutingAutoBlockerForTargets([serverTarget, laptopTarget])).toBe(
+      "pool-too-small",
+    );
+    expect(providerRoutingAutoBlockerForTargets([])).toBe("account-unavailable");
   });
 
   it("judges each target by its own default account", () => {
@@ -239,8 +292,8 @@ describe("per-target routing validation", () => {
         patch: { defaultMode: "auto" },
       }),
     ).toEqual({ defaultMode: "fixed" });
-    expect(canEnableProviderRoutingAutoOnEveryTarget([serverTarget, claudeDefaultTarget])).toBe(
-      false,
+    expect(providerRoutingAutoBlockerForTargets([serverTarget, claudeDefaultTarget])).toBe(
+      "account-not-pooled",
     );
   });
 

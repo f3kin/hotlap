@@ -27,6 +27,10 @@
       "types": "./src/pendingRequests.ts",
       "default": "./src/pendingRequests.ts"
     },
+    "./provider-account-routing": {
+      "types": "./src/providerAccountRouting.ts",
+      "default": "./src/providerAccountRouting.ts"
+    },
     "./provider-account-route-notifications": {
       "types": "./src/providerAccountRouteNotifications.ts",
       "default": "./src/providerAccountRouteNotifications.ts"

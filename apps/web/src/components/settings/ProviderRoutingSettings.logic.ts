@@ -1,3 +1,4 @@
+import type { ProviderRoutingAutoBlocker } from "@t3tools/client-runtime/provider-account-routing";
 import type {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -15,6 +16,8 @@ export interface ProviderRoutingOption {
   readonly instanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
   readonly displayName: string;
+  /** Signed-in account email, when the provider reports one. */
+  readonly email?: string;
 }
 
 export interface ProviderRoutingDisplayOption extends ProviderRoutingOption {
@@ -50,11 +53,13 @@ export function deriveProviderRoutingOptions(
       ),
     );
     if (!availableEverywhere) return [];
+    const email = provider.auth.email?.trim();
     return [
       {
         instanceId: provider.instanceId,
         driver: provider.driver,
         displayName: provider.displayName ?? provider.instanceId,
+        ...(email ? { email } : {}),
       },
     ];
   });
@@ -95,33 +100,50 @@ export function mergeProviderRoutingOptions(
   return [...options, ...unavailable];
 }
 
-export function canEnableProviderRoutingAuto(
+/** The first thing standing between the current account and Auto, or null. */
+export function providerRoutingAutoBlocker(
   options: ReadonlyArray<ProviderRoutingOption>,
   instanceIdsByDriver: Readonly<Record<string, ReadonlyArray<ProviderInstanceId>>>,
   usageThresholdPercent: number | null,
   selectedAccount: { readonly instanceId: ProviderInstanceId } | null | undefined,
-): boolean {
+): ProviderRoutingAutoBlocker | null {
   if (
     usageThresholdPercent === null ||
     !Number.isInteger(usageThresholdPercent) ||
     usageThresholdPercent < 1 ||
     usageThresholdPercent > 100
   ) {
-    return false;
+    return "threshold";
   }
   const selectedOption = options.find(
     (option) => option.instanceId === selectedAccount?.instanceId,
   );
-  if (!selectedOption) return false;
+  if (!selectedOption) return "account-unavailable";
   const runnableIds = new Set(
     options
       .filter((option) => option.driver === selectedOption.driver)
       .map((option) => option.instanceId),
   );
   const selectedIds = instanceIdsByDriver[selectedOption.driver] ?? [];
+  if (!selectedIds.includes(selectedOption.instanceId)) return "account-not-pooled";
+  return new Set(selectedIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
+    ? null
+    : "pool-too-small";
+}
+
+export function canEnableProviderRoutingAuto(
+  options: ReadonlyArray<ProviderRoutingOption>,
+  instanceIdsByDriver: Readonly<Record<string, ReadonlyArray<ProviderInstanceId>>>,
+  usageThresholdPercent: number | null,
+  selectedAccount: { readonly instanceId: ProviderInstanceId } | null | undefined,
+): boolean {
   return (
-    selectedIds.includes(selectedOption.instanceId) &&
-    new Set(selectedIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
+    providerRoutingAutoBlocker(
+      options,
+      instanceIdsByDriver,
+      usageThresholdPercent,
+      selectedAccount,
+    ) === null
   );
 }
 
@@ -175,14 +197,11 @@ export function resolveTargetProviderRoutingPolicyPatch(
 }
 
 /**
- * A threshold edit never re-validates accounts: providers report `warning` right
- * after a restart, and nudging the threshold must not silently switch Auto off.
- * Only an invalid threshold forces Fixed.
- */
-/**
  * Number inputs report every keystroke, including the empty field between edits
  * (`null`) and in-progress values. Only a valid threshold is saved, so clearing
- * the field to retype it never disables Auto behind the user's back.
+ * the field to retype it never disables Auto behind the user's back, and a
+ * threshold edit never re-validates accounts: providers report `warning` right
+ * after a restart, and nudging the threshold must not switch Auto off.
  */
 export function providerRoutingThresholdPatch(
   usageThresholdPercent: number | null,
@@ -195,18 +214,33 @@ export function providerRoutingThresholdPatch(
   return valid ? { usageThresholdPercent } : null;
 }
 
-/** Whether Auto is valid on every target, each judged by its own environment. */
-export function canEnableProviderRoutingAutoOnEveryTarget(
+/** What blocks Auto on the first target that cannot have it, each judged by its own environment. */
+export function providerRoutingAutoBlockerForTargets(
   targets: ReadonlyArray<ProviderRoutingTarget>,
-): boolean {
-  return (
-    targets.length > 0 &&
-    targets.every(
-      (target) =>
-        resolveTargetProviderRoutingPolicyPatch({ ...target, patch: { defaultMode: "auto" } })
-          ?.defaultMode === "auto",
-    )
-  );
+): ProviderRoutingAutoBlocker | null {
+  if (targets.length === 0) return "account-unavailable";
+  for (const target of targets) {
+    const policy = target.settings.providerRoutingPolicy;
+    const blocker = providerRoutingAutoBlocker(
+      deriveProviderRoutingOptions([target.providers]),
+      policy.instanceIdsByDriver,
+      policy.usageThresholdPercent,
+      resolveDefaultProviderModelSelection(target.providers, target.settings.defaultModelSelection),
+    );
+    if (blocker !== null) return blocker;
+  }
+  return null;
+}
+
+/**
+ * Which Auto blocker the settings row explains. Only Auto uses the switch-at percentage,
+ * so a project staying on Fixed is not asked to set one.
+ */
+export function providerRoutingSettingsStatusBlocker(
+  mode: ProviderRoutingMode,
+  blocker: ProviderRoutingAutoBlocker | null,
+): ProviderRoutingAutoBlocker | null {
+  return mode === "fixed" && blocker === "threshold" ? null : blocker;
 }
 
 export function supportsProviderAccountRouting(capabilities: object | null | undefined): boolean {
