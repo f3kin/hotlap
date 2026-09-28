@@ -610,6 +610,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate
         ? ["Continue threads after restarts"]
         : []),
+      ...(settings.autoResumeAfterUsageLimit !== DEFAULT_UNIFIED_SETTINGS.autoResumeAfterUsageLimit
+        ? ["Auto-resume after usage limits"]
+        : []),
       ...(isBackgroundActivityDirty ? ["Background activity"] : []),
       ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
         ? ["New thread mode"]
@@ -682,6 +685,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.responseStreamingMode,
       settings.enableProviderUpdateChecks,
       settings.continueThreadsAfterServerUpdate,
+      settings.autoResumeAfterUsageLimit,
       settings.sidebarAutoSettleAfterDays,
       settings.sidebarAutoSettleOnMerge,
       settings.sidebarProjectGroupingMode,
@@ -787,6 +791,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
       continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
+      autoResumeAfterUsageLimit: DEFAULT_UNIFIED_SETTINGS.autoResumeAfterUsageLimit,
       backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
       backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
@@ -2177,6 +2182,11 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
+  const supportsUsageLimitAutoResume =
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every(
+      (target) => target.serverConfig?.environment.capabilities.usageLimitAutoResume === true,
+    );
   const supportsCustomPrompts =
     isEnvironmentScope &&
     environment?.serverConfig?.environment.capabilities.customPrompts === true;
@@ -2849,6 +2859,43 @@ export function GeneralSettingsPanel() {
                 updateSettings({ continueThreadsAfterServerUpdate: Boolean(checked) })
               }
               aria-label="Continue threads after restarts"
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("auto-resume-after-usage-limit")}
+          serverScoped
+          settingKeys={["autoResumeAfterUsageLimit"]}
+          description="When a Claude turn stops on a usage limit, keep retrying every 5 minutes until the limit resets."
+          status={
+            !supportsUsageLimitAutoResume
+              ? "All selected connected environments must support usage limit auto-resume."
+              : undefined
+          }
+          resetAction={
+            supportsUsageLimitAutoResume &&
+            settings.autoResumeAfterUsageLimit !==
+              DEFAULT_UNIFIED_SETTINGS.autoResumeAfterUsageLimit ? (
+              <SettingResetButton
+                label="auto-resume after usage limits"
+                onClick={() =>
+                  updateSettings({
+                    autoResumeAfterUsageLimit: DEFAULT_UNIFIED_SETTINGS.autoResumeAfterUsageLimit,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["autoResumeAfterUsageLimit"]}
+              checked={settings.autoResumeAfterUsageLimit}
+              disabled={!supportsUsageLimitAutoResume}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoResumeAfterUsageLimit: Boolean(checked) })
+              }
+              aria-label="Auto-resume after usage limits"
             />
           }
         />

@@ -56,6 +56,7 @@ import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { canReplaceThreadTitle } from "../threadTitles.ts";
+import { readUsageLimitError } from "../../provider/providerUsageLimits.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 // Suffixed, not prefixed: `clearTurnStateForSession` sweeps by thread prefix.
@@ -1782,6 +1783,9 @@ const make = Effect.gen(function* () {
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
+      // A hidden auto-resume attempt that hit the limit again leaves no trace;
+      // UsageLimitAutoResumeReactor schedules the next one.
+      if (readUsageLimitError(event)?.autoResume === true) return;
       if (
         event.type === "content.delta" &&
         event.payload.streamKind !== "assistant_text" &&

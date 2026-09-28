@@ -1,4 +1,5 @@
 import type {
+  ProviderRuntimeEvent,
   ProviderUsageLimitsUpdate,
   ServerProviderUsageLimits,
   ServerProviderUsageWindow,
@@ -140,4 +141,27 @@ export function resolveUsageLimitsAfterProbe(input: {
     return published;
   }
   return probed;
+}
+
+/**
+ * Reads a usage-limit `runtime.error`. `autoResume` marks a hidden resume
+ * attempt that hit the limit again: it never reaches the thread.
+ */
+export function readUsageLimitError(
+  event: ProviderRuntimeEvent,
+): { readonly resetsAtMs: number | undefined; readonly autoResume: boolean } | null {
+  if (event.type !== "runtime.error" || event.payload.class !== "usage_limit") return null;
+  const detail = event.payload.detail;
+  if (typeof detail !== "object" || detail === null) {
+    return { resetsAtMs: undefined, autoResume: false };
+  }
+  return {
+    resetsAtMs:
+      "resetsAt" in detail &&
+      typeof detail.resetsAt === "number" &&
+      Number.isFinite(detail.resetsAt)
+        ? detail.resetsAt
+        : undefined,
+    autoResume: "autoResume" in detail && detail.autoResume === true,
+  };
 }

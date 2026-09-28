@@ -26,6 +26,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
+  UsageLimitAutoResumePayload,
   UsageLimitsReport,
   UserInputQuestion,
 } from "@t3tools/contracts";
@@ -88,6 +89,7 @@ import type {
   ThreadFeedEntry,
 } from "../../lib/threadActivity";
 import { PendingApprovalCard } from "./PendingApprovalCard";
+import { ComposerAutoResume } from "./ComposerAutoResume";
 import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
@@ -167,6 +169,8 @@ export interface ThreadDetailScreenProps {
   readonly onNativePasteText: (paste: ComposerTextPaste) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  readonly autoResumeWait: UsageLimitAutoResumePayload | null;
+  readonly onCancelAutoResume: () => Promise<unknown>;
   readonly forkableAssistantMessageIds: ReadonlySet<MessageId>;
   readonly onForkAssistantMessage?: ((messageId: MessageId) => Promise<void>) | undefined;
   readonly onSendMessage: () => Promise<MessageId | null>;
@@ -999,6 +1003,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     onDismiss={() => props.onDismissFeedback(submission.id)}
                   />
                 ))}
+                {props.autoResumeWait ? (
+                  <ComposerAutoResume
+                    wait={props.autoResumeWait}
+                    onCancel={props.onCancelAutoResume}
+                  />
+                ) : null}
                 {usageLimitsReport && activeUserInputRequestId === null ? (
                   <Animated.View
                     className="shrink-0 px-4 pb-3"

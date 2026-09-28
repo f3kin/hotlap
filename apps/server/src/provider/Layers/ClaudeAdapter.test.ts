@@ -2601,18 +2601,14 @@ describe("ClaudeAdapterLive", () => {
 
       const payload = completedTurn(Array.from(yield* Fiber.join(runtimeEventsFiber)));
       assert.equal(payload.state, "failed");
-      assert.equal(
-        payload.errorMessage,
-        "Claude usage limit reached. Send the message again once the limit resets.",
-      );
+      assert.equal(payload.errorMessage, "Claude usage limit reached.");
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
   });
 
-  const usageLimitMessage =
-    "Claude usage limit reached. Send the message again once the limit resets.";
+  const usageLimitMessage = "Claude usage limit reached.";
   const genericApiErrorMessage = "Claude gave up after repeated API errors.";
   const rateLimitAssistant = {
     type: "assistant",
@@ -2634,6 +2630,523 @@ describe("ClaudeAdapterLive", () => {
     session_id: "sdk-session-limit",
     uuid: "result-limit",
   };
+
+  const collectUntil = (predicate: (event: ProviderRuntimeEvent) => boolean) =>
+    Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      return yield* adapter.streamEvents.pipe(
+        Stream.takeUntil(predicate),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+    });
+  const rejectedFiveHourLimit = (resetsAtSec: number) =>
+    ({
+      type: "rate_limit_event",
+      rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: resetsAtSec },
+      session_id: "sdk-session-limit",
+      uuid: `rate-limit-${resetsAtSec}`,
+    }) as unknown as SDKMessage;
+  const textDelta = (text: string) =>
+    [
+      {
+        type: "stream_event",
+        session_id: "sdk-session-limit",
+        uuid: "stream-start",
+        parent_tool_use_id: null,
+        event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      },
+      {
+        type: "stream_event",
+        session_id: "sdk-session-limit",
+        uuid: "stream-delta",
+        parent_tool_use_id: null,
+        event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+      },
+    ] as unknown as ReadonlyArray<SDKMessage>;
+  /** Events after startSession's own lifecycle events. */
+  const afterSessionStart = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+    events.filter(
+      (event) =>
+        event.type !== "session.started" &&
+        event.type !== "session.configured" &&
+        event.type !== "session.state.changed" &&
+        event.type !== "thread.started",
+    );
+  const successResult = {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    errors: [],
+    session_id: "sdk-session-limit",
+    uuid: "result-ok",
+  } as unknown as SDKMessage;
+
+  it.effect("reports a usage limit with the reset from a window rejected between turns", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const resetsAtSec = Math.floor((yield* Clock.currentTimeMillis) / 1000) + 3600;
+      // Last night's stall: the window was rejected while no turn was running.
+      harness.query.emit(rejectedFiveHourLimit(resetsAtSec));
+      const eventsFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+      harness.query.emit(rateLimitAssistant as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const error = events.find((event) => event.type === "runtime.error");
+      assert(error?.type === "runtime.error");
+      assert.equal(error.payload.class, "usage_limit");
+      assert.equal(error.payload.message, usageLimitMessage);
+      assert.deepEqual(error.payload.detail, { resetsAt: resetsAtSec * 1000 });
+      assert.equal(completedTurn(events).errorMessage, usageLimitMessage);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps an auto-resume attempt that hits the limit again out of the thread", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      // Only called when the next send finds the attempt's result still unread.
+      harness.query.interrupt = async () => undefined;
+      const resetsAtSec = Math.floor((yield* Clock.currentTimeMillis) / 1000) + 3600;
+      const attemptFiber = yield* collectUntil((event) => event.type === "runtime.error");
+      const attempt = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      harness.query.emit(rejectedFiveHourLimit(resetsAtSec));
+      harness.query.emit(rateLimitAssistant as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+
+      const attemptEvents = afterSessionStart(Array.from(yield* Fiber.join(attemptFiber)));
+      assert.deepEqual(
+        attemptEvents.map((event) => event.type),
+        ["runtime.error"],
+      );
+      const error = attemptEvents.at(-1);
+      assert(error?.type === "runtime.error");
+      assert.equal(error.turnId, attempt.turnId);
+      assert.equal(error.payload.class, "usage_limit");
+      assert.deepEqual(error.payload.detail, { resetsAt: resetsAtSec * 1000, autoResume: true });
+
+      // The next turn starts cleanly and nothing about the attempt follows it.
+      const nextFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const next = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+      harness.query.emit(successResult);
+      const nextEvents = Array.from(yield* Fiber.join(nextFiber));
+      assert.equal(nextEvents[0]?.type, "turn.started");
+      assert.equal(nextEvents[0]?.turnId, next.turnId);
+      assert.equal(
+        nextEvents.some((event) => event.turnId === attempt.turnId),
+        false,
+      );
+      assert.equal(completedTurn(nextEvents).state, "completed");
+      // Revert counts turns from the cursor, so the hidden attempt must not be one.
+      const cursor = (yield* adapter.listSessions())[0]?.resumeCursor as {
+        readonly turnStartMessageIds?: ReadonlyArray<string | null>;
+      };
+      assert.equal(cursor.turnStartMessageIds?.includes(attempt.turnId), false);
+      assert.equal(cursor.turnStartMessageIds?.includes(next.turnId), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("announces an auto-resume attempt once Claude makes progress", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const eventsFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const attempt = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      for (const message of textDelta("Picking up")) harness.query.emit(message);
+      harness.query.emit(successResult);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const startedIndex = events.findIndex((event) => event.type === "turn.started");
+      const deltaIndex = events.findIndex((event) => event.type === "content.delta");
+      assert.equal(events[startedIndex]?.turnId, attempt.turnId);
+      assert(startedIndex >= 0 && startedIndex < deltaIndex);
+      assert.equal(completedTurn(events).state, "completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("interrupts a parked auto-resume attempt before the next one", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      // A parked turn only ends when interrupted; the SDK then reports a result.
+      let interrupts = 0;
+      harness.query.interrupt = async () => {
+        interrupts += 1;
+        harness.query.emit({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: [],
+          session_id: "sdk-session-limit",
+          uuid: "result-interrupted",
+        } as unknown as SDKMessage);
+      };
+      const parkedFiber = yield* collectUntil((event) => event.type === "runtime.error");
+      const parked = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      harness.query.emit(
+        rejectedFiveHourLimit(Math.floor((yield* Clock.currentTimeMillis) / 1000) + 600),
+      );
+      const parkedEvents = afterSessionStart(Array.from(yield* Fiber.join(parkedFiber)));
+      assert.deepEqual(
+        parkedEvents.map((event) => event.type),
+        ["runtime.error"],
+      );
+
+      const nextFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const next = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      assert.equal(interrupts, 1);
+      for (const message of textDelta("Back")) harness.query.emit(message);
+      harness.query.emit(successResult);
+      const nextEvents = Array.from(yield* Fiber.join(nextFiber));
+      assert.equal(nextEvents[0]?.type, "turn.started");
+      assert.equal(nextEvents[0]?.turnId, next.turnId);
+      assert.equal(
+        nextEvents.some(
+          (event) => event.turnId === parked.turnId || event.type === "runtime.error",
+        ),
+        false,
+      );
+      assert.equal(completedTurn(nextEvents).state, "completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("replaces an auto-resume attempt that never answered", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      let interrupts = 0;
+      harness.query.interrupt = async () => {
+        interrupts += 1;
+        harness.query.emit({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: [],
+          session_id: "sdk-session-limit",
+          uuid: "result-interrupted",
+        } as unknown as SDKMessage);
+      };
+      const stuck = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+
+      const nextFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const next = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      assert.equal(interrupts, 1);
+      for (const message of textDelta("Back")) harness.query.emit(message);
+      harness.query.emit(successResult);
+      const nextEvents = afterSessionStart(Array.from(yield* Fiber.join(nextFiber)));
+      // The stuck attempt leaves only its quiet error, which the reactor ignores as stale.
+      const stuckEvents = nextEvents.filter((event) => event.turnId === stuck.turnId);
+      assert.deepEqual(
+        stuckEvents.map((event) => event.type),
+        ["runtime.error"],
+      );
+      assert.equal(nextEvents.find((event) => event.type === "turn.started")?.turnId, next.turnId);
+      assert.equal(completedTurn(nextEvents).state, "completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("shows a parked attempt that gets through after its limit report", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const eventsFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const attempt = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      harness.query.emit(
+        rejectedFiveHourLimit(Math.floor((yield* Clock.currentTimeMillis) / 1000) + 600),
+      );
+      // The window resets while the SDK holds the turn, and Claude carries on.
+      for (const message of textDelta("Picking up")) harness.query.emit(message);
+      harness.query.emit(successResult);
+
+      const events = afterSessionStart(Array.from(yield* Fiber.join(eventsFiber)));
+      assert.equal(events[0]?.type, "runtime.error");
+      const started = events.find((event) => event.type === "turn.started");
+      assert.equal(started?.turnId, attempt.turnId);
+      assert.equal(completedTurn(events).state, "completed");
+      // Now a normal turn, so revert must count it.
+      const cursor = (yield* adapter.listSessions())[0]?.resumeCursor as {
+        readonly turnStartMessageIds?: ReadonlyArray<string | null>;
+      };
+      assert.equal(cursor.turnStartMessageIds?.includes(attempt.turnId), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps a parked attempt out of the saved turn boundaries", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const parkedFiber = yield* collectUntil((event) => event.type === "runtime.error");
+      const attempt = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      harness.query.emit(
+        rejectedFiveHourLimit(Math.floor((yield* Clock.currentTimeMillis) / 1000) + 600),
+      );
+      yield* Fiber.join(parkedFiber);
+      // The cursor is saved while the attempt is parked; revert must never count it.
+      const cursor = (yield* adapter.listSessions())[0]?.resumeCursor as {
+        readonly turnStartMessageIds?: ReadonlyArray<string | null>;
+      };
+      assert.equal(cursor.turnStartMessageIds?.includes(attempt.turnId), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect.each([
+    { name: "a new attempt replaces one that never answered", parked: false, autoResume: true },
+    { name: "the user sends onto a parked attempt", parked: true, autoResume: false },
+  ])("restarts the session when $name and the interrupt never lands", ({ parked, autoResume }) => {
+    const harness = makeHarness({ getSessionMessages: async () => [] });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      // The SDK acknowledges the interrupt but never ends the turn.
+      harness.query.interrupt = async () => undefined;
+      const stale = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      if (parked) {
+        harness.query.emit(
+          rejectedFiveHourLimit(Math.floor((yield* Clock.currentTimeMillis) / 1000) + 600),
+        );
+      }
+
+      const nextFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const sendFiber = yield* adapter
+        .sendTurn({
+          threadId: session.threadId,
+          input: autoResume ? "Continue where you left off." : "hello",
+          ...(autoResume ? { autoResume: true } : { attachments: [] }),
+        })
+        .pipe(Effect.forkChild);
+      yield* TestClock.adjust("3 seconds");
+      const next = yield* Fiber.join(sendFiber);
+
+      // A late result from the old query can no longer land on the new turn.
+      assert.equal(harness.queries.length, 2);
+      assert.equal(harness.queries[0]?.closeCalls, 1);
+      const current = harness.queries[1]!;
+      for (const message of textDelta("Back")) current.emit(message);
+      current.emit(successResult);
+      const nextEvents = afterSessionStart(Array.from(yield* Fiber.join(nextFiber)));
+      assert.equal(nextEvents.find((event) => event.type === "turn.started")?.turnId, next.turnId);
+      assert.equal(
+        nextEvents.some((event) => event.turnId === stale.turnId && event.type !== "runtime.error"),
+        false,
+      );
+      assert.equal(completedTurn(nextEvents).state, "completed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reports the reset of the window this turn hit, not an older one", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const nowSec = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+      // An earlier turn saw a weekly rejection, from a login since swapped out.
+      const earlierFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "first", attachments: [] });
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "seven_day",
+          resetsAt: nowSec + 86_400,
+        },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-weekly",
+      } as unknown as SDKMessage);
+      harness.query.emit(successResult);
+      yield* Fiber.join(earlierFiber);
+
+      const eventsFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+      harness.query.emit(rejectedFiveHourLimit(nowSec + 3600));
+      harness.query.emit(rateLimitAssistant as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const error = events.find(
+        (event) => event.type === "runtime.error" && event.payload.class === "usage_limit",
+      );
+      assert(error?.type === "runtime.error");
+      assert.deepEqual(error.payload.detail, { resetsAt: (nowSec + 3600) * 1000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("refuses an auto-resume attempt while a turn is running", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+      const refused = yield* adapter
+        .sendTurn({
+          threadId: session.threadId,
+          input: "Continue where you left off.",
+          autoResume: true,
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "ProviderAdapterValidationError");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("turns an auto-resume attempt into a normal turn when the user steers into it", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const eventsFiber = yield* collectUntil((event) => event.type === "turn.completed");
+      const attempt = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      const steered = yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "hello",
+        attachments: [],
+      });
+      assert.equal(steered.turnId, attempt.turnId);
+      harness.query.emit(rateLimitAssistant as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+
+      const events = afterSessionStart(Array.from(yield* Fiber.join(eventsFiber)));
+      assert.equal(events[0]?.type, "turn.started");
+      assert.equal(events[0]?.turnId, attempt.turnId);
+      const error = events.find((event) => event.type === "runtime.error");
+      assert(error?.type === "runtime.error");
+      assert.deepEqual(error.payload.detail, {});
+      assert.equal(completedTurn(events).state, "failed");
+      const cursor = (yield* adapter.listSessions())[0]?.resumeCursor as {
+        readonly turnStartMessageIds?: ReadonlyArray<string | null>;
+      };
+      assert.equal(cursor.turnStartMessageIds?.includes(attempt.turnId), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 
   it.effect.each([
     {
@@ -4485,7 +4998,7 @@ describe("ClaudeAdapterLive", () => {
   );
 
   /** A Claude account whose login another tool can swap; one fake query per CLI process. */
-  const makeLoginSwapHarness = () => {
+  const makeLoginSwapHarness = (configureQuery?: (query: FakeClaudeQuery) => void) => {
     const configDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-login-"));
     const writeLogin = (accountUuid: string) =>
       NodeFS.writeFileSync(
@@ -4501,6 +5014,7 @@ describe("ClaudeAdapterLive", () => {
           modelCatalog: Effect.succeed(SYNTHETIC_CLAUDE_MODEL_CATALOG),
           createQuery: () => {
             const query = new FakeClaudeQuery();
+            configureQuery?.(query);
             queries.push(query);
             return query;
           },
@@ -4645,6 +5159,55 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(completed.payload.state, "completed");
       assert.equal(queries.length, 2);
       eventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(layer),
+    );
+  });
+
+  it.effect("picks up a login swap while an auto-resume attempt is parked", () => {
+    const { writeLogin, queries, layer } = makeLoginSwapHarness((query) => {
+      // A parked turn only ends when interrupted; the SDK then reports a result.
+      query.interrupt = async () => {
+        query.emit({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: [],
+          session_id: "sdk-session-limit",
+          uuid: "result-interrupted",
+        } as unknown as SDKMessage);
+      };
+    });
+
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const parkedFiber = yield* collectUntil((event) => event.type === "runtime.error");
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+      queries[0]?.emit(
+        rejectedFiveHourLimit(Math.floor((yield* Clock.currentTimeMillis) / 1000) + 600),
+      );
+      yield* Fiber.join(parkedFiber);
+
+      // Another tool swaps the login while the attempt is parked on the old one.
+      writeLogin("account-b");
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        autoResume: true,
+      });
+
+      assert.equal(queries.length, 2);
+      assert.equal(queries[0]?.closeCalls, 1);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(layer),

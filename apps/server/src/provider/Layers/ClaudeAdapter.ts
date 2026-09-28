@@ -474,6 +474,11 @@ interface ClaudeSessionContext {
   lastThreadStartedId: string | undefined;
   /** Limits already announced for the running turn, keyed `window:resetsAt`. */
   announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
+  /**
+   * Usage windows currently rejected, with their reset (epoch ms) when known.
+   * Tracked with or without a turn: a window can be rejected between turns.
+   */
+  readonly rejectedLimitResets: Map<string, number | undefined>;
   /** Resolved by completeTurn while Stop waits for Claude to abort the turn. */
   interruptedTurnSettled: Deferred.Deferred<void> | undefined;
   /** The subscription login this CLI process runs as; see `readClaudeLoginIdentity`. */
@@ -655,6 +660,71 @@ const CLAUDE_USAGE_LIMIT_WINDOWS = {
 
 /** Beyond this the reset time is not credible, so the row ships without a wait. */
 const CLAUDE_USAGE_LIMIT_MAX_WAIT_MS = 30 * 24 * 60 * 60 * 1000;
+
+const CLAUDE_USAGE_LIMIT_ERROR = "Claude usage limit reached.";
+
+interface HiddenAutoResumeAttempt {
+  readonly turnId: TurnId;
+  /** Events held back until the attempt makes progress, `turn.started` first. */
+  readonly held: Array<ProviderRuntimeEvent>;
+  /** Set once the quiet usage-limit failure went out; the turn is then dropped. */
+  failed: boolean;
+}
+
+/** Events that show Claude is working again, which releases a hidden attempt. */
+const HIDDEN_ATTEMPT_PROGRESS_EVENTS: ReadonlySet<ProviderRuntimeEvent["type"]> = new Set([
+  "content.delta",
+  "item.started",
+  "item.updated",
+  "item.completed",
+  "request.opened",
+  "user-input.requested",
+  "turn.plan.updated",
+  "turn.proposed.delta",
+  "turn.proposed.completed",
+  "turn.diff.updated",
+  "tool.progress",
+  "tool.summary",
+  "tool.denied",
+]);
+
+/** Events unrelated to a hidden attempt's own work: account state and earlier background tasks. */
+const passesHiddenAttempt = (event: ProviderRuntimeEvent) =>
+  event.type === "account.rate-limits.updated" ||
+  event.type === "account.updated" ||
+  event.type === "thread.started" ||
+  event.type === "thread.metadata.updated" ||
+  event.type === "session.started" ||
+  event.type === "session.exited" ||
+  event.type === "files.persisted" ||
+  event.type.startsWith("task.");
+
+/** Latest reset among the rejected windows, when any reported one. */
+function latestRejectedLimitReset(resets: ReadonlyMap<string, number | undefined>) {
+  let latest: number | undefined;
+  for (const resetAtMs of resets.values()) {
+    if (resetAtMs !== undefined && (latest === undefined || resetAtMs > latest)) latest = resetAtMs;
+  }
+  return latest;
+}
+
+/**
+ * Reset for the windows the current turn was refused on. Windows rejected
+ * earlier can belong to a login that was since swapped out, so they only
+ * count when the turn saw none of its own.
+ */
+function turnLimitReset(context: {
+  readonly rejectedLimitResets: ReadonlyMap<string, number | undefined>;
+  readonly turnState?: { readonly rejectedRateLimitTypes: ReadonlySet<string> } | undefined;
+}) {
+  const turnTypes = context.turnState?.rejectedRateLimitTypes;
+  if (turnTypes === undefined || turnTypes.size === 0) {
+    return latestRejectedLimitReset(context.rejectedLimitResets);
+  }
+  return latestRejectedLimitReset(
+    new Map([...context.rejectedLimitResets].filter(([limitType]) => turnTypes.has(limitType))),
+  );
+}
 
 /**
  * `resetsAt` is epoch seconds. The row states the remaining wait rather than a
@@ -2156,8 +2226,48 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const nextEventId = Effect.map(randomUUIDv4, (id) => EventId.make(id));
   const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
-  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
-    Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+  /**
+   * Usage-limit resume attempts (`sendTurn({ autoResume: true })`) stay hidden
+   * until Claude makes progress: their events, `turn.started` included, are
+   * held here per thread. Progress releases them in order; an attempt that hits
+   * the limit again is dropped with its events, so it never reaches the thread
+   * as a row, an error status, a notification, or a checkpoint.
+   */
+  const hiddenAttempts = new Map<ThreadId, HiddenAutoResumeAttempt>();
+
+  const offerRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> => {
+    const attempt = hiddenAttempts.get(event.threadId);
+    if (attempt === undefined || passesHiddenAttempt(event)) {
+      return Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+    }
+    if (!HIDDEN_ATTEMPT_PROGRESS_EVENTS.has(event.type)) {
+      attempt.held.push(event);
+      return Effect.void;
+    }
+    return releaseHiddenAttempt(event.threadId).pipe(
+      Effect.andThen(Queue.offer(runtimeEventQueue, event)),
+      Effect.asVoid,
+    );
+  };
+
+  /**
+   * Makes a hidden attempt a normal turn: its held events go out in order, and
+   * only now does it become a turn boundary revert can count.
+   */
+  const releaseHiddenAttempt = (threadId: ThreadId): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      const attempt = hiddenAttempts.get(threadId);
+      if (attempt === undefined) return Effect.void;
+      hiddenAttempts.delete(threadId);
+      const context = sessions.get(threadId);
+      return Effect.gen(function* () {
+        if (context !== undefined) {
+          context.turnStartMessageIds.push(attempt.turnId);
+          yield* updateResumeCursor(context);
+        }
+        yield* Queue.offerAll(runtimeEventQueue, attempt.held);
+      });
+    });
 
   const logNativeSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
@@ -2691,12 +2801,77 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
+  /**
+   * Reports a hidden attempt that hit the limit again: one quiet
+   * `runtime.error` that ingestion skips and the auto-resume reactor reads.
+   * A parked attempt can still un-park at the reset; it then shows as a normal
+   * turn.
+   */
+  const failHiddenAttempt = Effect.fn("failHiddenAttempt")(function* (
+    context: ClaudeSessionContext,
+    attempt: HiddenAutoResumeAttempt,
+  ) {
+    if (attempt.failed) return;
+    attempt.failed = true;
+    const resetsAt = turnLimitReset(context);
+    const stamp = yield* makeEventStamp();
+    // Straight to the queue: offerRuntimeEvent would hold it with the attempt.
+    yield* Queue.offer(runtimeEventQueue, {
+      type: "runtime.error",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      turnId: asCanonicalTurnId(attempt.turnId),
+      payload: {
+        message: CLAUDE_USAGE_LIMIT_ERROR,
+        class: "usage_limit",
+        detail: { ...(resetsAt === undefined ? {} : { resetsAt }), autoResume: true },
+      },
+      providerRefs: nativeProviderRefs(context),
+    });
+  });
+
+  /**
+   * Ends a hidden attempt's turn without a trace; its held events are discarded.
+   * It was never a turn boundary, so revert is unaffected.
+   */
+  const dropHiddenAttempt = Effect.fn("dropHiddenAttempt")(function* (
+    context: ClaudeSessionContext,
+    attempt: HiddenAutoResumeAttempt,
+  ) {
+    yield* failHiddenAttempt(context, attempt);
+    hiddenAttempts.delete(context.session.threadId);
+    context.inFlightTools.clear();
+    context.turnState = undefined;
+    if (context.interruptedTurnSettled) {
+      yield* Deferred.succeed(context.interruptedTurnSettled, undefined);
+    }
+    context.session = {
+      ...context.session,
+      status: "ready",
+      activeTurnId: undefined,
+      updatedAt: yield* nowIso,
+    };
+    yield* updateResumeCursor(context);
+  });
+
   const completeTurn = Effect.fn("completeTurn")(function* (
     context: ClaudeSessionContext,
     status: ProviderRuntimeTurnStatus,
     errorMessage?: string,
     result?: SDKResultMessage,
   ) {
+    const attempt = hiddenAttempts.get(context.session.threadId);
+    if (attempt !== undefined && attempt.turnId === context.turnState?.turnId) {
+      // Limit hit again, or stopped before any progress: nothing to show.
+      if (attempt.failed || status === "interrupted" || status === "cancelled") {
+        yield* dropHiddenAttempt(context, attempt);
+        return;
+      }
+      // Any other outcome (another failure) is shown like a normal turn.
+      yield* releaseHiddenAttempt(context.session.threadId);
+    }
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     if (resultContextWindow !== undefined) {
       context.lastKnownContextWindow = resultContextWindow;
@@ -3502,6 +3677,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
       // The CLI's own "API Error: Request rejected (429)" reply repeats the usage-limit
       // error the turn already reports, and reads as broken after an account switch.
+      // On an auto-resume attempt it would also count as progress and reveal it.
       if (message.error !== "rate_limit") {
         yield* backfillThinkingFromSnapshot(context, message);
         yield* backfillAssistantTextBlocksFromSnapshot(context, message);
@@ -3524,24 +3700,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const usageLimited =
       turn !== undefined &&
       turn.authenticationFailureMessage === undefined &&
-      (turn.rejectedRateLimitTypes.size > 0 || turn.latestAssistantRateLimited);
+      (turn.rejectedRateLimitTypes.size > 0 ||
+        turn.latestAssistantRateLimited ||
+        message.terminal_reason === "blocking_limit");
     const failureHint =
-      turn?.authenticationFailureMessage ??
-      (usageLimited
-        ? "Claude usage limit reached. Send the message again once the limit resets."
-        : undefined);
+      turn?.authenticationFailureMessage ?? (usageLimited ? CLAUDE_USAGE_LIMIT_ERROR : undefined);
     const { status, errorMessage } = resultOutcome(message, failureHint);
     // Only Claude's own limit reply puts the failed prompt in the history a resume reads.
     if (turn !== undefined && turn.synthetic !== true) {
       context.limitedRequestId =
         usageLimited && turn.latestAssistantRateLimited ? turn.requestId : undefined;
     }
+    const attempt = turn ? hiddenAttempts.get(context.session.threadId) : undefined;
 
-    if (status === "failed") {
+    if (attempt?.turnId === turn?.turnId && attempt !== undefined && usageLimited) {
+      yield* failHiddenAttempt(context, attempt);
+    } else if (status === "failed") {
+      const resetsAt = turnLimitReset(context);
       yield* emitRuntimeError(
         context,
         errorMessage ?? "Claude turn failed.",
-        undefined,
+        usageLimited ? (resetsAt === undefined ? {} : { resetsAt }) : undefined,
         usageLimited ? "usage_limit" : "provider_error",
       );
     }
@@ -4151,18 +4330,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const blocked = rateLimitInfo.status === "rejected" && !overageAllowed;
       const limitType = rateLimitInfo.rateLimitType ?? "unknown";
       const limitKey = `${limitType}:${rateLimitInfo.resetsAt ?? "unknown"}`;
+      const windowAllowed =
+        rateLimitInfo.status === "allowed" ||
+        rateLimitInfo.status === "allowed_warning" ||
+        overageAllowed;
+      if (blocked) {
+        context.rejectedLimitResets.set(
+          limitType,
+          rateLimitInfo.resetsAt === undefined ? undefined : rateLimitInfo.resetsAt * 1000,
+        );
+      } else if (windowAllowed) {
+        context.rejectedLimitResets.delete(limitType);
+      }
       if (context.turnState) {
         // Current blocking evidence is independent of whether its warning has
         // already been shown. A recovery can omit or advance the reset time;
         // its window type remains stable without clearing another window.
         if (blocked) context.turnState.rejectedRateLimitTypes.add(limitType);
-        else if (
-          rateLimitInfo.status === "allowed" ||
-          rateLimitInfo.status === "allowed_warning" ||
-          overageAllowed
-        ) {
-          context.turnState.rejectedRateLimitTypes.delete(limitType);
-        }
+        else if (windowAllowed) context.turnState.rejectedRateLimitTypes.delete(limitType);
+      }
+      const attempt = hiddenAttempts.get(context.session.threadId);
+      if (blocked && attempt !== undefined && attempt.turnId === context.turnState?.turnId) {
+        // The attempt may now park in the SDK. Report it now; the next send
+        // interrupts whatever is left of its turn.
+        yield* failHiddenAttempt(context, attempt);
+        return;
       }
       if (blocked && context.turnState !== undefined) {
         // Tracked per turn as a set of limit identities, not as the rendered
@@ -5152,6 +5344,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         limitedRequestId: resumeState?.limitedRequestId,
         lastThreadStartedId: undefined,
         announcedUsageLimits: undefined,
+        rejectedLimitResets: new Map(),
         interruptedTurnSettled: undefined,
         loginIdentity,
         stopped: false,
@@ -5274,7 +5467,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   });
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* restartIfLoginChanged(yield* requireSession(input.threadId));
+    let context = yield* requireSession(input.threadId);
+    const openAttempt = hiddenAttempts.get(input.threadId);
+    if (openAttempt !== undefined && (openAttempt.failed || input.autoResume === true)) {
+      // The attempt hit the limit, or a new attempt replaces one that never
+      // answered, but its turn is still open (parked in the SDK, or its result
+      // not yet read). End it before starting another turn. Failing it first
+      // drops whatever result the interrupt produces instead of showing it.
+      yield* failHiddenAttempt(context, openAttempt);
+      yield* settleInterruptedTurn(context);
+      if (hiddenAttempts.get(input.threadId) === openAttempt) {
+        // The interrupt did not land in time. Its late result would end the
+        // next turn, so continue on a fresh process from the same cursor.
+        // Stopping first leaves no window for a late message; the stop ends
+        // the failed attempt's turn, which drops it.
+        const turns = context.turns;
+        yield* stopSessionInternal(context, { emitExitEvent: false });
+        hiddenAttempts.delete(input.threadId);
+        yield* startSession({
+          ...context.startInput,
+          runtimeMode: context.session.runtimeMode,
+          resumeCursor: context.session.resumeCursor,
+        });
+        context = yield* requireSession(input.threadId);
+        context.turns.push(...turns);
+      }
+    }
+    // After the attempt settles: a parked turn would otherwise hide a login swap.
+    context = yield* restartIfLoginChanged(context);
+    if (input.autoResume === true && context.turnState !== undefined) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "sendTurn",
+        issue: "An auto-resume attempt cannot join a running turn.",
+      });
+    }
     const modelCatalog = yield* modelCatalogEffect;
     const selectedModel =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
@@ -5297,6 +5524,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.turnState && steeringTurnState === null) {
       yield* completeTurn(context, "completed");
     }
+    // A user message steered into a hidden attempt makes it a normal turn.
+    if (steeringTurnState !== null) yield* releaseHiddenAttempt(input.threadId);
 
     if (modelSelection?.model) {
       const apiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
@@ -5365,6 +5594,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         activeTurnId: turnId,
         updatedAt,
       };
+      if (input.autoResume === true) {
+        hiddenAttempts.set(input.threadId, { turnId, held: [], failed: false });
+      }
 
       const turnStartedStamp = yield* makeEventStamp();
       yield* offerRuntimeEvent({
@@ -5414,7 +5646,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ),
     });
 
-    if (steeringTurnState === null) context.turnStartMessageIds.push(turnId);
+    // A hidden attempt becomes a boundary only once it is released.
+    if (steeringTurnState === null && input.autoResume !== true) {
+      context.turnStartMessageIds.push(turnId);
+    }
     yield* updateResumeCursor(context);
     yield* Queue.offer(context.promptQueue, {
       type: "message",

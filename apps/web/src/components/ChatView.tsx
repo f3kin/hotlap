@@ -241,6 +241,7 @@ import {
   ChevronDownIcon,
   DownloadIcon,
   GitBranchIcon,
+  HourglassIcon,
   Minimize2Icon,
   PaperclipIcon,
   WifiOffIcon,
@@ -354,6 +355,8 @@ import {
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import { findUsageLimitAutoResumeWait } from "@t3tools/client-runtime/usage-limit-auto-resume";
+import { formatUpcomingTimestamp } from "../timestampFormat";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -6605,6 +6608,38 @@ export default function ChatView(props: ChatViewProps) {
       setUnsnoozingThreadKey((current) => (current === threadKey ? null : current));
     }
   }, [activeThreadRef, unsnoozeThreadMutation]);
+  const stopThreadSessionMutation = useAtomCommand(threadEnvironment.stopSession, {
+    reportFailure: false,
+  });
+  const [cancellingAutoResumeThreadKey, setCancellingAutoResumeThreadKey] = useState<string | null>(
+    null,
+  );
+  const isCancellingAutoResume =
+    cancellingAutoResumeThreadKey !== null && cancellingAutoResumeThreadKey === activeThreadKey;
+  // Stopping the thread is what ends a usage-limit wait on the server.
+  const handleCancelAutoResume = useCallback(async () => {
+    if (!activeThreadRef) return;
+    const threadKey = scopedThreadKey(activeThreadRef);
+    setCancellingAutoResumeThreadKey(threadKey);
+    try {
+      const result = await stopThreadSessionMutation({
+        environmentId: activeThreadRef.environmentId,
+        input: { threadId: activeThreadRef.threadId },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to cancel auto-resume",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    } finally {
+      setCancellingAutoResumeThreadKey((current) => (current === threadKey ? null : current));
+    }
+  }, [activeThreadRef, stopThreadSessionMutation]);
   const [isRestoringThreadBranch, setIsRestoringThreadBranch] = useState(false);
   const [branchRestoreConfirmOpen, setBranchRestoreConfirmOpen] = useState(false);
   // Once revealed for a given mismatch, the banner stays mounted until the
@@ -6849,6 +6884,35 @@ export default function ChatView(props: ChatViewProps) {
     isUnsnoozing,
     isUnsettling,
   ]);
+  const usageLimitAutoResumeWait = useMemo(
+    () => findUsageLimitAutoResumeWait(threadActivities, Date.parse(`${nowMinute}:00.000Z`)),
+    [threadActivities, nowMinute],
+  );
+  const usageLimitAutoResumeBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (!usageLimitAutoResumeWait) {
+      return null;
+    }
+    const { resetAt, threadId } = usageLimitAutoResumeWait;
+    return {
+      id: `usage-limit-auto-resume:${threadId}`,
+      variant: "info",
+      icon: <HourglassIcon />,
+      title: "Waiting for the usage limit to reset",
+      description: resetAt
+        ? `Auto-resumes after ${formatUpcomingTimestamp(resetAt, timestampFormat)}`
+        : "Retrying every 5 minutes",
+      actions: (
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={isCancellingAutoResume}
+          onClick={() => void handleCancelAutoResume()}
+        >
+          {isCancellingAutoResume ? "Cancelling..." : "Cancel"}
+        </Button>
+      ),
+    };
+  }, [handleCancelAutoResume, isCancellingAutoResume, timestampFormat, usageLimitAutoResumeWait]);
   // Session-scoped dismissals, one key per (thread, snapshot). A set rather
   // than a single slot so dismissing the banner on one thread does not
   // resurface it on another thread dismissed earlier.
@@ -6981,6 +7045,8 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const usageLimitAutoResumeItems =
+      usageLimitAutoResumeBannerItem === null ? [] : [usageLimitAutoResumeBannerItem];
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
@@ -6990,6 +7056,7 @@ export default function ChatView(props: ChatViewProps) {
         ...usageLimitsItems,
         ...projectCloneItems,
         ...systemComposerBannerItems,
+        ...usageLimitAutoResumeItems,
         ...backgroundLivenessItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
@@ -7001,6 +7068,7 @@ export default function ChatView(props: ChatViewProps) {
       ...usageLimitsItems,
       ...projectCloneItems,
       ...systemComposerBannerItems,
+      ...usageLimitAutoResumeItems,
       ...backgroundLivenessItems,
       ...resumeCompactionItems,
       ...wokeThreadItems,
@@ -7056,6 +7124,7 @@ export default function ChatView(props: ChatViewProps) {
     resumeCompactionBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
+    usageLimitAutoResumeBannerItem,
     usageLimitsBanner,
     wokeThreadBannerItem,
   ]);

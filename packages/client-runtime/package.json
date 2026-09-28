@@ -15,6 +15,10 @@
       "types": "./src/worktreeSetup.ts",
       "default": "./src/worktreeSetup.ts"
     },
+    "./usage-limit-auto-resume": {
+      "types": "./src/usageLimitAutoResume.ts",
+      "default": "./src/usageLimitAutoResume.ts"
+    },
     "./load-balancing": {
       "types": "./src/load-balancing.ts",
       "default": "./src/load-balancing.ts"
