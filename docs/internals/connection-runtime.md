@@ -76,8 +76,13 @@ overwrite its successor's cache. Preserve pagination data on reuse, but clear
 canceled loading state.
 
 The [RPC boundary](../../packages/client-runtime/src/rpc/client.ts) resolves
-requests against the current session at execution time. Durable subscriptions
-follow replacement sessions. After a transport failure they wait for the
-supervisor; an expected domain failure may resubscribe on the same healthy
+requests against the current session at execution time. A request made while
+the supervisor is reconnecting waits for the next session, up to
+`REQUEST_RECONNECT_WAIT_TIMEOUT`, and is sent once on it; past the cap it fails
+unsent, so a stale action is never replayed later. Settled phases fail at once,
+and a disposed supervisor publishes only a settled phase so waiting requests
+fail instead of hanging. Durable subscriptions follow replacement sessions.
+After a transport failure they wait for the supervisor; an expected domain
+failure or a server interrupt of one stream may resubscribe on the same healthy
 session. Reconnection does not automatically replay mutations, whose retry and
 idempotency rules belong to the operation.
