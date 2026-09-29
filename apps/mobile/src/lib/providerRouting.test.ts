@@ -2,18 +2,19 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  canEnableProviderRoutingAuto,
+  providerRoutingAutoBlocker,
   eligibleProjectDefaultProviderRoutingMode,
   providerAccountRoutingConsentForSubmission,
   reconcileDraftModelSelectionAfterAutomaticRoute,
   resolveProviderRoutingModeForSubmission,
   resolveNewTaskProviderRoutingMode,
   routingModeAfterManualModelSelection,
-  shouldClearAcknowledgedProviderRoutingIntent,
+  shouldClearProviderRoutingIntent,
 } from "./providerRouting";
 
 const codexOne = ProviderInstanceId.make("codex-one");
 const codexTwo = ProviderInstanceId.make("codex-two");
+const claudeOne = ProviderInstanceId.make("claude-one");
 
 function provider(instanceId: string, overrides: Partial<ServerProvider> = {}): ServerProvider {
   return {
@@ -78,32 +79,60 @@ describe("resolveProviderRoutingModeForSubmission", () => {
       }),
     ).toBe("fixed");
   });
+
+  it("keeps Auto for a Claude thread, which can now switch accounts after starting", () => {
+    expect(
+      resolveProviderRoutingModeForSubmission({
+        draftMode: "auto",
+        authoritativeMode: "fixed",
+        authoritativeInstanceId: claudeOne,
+        selectedInstanceId: claudeOne,
+      }),
+    ).toBe("auto");
+    expect(
+      resolveProviderRoutingModeForSubmission({
+        authoritativeMode: "auto",
+        authoritativeInstanceId: claudeOne,
+        selectedInstanceId: claudeOne,
+      }),
+    ).toBe("auto");
+  });
 });
 
-describe("shouldClearAcknowledgedProviderRoutingIntent", () => {
-  it("clears the latest saved Fixed intent when Auto was coalesced before projection", () => {
+describe("shouldClearProviderRoutingIntent", () => {
+  it("keeps an intent while its save is in flight", () => {
     expect(
-      shouldClearAcknowledgedProviderRoutingIntent({
-        acknowledged: true,
+      shouldClearProviderRoutingIntent({
+        saveStatus: "pending",
+        intendedMode: "auto",
+        authoritativeMode: "fixed",
+      }),
+    ).toBe(false);
+  });
+
+  it("clears a leftover intent once the server shows the same mode", () => {
+    expect(
+      shouldClearProviderRoutingIntent({
+        saveStatus: "none",
         intendedMode: "fixed",
         authoritativeMode: "fixed",
       }),
     ).toBe(true);
-  });
-
-  it("keeps an intent until its save is acknowledged and projected", () => {
     expect(
-      shouldClearAcknowledgedProviderRoutingIntent({
-        acknowledged: false,
-        intendedMode: "fixed",
+      shouldClearProviderRoutingIntent({
+        saveStatus: "none",
+        intendedMode: "auto",
         authoritativeMode: "fixed",
       }),
     ).toBe(false);
+  });
+
+  it("has nothing to clear without an intent", () => {
     expect(
-      shouldClearAcknowledgedProviderRoutingIntent({
-        acknowledged: true,
-        intendedMode: "fixed",
-        authoritativeMode: "auto",
+      shouldClearProviderRoutingIntent({
+        saveStatus: "none",
+        intendedMode: undefined,
+        authoritativeMode: "fixed",
       }),
     ).toBe(false);
   });
@@ -226,49 +255,63 @@ describe("legacy pending task routing", () => {
   });
 });
 
-describe("canEnableProviderRoutingAuto", () => {
-  it("allows two runnable configured accounts for the selected provider", () => {
+describe("providerRoutingAutoBlocker", () => {
+  it("names the reason Auto is unavailable so the settings sheet can explain it", () => {
+    const pair = [provider("codex-one"), provider("codex-two")];
+
+    expect(providerRoutingAutoBlocker(pair, { codex: [codexOne, codexTwo] }, null, codexOne)).toBe(
+      "threshold",
+    );
     expect(
-      canEnableProviderRoutingAuto(
-        [provider("codex-one"), provider("codex-two")],
+      providerRoutingAutoBlocker(
+        [provider("codex-one", { availability: "unavailable" }), provider("codex-two")],
         { codex: [codexOne, codexTwo] },
         80,
         codexOne,
       ),
-    ).toBe(true);
+    ).toBe("account-unavailable");
+    expect(providerRoutingAutoBlocker(pair, { codex: [codexTwo] }, 80, codexOne)).toBe(
+      "account-not-pooled",
+    );
+    expect(providerRoutingAutoBlocker(pair, { codex: [codexOne] }, 80, codexOne)).toBe(
+      "pool-too-small",
+    );
+    expect(
+      providerRoutingAutoBlocker(pair, { codex: [codexOne, codexTwo] }, 80, codexOne),
+    ).toBeNull();
   });
 
   it.each([
     ["deleted", null],
     ["unavailable", provider("codex-two", { availability: "unavailable" })],
     ["unready", provider("codex-two", { status: "error" })],
-  ])("rejects a configured %s second account", (_case, secondProvider) => {
+  ])("does not count a configured %s second account", (_case, secondProvider) => {
     const providers = [provider("codex-one"), ...(secondProvider ? [secondProvider] : [])];
 
     expect(
-      canEnableProviderRoutingAuto(providers, { codex: [codexOne, codexTwo] }, 80, codexOne),
-    ).toBe(false);
+      providerRoutingAutoBlocker(providers, { codex: [codexOne, codexTwo] }, 80, codexOne),
+    ).toBe("pool-too-small");
   });
 
-  it("rejects an unready selected account", () => {
+  it("rejects a signed-out selected account", () => {
     expect(
-      canEnableProviderRoutingAuto(
+      providerRoutingAutoBlocker(
         [provider("codex-one", { auth: { status: "unauthenticated" } }), provider("codex-two")],
         { codex: [codexOne, codexTwo] },
         80,
         codexOne,
       ),
-    ).toBe(false);
+    ).toBe("account-unavailable");
   });
 
-  it.each([null, 0, 101, 80.5])("rejects an unset or invalid threshold: %s", (threshold) => {
+  it.each([0, 101, 80.5])("rejects an invalid threshold: %s", (threshold) => {
     expect(
-      canEnableProviderRoutingAuto(
+      providerRoutingAutoBlocker(
         [provider("codex-one"), provider("codex-two")],
         { codex: [codexOne, codexTwo] },
         threshold,
         codexOne,
       ),
-    ).toBe(false);
+    ).toBe("threshold");
   });
 });

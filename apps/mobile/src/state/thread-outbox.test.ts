@@ -498,15 +498,17 @@ describe("thread outbox", () => {
     ).toEqual(codex);
   });
 
-  it("syncs a queued routing-mode change even when the model is unchanged", () => {
+  it("does not re-enable Auto after the thread became Fixed while a message was queued", () => {
     const modelSelection = {
-      instanceId: ProviderInstanceId.make("codex-work"),
-      model: "gpt-5.4",
+      instanceId: ProviderInstanceId.make("claude-work"),
+      model: "claude-opus-4-6",
     };
+    // Queued while the thread was Auto; the server then shows it as Fixed.
     const message = {
-      ...queuedMessage({ messageId: "mode-only", createdAt: "2026-09-15T10:00:00.000Z" }),
+      ...queuedMessage({ messageId: "stale-auto", createdAt: "2026-09-15T10:00:00.000Z" }),
       modelSelection,
       providerRoutingMode: "auto",
+      allowProviderAccountRouting: true,
     } satisfies QueuedThreadMessage;
 
     expect(
@@ -514,7 +516,26 @@ describe("thread outbox", () => {
         modelSelection,
         providerRoutingMode: "fixed",
       }),
-    ).toEqual({ providerRoutingMode: "auto" });
+    ).toBeNull();
+  });
+
+  it("does not undo Auto the user enabled after a Fixed message was queued", () => {
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex-work"),
+      model: "gpt-5.4",
+    };
+    const message = {
+      ...queuedMessage({ messageId: "stale-fixed", createdAt: "2026-09-15T10:00:00.000Z" }),
+      modelSelection,
+      providerRoutingMode: "fixed",
+    } satisfies QueuedThreadMessage;
+
+    expect(
+      resolveQueuedThreadMetadataUpdate(message, {
+        modelSelection,
+        providerRoutingMode: "auto",
+      }),
+    ).toBeNull();
   });
 
   it("syncs queued model and routing changes in one metadata update", () => {

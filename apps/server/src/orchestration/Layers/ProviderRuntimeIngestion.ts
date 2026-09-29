@@ -562,6 +562,8 @@ export function runtimeEventToActivities(
     }
 
     case "runtime.error": {
+      // The provider command reactor records usage limits once it knows whether it could resend.
+      if (event.payload.class === "usage_limit") return [];
       return [
         {
           id: event.eventId,

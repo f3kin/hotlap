@@ -21,6 +21,10 @@ import {
 } from "@t3tools/client-runtime/work-log/presentation";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
+  providerAccountRouteFailureDescription,
+  providerAccountRoutedDetail,
+} from "@t3tools/client-runtime/provider-account-route-notifications";
+import {
   isToolLifecycleItemType,
   type AssetResource,
   type OrchestrationLatestTurn,
@@ -575,13 +579,15 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
       payload.detail.length > 0
       ? stripTrailingExitCode(payload.detail).output
       : null
-    : extractToolDetail(payload, title ?? activity.summary);
+    : activity.kind === "provider.account.route.failed"
+      ? extractRouteFailureDetail(payload)
+      : extractToolDetail(payload, title ?? activity.summary);
   const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     createdAt: activity.createdAt,
     turnId: activity.turnId,
-    label: taskLabel || activity.summary,
+    label: taskLabel || routedAccountLabel(activity, payload) || activity.summary,
     tone:
       activity.kind === "task.progress"
         ? "thinking"
@@ -1229,6 +1235,21 @@ function isCommandToolDetail(payload: Record<string, unknown> | null, heading: s
     title === "terminal" ||
     title === "ran command"
   );
+}
+
+// Route failures may carry raw causes; show only what the toast would show.
+/** Timeline rows show their label, so name the accounts there: "Switched provider account: Work → Personal". */
+function routedAccountLabel(
+  activity: OrchestrationThreadActivity,
+  payload: Record<string, unknown> | null,
+): string | null {
+  if (activity.kind !== "provider.account.routed") return null;
+  const accounts = providerAccountRoutedDetail(payload);
+  return accounts === null ? null : `${activity.summary}: ${accounts}`;
+}
+
+function extractRouteFailureDetail(payload: Record<string, unknown> | null): string {
+  return providerAccountRouteFailureDescription(payload);
 }
 
 function extractToolDetail(

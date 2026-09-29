@@ -145,15 +145,37 @@ export interface ProviderServiceShape {
     ProviderServiceError
   >;
 
-  /** Read the last durable message-to-provider-turn admission for recovery. */
-  readonly getPersistedTurnAdmission?: (threadId: ThreadId) => Effect.Effect<
-    {
-      readonly messageId: MessageId;
-      readonly turnId: TurnId;
-      readonly active: boolean;
-    } | null,
+  /**
+   * Read the durable provider admission of one message for recovery.
+   * `turnId` is null while that send was dispatched but never confirmed.
+   */
+  readonly getPersistedTurnAdmission?: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<
+    { readonly turnId: TurnId | null; readonly active: boolean } | null,
     ProviderServiceError
   >;
+
+  /**
+   * Whether a thread already has a durable provider session to resume. Imported
+   * threads carry one before their first turn, and it only resolves inside the
+   * account that recorded it, so such a thread cannot be routed elsewhere.
+   */
+  readonly hasPersistedResumeCursor?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, ProviderServiceError>;
+
+  /**
+   * Drop what the runtime payload recorded about a settled send: its dispatch
+   * marker and its finished admission. Both only have to outlive a crash
+   * mid-send, so leaving them behind would refuse or misattribute a later retry
+   * of the same message (such as a resend on another account).
+   */
+  readonly clearSettledDispatchMarker?: (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+  }) => Effect.Effect<void, ProviderServiceError>;
 
   /** Clear one exact admitted turn only after its live provider session disappeared. */
   readonly clearOrphanedTurnAdmissionIfMatches?: (input: {

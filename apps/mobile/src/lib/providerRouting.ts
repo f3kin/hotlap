@@ -1,3 +1,4 @@
+import type { ProviderRoutingAutoBlocker } from "@t3tools/client-runtime/provider-account-routing";
 import type {
   ModelSelection,
   ProviderInstanceId,
@@ -18,24 +19,25 @@ function isRunnableRoutingProvider(provider: ServerProvider): boolean {
   );
 }
 
-export function canEnableProviderRoutingAuto(
+/** The first thing standing between the current account and Auto, or null. Mirrors the web rule. */
+export function providerRoutingAutoBlocker(
   providers: ReadonlyArray<ServerProvider>,
   instanceIdsByDriver: Readonly<Record<string, ReadonlyArray<ProviderInstanceId>>>,
   usageThresholdPercent: number | null,
   selectedInstanceId: ProviderInstanceId,
-): boolean {
+): ProviderRoutingAutoBlocker | null {
   if (
     usageThresholdPercent === null ||
     !Number.isInteger(usageThresholdPercent) ||
     usageThresholdPercent < 1 ||
     usageThresholdPercent > 100
   ) {
-    return false;
+    return "threshold";
   }
   const selectedProvider = providers.find(
     (provider) => provider.instanceId === selectedInstanceId && isRunnableRoutingProvider(provider),
   );
-  if (!selectedProvider) return false;
+  if (!selectedProvider) return "account-unavailable";
 
   const runnableIds = new Set(
     providers
@@ -46,10 +48,10 @@ export function canEnableProviderRoutingAuto(
       .map((provider) => provider.instanceId),
   );
   const configuredIds = instanceIdsByDriver[selectedProvider.driver] ?? [];
-  return (
-    configuredIds.includes(selectedProvider.instanceId) &&
-    new Set(configuredIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
-  );
+  if (!configuredIds.includes(selectedProvider.instanceId)) return "account-not-pooled";
+  return new Set(configuredIds.filter((instanceId) => runnableIds.has(instanceId))).size >= 2
+    ? null
+    : "pool-too-small";
 }
 
 export function routingModeAfterManualModelSelection(
@@ -76,12 +78,20 @@ export function resolveProviderRoutingModeForSubmission(input: {
   );
 }
 
-export function shouldClearAcknowledgedProviderRoutingIntent(input: {
-  readonly acknowledged: boolean;
-  readonly intendedMode: ProviderRoutingMode;
+/**
+ * Whether a thread's routing-mode draft intent should give way to the server's
+ * mode. The intent only matters while this client's save is in flight; the
+ * save's own result clears it once settled, whatever mode the server kept.
+ * `saveStatus` is "none" for a leftover intent (e.g. restored from the outbox),
+ * which clears once the server shows the same mode.
+ */
+export function shouldClearProviderRoutingIntent(input: {
+  readonly saveStatus: "none" | "pending";
+  readonly intendedMode: ProviderRoutingMode | undefined;
   readonly authoritativeMode: ProviderRoutingMode;
 }): boolean {
-  return input.acknowledged && input.intendedMode === input.authoritativeMode;
+  if (input.intendedMode === undefined) return false;
+  return input.saveStatus === "none" && input.intendedMode === input.authoritativeMode;
 }
 
 export function eligibleProjectDefaultProviderRoutingMode(

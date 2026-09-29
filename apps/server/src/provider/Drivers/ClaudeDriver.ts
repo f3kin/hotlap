@@ -62,8 +62,8 @@ import {
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
 import {
+  CLAUDE_CONTINUATION_GROUP_KEY,
   makeClaudeCapabilitiesCacheKey,
-  makeClaudeContinuationGroupKey,
   resolveClaudeHomePath,
 } from "./ClaudeHome.ts";
 import { discoverClaudeSkills } from "./ClaudeSkills.ts";
@@ -143,10 +143,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           Effect.provideService(Path.Path, path),
         ),
       );
-      const continuationGroupKey = yield* makeClaudeContinuationGroupKey(
-        effectiveConfig,
-        processEnv,
-      );
+      const continuationGroupKey = CLAUDE_CONTINUATION_GROUP_KEY;
       const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
       const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
         effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()

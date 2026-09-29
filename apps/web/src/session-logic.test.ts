@@ -477,6 +477,69 @@ describe("workEntryIndicatesToolNeutralStatus", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("hides internal details on account switch failures only", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "route-internal",
+        kind: "provider.account.route.failed",
+        tone: "error",
+        summary: "Provider account switch failed",
+        payload: {
+          detail: "ENOENT: no such file, open '/Users/dev/.t3/userdata/secrets/claude.json'",
+        },
+        sequence: 0,
+      }),
+      makeActivity({
+        id: "route-plain",
+        kind: "provider.account.route.failed",
+        tone: "error",
+        summary: "Provider account switch failed",
+        payload: { detail: "No eligible provider account is available. The message was not sent." },
+        sequence: 1,
+      }),
+      makeActivity({
+        id: "tool",
+        kind: "tool.completed",
+        summary: "Read file",
+        payload: { detail: "/Users/dev/project/README.md" },
+        sequence: 2,
+      }),
+    ]);
+
+    expect(entries.map((entry) => [entry.id, entry.detail])).toEqual([
+      ["route-internal", "The account switch could not be completed."],
+      ["route-plain", "No eligible provider account is available. The message was not sent."],
+      ["tool", "/Users/dev/project/README.md"],
+    ]);
+  });
+
+  it("names the accounts on account switch rows", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "route-switch",
+        kind: "provider.account.routed",
+        summary: "Switched provider account",
+        payload: {
+          previousProviderInstanceLabel: "Codex Work",
+          providerInstanceLabel: "Codex Personal",
+          reason: "usage-threshold",
+        },
+        sequence: 0,
+      }),
+      makeActivity({
+        id: "route-legacy",
+        kind: "provider.account.routed",
+        summary: "Switched provider account",
+        sequence: 1,
+      }),
+    ]);
+
+    expect(entries.map((entry) => [entry.id, entry.label])).toEqual([
+      ["route-switch", "Switched provider account: Codex Work → Codex Personal"],
+      ["route-legacy", "Switched provider account"],
+    ]);
+  });
+
   it("keeps the latest task progress without emitting plan-update log entries", () => {
     const activities = [
       makeActivity({ id: "before", kind: "tool.completed", summary: "Read files", sequence: 0 }),

@@ -33,7 +33,7 @@ export type ProviderRoutingPolicyPatch = Partial<
 
 export type ProviderRoutingPolicyPatchResolver =
   | ProviderRoutingPolicyPatch
-  | ((settings: ServerSettings) => ProviderRoutingPolicyPatch | null);
+  | ((settings: ServerSettings, environmentId: EnvironmentId) => ProviderRoutingPolicyPatch | null);
 
 interface ScopedSettingsEnvironment {
   readonly environmentId: EnvironmentId;
@@ -185,6 +185,7 @@ function projectOverrideWrites(
     current: ProjectSettingsOverrides,
     settings: ServerSettings,
     projectId: ProjectId,
+    environmentId: EnvironmentId,
   ) => ProjectSettingsOverrides | null,
 ): ScopedServerWrite[] {
   const byId = new Map(environments.map((environment) => [environment.environmentId, environment]));
@@ -199,7 +200,12 @@ function projectOverrideWrites(
       continue;
     }
     const settings = environment.serverConfig.settings;
-    const entry = update(settings.projectSettingsOverrides[member.id] ?? {}, settings, member.id);
+    const entry = update(
+      settings.projectSettingsOverrides[member.id] ?? {},
+      settings,
+      member.id,
+      member.environmentId,
+    );
     const existing = writes.get(member.environmentId);
     writes.set(member.environmentId, {
       environmentId: member.environmentId,
@@ -246,7 +252,10 @@ function planScopedSettingsServerPatch(
   environments: readonly ScopedSettingsEnvironment[],
   clientPatch: ClientSettingsPatch,
   serverKeys: readonly string[],
-  resolveServerPatch: (settings: ServerSettings) => ServerSettingsPatch,
+  resolveServerPatch: (
+    settings: ServerSettings,
+    environmentId: EnvironmentId,
+  ) => ServerSettingsPatch,
   inputKeyCount: number,
 ) {
   const { connectedEnvironments } = selectScopedSettingsEnvironments(scope, environments, null);
@@ -260,44 +269,48 @@ function planScopedSettingsServerPatch(
       : isProjectScope
         ? unscopableKeys.length > 0
           ? []
-          : projectOverrideWrites(scope, environments, (current, settings, projectId) => {
-              // Object-valued keys arrive as partial patches (the writing style
-              // rows send one field); an override entry stores the whole value,
-              // so complete the patch from the target's effective value.
-              const effective = resolveProjectSettings(settings, projectId).settings;
-              const serverPatch = resolveServerPatch(effective);
-              const next: Record<string, unknown> = { ...current };
-              for (const [key, value] of Object.entries(serverPatch)) {
-                if (key === "worktreeCleanup" && serverPatch.worktreeCleanup?.mode === "custom") {
-                  next[key] = {
-                    mode: "custom",
-                    rules: {
-                      ...resolveWorktreeCleanup(settings, projectId),
-                      ...serverPatch.worktreeCleanup.rules,
-                    },
-                  };
-                  continue;
+          : projectOverrideWrites(
+              scope,
+              environments,
+              (current, settings, projectId, environmentId) => {
+                // Object-valued keys arrive as partial patches (the writing style
+                // rows send one field); an override entry stores the whole value,
+                // so complete the patch from the target's effective value.
+                const effective = resolveProjectSettings(settings, projectId).settings;
+                const serverPatch = resolveServerPatch(effective, environmentId);
+                const next: Record<string, unknown> = { ...current };
+                for (const [key, value] of Object.entries(serverPatch)) {
+                  if (key === "worktreeCleanup" && serverPatch.worktreeCleanup?.mode === "custom") {
+                    next[key] = {
+                      mode: "custom",
+                      rules: {
+                        ...resolveWorktreeCleanup(settings, projectId),
+                        ...serverPatch.worktreeCleanup.rules,
+                      },
+                    };
+                    continue;
+                  }
+                  // A picker's "Inherit" sends null; for keys whose override
+                  // cannot store null that means remove the override.
+                  if (
+                    value === null &&
+                    !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
+                  ) {
+                    delete next[key];
+                    continue;
+                  }
+                  const base = effective[key as keyof ServerSettings];
+                  next[key] =
+                    isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
                 }
-                // A picker's "Inherit" sends null; for keys whose override
-                // cannot store null that means remove the override.
-                if (
-                  value === null &&
-                  !isNullableProjectSettingsOverride(key as ProjectScopedServerSettingKey)
-                ) {
-                  delete next[key];
-                  continue;
-                }
-                const base = effective[key as keyof ServerSettings];
-                next[key] =
-                  isPlainObject(value) && isPlainObject(base) ? { ...base, ...value } : value;
-              }
-              return next as ProjectSettingsOverrides;
-            })
+                return next as ProjectSettingsOverrides;
+              },
+            )
         : scope.kind === "all" || scope.kind === "environment"
           ? connectedEnvironments.flatMap((environment) => {
               if (!environment.serverConfig) return [];
               const settings = environment.serverConfig.settings;
-              const serverPatch = resolveServerPatch(settings);
+              const serverPatch = resolveServerPatch(settings, environment.environmentId);
               return [
                 {
                   environmentId: environment.environmentId,
@@ -362,9 +375,10 @@ export function planScopedProviderRoutingPolicyPatch(
     environments,
     clientPatch,
     serverKeys,
-    (settings) => {
+    (settings, environmentId) => {
       const targetPolicyPatch =
-        staticPolicyPatch ?? (typeof policyPatch === "function" ? policyPatch(settings) : null);
+        staticPolicyPatch ??
+        (typeof policyPatch === "function" ? policyPatch(settings, environmentId) : null);
       if (targetPolicyPatch === null) return serverPatch;
       return {
         ...serverPatch,

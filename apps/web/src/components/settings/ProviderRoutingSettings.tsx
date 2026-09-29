@@ -1,10 +1,12 @@
 import {
   ProviderDriverKind,
+  type EnvironmentId,
   type ProviderInstanceId,
-  type ModelSelection,
   type ProviderRoutingMode,
 } from "@t3tools/contracts";
 import { useMemo } from "react";
+
+import { providerRoutingAutoBlockerMessage } from "@t3tools/client-runtime/provider-account-routing";
 
 import { Checkbox } from "../ui/checkbox";
 import {
@@ -18,13 +20,16 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { useSettingsScope } from "./SettingsScopeContext";
 import { SettingsRow } from "./settingsLayout";
 import {
-  canEnableProviderRoutingAutoForEveryPolicy,
   deriveProviderRoutingOptions,
   mergeProviderRoutingOptions,
-  providerRoutingPoolPatch,
+  providerRoutingAutoBlockerForTargets,
+  providerRoutingSettingsStatusBlocker,
+  providerRoutingThresholdPatch,
+  resolveTargetProviderRoutingPolicyPatch,
   supportsProviderAccountRouting,
   toggleProviderRoutingInstance,
 } from "./ProviderRoutingSettings.logic";
+import type { ProviderRoutingPolicyPatch } from "./scopedSettings";
 import {
   useScopedSettings,
   useScopedSettingsMixed,
@@ -40,9 +45,7 @@ const ROUTABLE_DRIVERS = [
   ProviderDriverKind.make("claudeAgent"),
 ] as const;
 
-export function ProviderRoutingSettings(props: {
-  readonly selectedModelSelection: ModelSelection | null;
-}) {
+export function ProviderRoutingSettings() {
   const { scope, targets, connectedEnvironments } = useSettingsScope();
   const settings = useScopedSettings();
   const updatePolicy = useUpdateScopedProviderRoutingPolicy();
@@ -86,39 +89,38 @@ export function ProviderRoutingSettings(props: {
       groupedOptions.set(driver, []);
     }
   }
-  const canEnableAuto = canEnableProviderRoutingAutoForEveryPolicy(
-    options,
-    targets.map((target) => target.settings.providerRoutingPolicy),
-    props.selectedModelSelection,
+  // Each target is validated against its own environment's accounts and default account.
+  const providersFor = (environmentId: EnvironmentId) =>
+    targetEnvironments.find((environment) => environment?.environmentId === environmentId)
+      ?.serverConfig?.providers ?? [];
+  const autoBlocker = providerRoutingAutoBlockerForTargets(
+    targets.map((target) => ({
+      settings: target.settings,
+      providers: providersFor(target.environmentId),
+    })),
   );
+  // Auto is disabled in the select whenever something blocks it, so the reason is shown
+  // in Fixed mode too, except the switch-at percentage that only Auto needs.
+  const canEnableAuto = autoBlocker === null;
+  const updateTargetPolicies = (patch: ProviderRoutingPolicyPatch) =>
+    updatePolicy((targetSettings, environmentId) =>
+      resolveTargetProviderRoutingPolicyPatch({
+        settings: targetSettings,
+        providers: providersFor(environmentId),
+        patch,
+      }),
+    );
 
-  const setMode = (defaultMode: ProviderRoutingMode) => updatePolicy({ defaultMode });
+  const setMode = (defaultMode: ProviderRoutingMode) => updateTargetPolicies({ defaultMode });
   const setThreshold = (usageThresholdPercent: number | null) => {
-    const validThreshold =
-      usageThresholdPercent !== null &&
-      Number.isInteger(usageThresholdPercent) &&
-      usageThresholdPercent >= 1 &&
-      usageThresholdPercent <= 100
-        ? usageThresholdPercent
-        : null;
-    updatePolicy({
-      ...(validThreshold === null ? { defaultMode: "fixed" as const } : {}),
-      usageThresholdPercent: validThreshold,
-    });
+    const patch = providerRoutingThresholdPatch(usageThresholdPercent);
+    if (patch !== null) updatePolicy(patch);
   };
   const setDriverInstances = (
     driver: ProviderDriverKind,
     instanceIds: ReadonlyArray<ProviderInstanceId>,
   ) => {
-    updatePolicy((targetSettings) =>
-      providerRoutingPoolPatch(
-        targetSettings.providerRoutingPolicy,
-        driver,
-        instanceIds,
-        options,
-        props.selectedModelSelection,
-      ),
-    );
+    updateTargetPolicies({ instanceIdsByDriver: { [driver]: instanceIds } });
   };
 
   return (
@@ -130,11 +132,11 @@ export function ProviderRoutingSettings(props: {
       title="Automatic account switching"
       description="Choose a pool of accounts. Hotlap uses the eligible account whose weekly limit resets first."
       status={
-        policy.defaultMode === "auto" && !canEnableAuto
-          ? policy.usageThresholdPercent === null
-            ? "Choose a usage threshold before enabling automatic switching."
-            : "Add at least two accounts for the same provider to switch automatically."
-          : undefined
+        mixed
+          ? undefined
+          : (providerRoutingAutoBlockerMessage(
+              providerRoutingSettingsStatusBlocker(policy.defaultMode, autoBlocker),
+            ) ?? undefined)
       }
       control={
         <Select
@@ -179,7 +181,10 @@ export function ProviderRoutingSettings(props: {
             >
               <NumberFieldGroup>
                 <NumberFieldDecrement aria-label="Decrease account switching threshold" />
-                <NumberFieldInput aria-label="Account switching usage threshold percentage" />
+                <NumberFieldInput
+                  aria-label="Account switching usage threshold percentage"
+                  placeholder="80"
+                />
                 <NumberFieldIncrement aria-label="Increase account switching threshold" />
               </NumberFieldGroup>
             </NumberField>
@@ -202,9 +207,9 @@ export function ProviderRoutingSettings(props: {
                 {displayEntries.map((entry) => {
                   const checked = selected.includes(entry.instanceId);
                   return (
-                    <div
+                    <label
                       key={entry.instanceId}
-                      className="flex min-w-0 items-center gap-2 rounded-lg border border-border/60 bg-background/40 px-2.5 py-2"
+                      className="flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-border/60 bg-background/40 px-2.5 py-2"
                     >
                       <Checkbox
                         checked={checked}
@@ -220,11 +225,18 @@ export function ProviderRoutingSettings(props: {
                           )
                         }
                       />
-                      <span className="min-w-0 flex-1 truncate text-sm">
-                        {entry.displayName}
-                        {entry.unavailable ? " (Unavailable)" : ""}
+                      <span className="grid min-w-0 flex-1">
+                        <span className="break-words text-sm">{entry.displayName}</span>
+                        {entry.email ? (
+                          <span className="break-all text-xs text-muted-foreground">
+                            {entry.email}
+                          </span>
+                        ) : null}
                       </span>
-                    </div>
+                      {entry.unavailable ? (
+                        <span className="shrink-0 text-xs text-muted-foreground">Unavailable</span>
+                      ) : null}
+                    </label>
                   );
                 })}
               </div>

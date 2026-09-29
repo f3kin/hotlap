@@ -49,10 +49,19 @@ then enable automatic account routing. Set a new thread to **Auto**. Use
 
 Before the first normal message, T3 Code chooses the eligible account whose
 weekly limit resets first. The usage report must be recent and include the
-five-hour and seven-day reset times. After that placement, the thread becomes
-**Fixed** because the Claude SDK cannot yet safely continue the full native
-conversation across separate accounts. Model-specific limits do not trigger a
+five-hour and seven-day reset times. Model-specific limits do not trigger a
 change.
+
+A started thread stays on its account until that account is blocked, because
+moving starts Claude's prompt cache over. When a message hits a usage limit,
+T3 Code copies the conversation to another account in the pool that is not at
+its limit, even one past the switch threshold, and sends the message again
+there. If every account is at its limit, the thread says when the soonest one
+resets.
+
+T3 Code never signs in, signs out, or changes which login an instance uses. If
+another tool swaps the login in an instance's config directory, the thread picks
+up the new login on its next message.
 
 Authentication commands, `/compact`, approvals, answers, steering, and
 background work never trigger a change. New queued prompts remain eligible when
@@ -78,6 +87,11 @@ limit was reached and the remaining wait when Claude provides a reset time.
 Claude Code holds the turn until that window reopens, so it can keep showing as
 working. Wait for the reset, or stop the turn and continue later. The warning's
 timestamp shows when the displayed wait started.
+
+When Claude rejects a message outright on a usage limit, a thread set to
+**Auto** moves to another account and sends it again (see
+[Choose an account automatically](#choose-an-account-automatically)). A
+**Fixed** thread keeps the error; send the message again after the reset.
 
 ## Skills
 

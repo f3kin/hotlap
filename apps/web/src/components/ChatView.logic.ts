@@ -464,6 +464,18 @@ export function resolveProviderRoutingModeAfterSelection(
     : currentMode;
 }
 
+/**
+ * Resolves a thread's account switching mode from the composer's pending choice
+ * (`intent`) and the thread's own mode.
+ */
+export function resolveThreadProviderRoutingMode(input: {
+  readonly intent: ProviderRoutingMode | null | undefined;
+  readonly threadMode: ProviderRoutingMode;
+}): { readonly intent: ProviderRoutingMode | null; readonly mode: ProviderRoutingMode } {
+  const intent = input.intent ?? null;
+  return { intent, mode: intent ?? input.threadMode };
+}
+
 export function shouldClearAcknowledgedProviderRoutingIntent(input: {
   readonly acknowledged: boolean;
   readonly intendedMode: ProviderRoutingMode;
@@ -1292,6 +1304,7 @@ export interface LocalDispatchSnapshot {
   latestTurnStartFailureId: string | null;
 }
 
+/** A turn-start failure, or an account-route failure that ended the send before any turn started. */
 export function latestTurnStartFailureId(
   activeThread: Thread | undefined,
   latestUserMessageId: ChatMessage["id"] | null,
@@ -1299,12 +1312,17 @@ export function latestTurnStartFailureId(
   if (latestUserMessageId === null) return null;
   return (
     activeThread?.activities.findLast((activity) => {
-      if (activity.kind !== "provider.turn.start.failed") return false;
       const payload =
         typeof activity.payload === "object" && activity.payload !== null
-          ? (activity.payload as { readonly requestId?: unknown })
+          ? (activity.payload as {
+              readonly requestId?: unknown;
+              readonly terminalTurnStart?: unknown;
+            })
           : null;
-      return payload?.requestId === latestUserMessageId;
+      const endsTurnStart =
+        activity.kind === "provider.turn.start.failed" ||
+        (activity.kind === "provider.account.route.failed" && payload?.terminalTurnStart === true);
+      return endsTurnStart && payload?.requestId === latestUserMessageId;
     })?.id ?? null
   );
 }

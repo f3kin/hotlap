@@ -7,9 +7,12 @@ import { composerFloatingLayerProps } from "./composerEventScope";
 export function ProviderRoutingModeControl(props: {
   readonly mode: ProviderRoutingMode;
   readonly accountLabel: string;
+  /** Signed-in email for the current account, when the provider reports one. */
+  readonly accountEmail?: string | undefined;
   readonly size: ComposerControlSize;
   readonly disabled?: boolean;
-  readonly autoEnabled: boolean;
+  /** Why Auto cannot be chosen, or null when it can. */
+  readonly autoDisabledReason: string | null;
   readonly onChange: (mode: ProviderRoutingMode) => void;
 }) {
   return (
@@ -22,8 +25,8 @@ export function ProviderRoutingModeControl(props: {
     >
       <ComposerSelectControl
         size={props.size}
-        aria-label={`Account switching: ${props.mode}. Current account: ${props.accountLabel}`}
-        className="max-w-44"
+        aria-label={`Account switching: ${props.mode}. Current account: ${props.accountLabel}${props.accountEmail ? ` (${props.accountEmail})` : ""}`}
+        className="max-w-56"
       >
         <SelectValue>
           <span className="truncate">
@@ -32,20 +35,20 @@ export function ProviderRoutingModeControl(props: {
         </SelectValue>
       </ComposerSelectControl>
       <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-        <SelectItem value="auto" className="min-w-60" disabled={!props.autoEnabled}>
+        <SelectItem value="auto" className="min-w-60" disabled={props.autoDisabledReason !== null}>
           <div className="grid gap-0.5 py-1">
             <span className="font-medium">Auto</span>
             <span className="text-xs text-muted-foreground">
-              {props.autoEnabled
-                ? "Use the next available project account when needed."
-                : "Add at least two project accounts for this provider."}
+              {props.autoDisabledReason ?? "Use the next available project account when needed."}
             </span>
           </div>
         </SelectItem>
         <SelectItem value="fixed" className="min-w-60">
           <div className="grid gap-0.5 py-1">
             <span className="font-medium">Fixed</span>
-            <span className="text-xs text-muted-foreground">Stay on this account.</span>
+            <span className="text-xs text-muted-foreground">
+              {props.accountEmail ? `Stay on ${props.accountEmail}.` : "Stay on this account."}
+            </span>
           </div>
         </SelectItem>
       </SelectPopup>

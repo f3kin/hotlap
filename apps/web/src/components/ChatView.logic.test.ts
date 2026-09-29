@@ -71,6 +71,7 @@ import {
   resolveComposerSelectionAfterProviderRouting,
   resolveProviderRoutingAccountInstanceId,
   resolveProviderRoutingModeAfterSelection,
+  resolveThreadProviderRoutingMode,
   providerAccountRoutingConsentForSubmission,
   resolveNewThreadProviderRoutingMode,
   resolveSendEnvMode,
@@ -89,6 +90,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
+  latestTurnStartFailureId,
   shouldClearAcknowledgedProviderRoutingIntent,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
@@ -1121,6 +1123,36 @@ describe("resolveProviderRoutingModeAfterSelection", () => {
         true,
       ),
     ).toBe("auto");
+  });
+});
+
+describe("resolveThreadProviderRoutingMode", () => {
+  it("keeps the thread's Auto mode and routing consent without a pending choice", () => {
+    const resolved = resolveThreadProviderRoutingMode({ intent: null, threadMode: "auto" });
+
+    expect(resolved).toEqual({ intent: null, mode: "auto" });
+    expect(
+      providerAccountRoutingConsentForSubmission({
+        submissionIntent: "foreground",
+        providerRoutingMode: resolved.mode,
+        supported: true,
+      }),
+    ).toEqual({ allowProviderAccountRouting: true });
+  });
+
+  it("lets a pending composer choice win over the thread's mode", () => {
+    expect(resolveThreadProviderRoutingMode({ intent: "auto", threadMode: "fixed" })).toEqual({
+      intent: "auto",
+      mode: "auto",
+    });
+    expect(resolveThreadProviderRoutingMode({ intent: "fixed", threadMode: "auto" })).toEqual({
+      intent: "fixed",
+      mode: "fixed",
+    });
+    expect(resolveThreadProviderRoutingMode({ intent: undefined, threadMode: "fixed" })).toEqual({
+      intent: null,
+      mode: "fixed",
+    });
   });
 });
 
@@ -2329,6 +2361,38 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
         latestTurnStartFailureId: "turn-start-failure-new",
       }),
     ).toBe(true);
+  });
+});
+
+describe("latestTurnStartFailureId", () => {
+  const routeFailure = (id: string, payload: Record<string, unknown>) => ({
+    id: EventId.make(id),
+    kind: "provider.account.route.failed",
+    tone: "error" as const,
+    summary: "Provider account switch failed",
+    payload: { detail: "No eligible provider account is available.", ...payload },
+    turnId: null,
+    createdAt: now,
+  });
+  const messageId = MessageId.make("message-1");
+
+  it("ends the local send when account routing blocked the message", () => {
+    const thread = makeThread({
+      activities: [
+        routeFailure("route-other-message", { requestId: "message-0", terminalTurnStart: true }),
+        routeFailure("route-blocked", { requestId: messageId, terminalTurnStart: true }),
+      ],
+    });
+
+    expect(latestTurnStartFailureId(thread, messageId)).toBe("route-blocked");
+  });
+
+  it("ignores route failures that still let the message run on the current account", () => {
+    const thread = makeThread({
+      activities: [routeFailure("route-fallback", { requestId: messageId })],
+    });
+
+    expect(latestTurnStartFailureId(thread, messageId)).toBeNull();
   });
 });
 

@@ -358,6 +358,7 @@ describe("OrchestrationEngine", () => {
       hasEventAfter: () => Effect.succeed(false),
       readAggregateRange: () => Stream.die("unused aggregate replay"),
       getAggregateReplayStats: () => Effect.die("unused aggregate replay stats"),
+      findTurnStartRequest: () => Effect.die("unused turn start lookup"),
     };
 
     const projectionSnapshot = {
@@ -1947,6 +1948,7 @@ describe("OrchestrationEngine", () => {
       hasEventAfter: () => Effect.succeed(false),
       readAggregateRange: () => Stream.die("unused aggregate replay"),
       getAggregateReplayStats: () => Effect.die("unused aggregate replay stats"),
+      findTurnStartRequest: () => Effect.die("unused turn start lookup"),
     };
 
     const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -2187,6 +2189,7 @@ describe("OrchestrationEngine", () => {
       hasEventAfter: () => Effect.succeed(false),
       readAggregateRange: () => Stream.die("unused aggregate replay"),
       getAggregateReplayStats: () => Effect.die("unused aggregate replay stats"),
+      findTurnStartRequest: () => Effect.die("unused turn start lookup"),
     };
 
     let shouldFailProjection = true;

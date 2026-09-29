@@ -3,11 +3,14 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   canEnableProviderRoutingAuto,
-  canEnableProviderRoutingAutoForEveryPolicy,
+  providerRoutingAutoBlocker,
+  providerRoutingAutoBlockerForTargets,
+  providerRoutingSettingsStatusBlocker,
   deriveProviderRoutingOptions,
   mergeProviderRoutingOptions,
+  providerRoutingThresholdPatch,
   resolveProviderRoutingDefaultMode,
-  providerRoutingPoolPatch,
+  resolveTargetProviderRoutingPolicyPatch,
   supportsProviderAccountRouting,
   toggleProviderRoutingInstance,
 } from "./ProviderRoutingSettings.logic";
@@ -50,6 +53,19 @@ describe("deriveProviderRoutingOptions", () => {
         displayName: "Work",
       },
     ]);
+  });
+
+  it("carries the signed-in email so pool rows can say which account an instance is", () => {
+    const options = deriveProviderRoutingOptions([
+      [
+        provider("codex_work", "codex", {
+          auth: { status: "authenticated", email: " work@example.com " },
+        }),
+        provider("codex_blank", "codex", { auth: { status: "authenticated", email: "  " } }),
+      ],
+    ]);
+
+    expect(options.map((option) => option.email)).toEqual(["work@example.com", undefined]);
   });
 });
 
@@ -127,6 +143,33 @@ describe("provider routing pool", () => {
     ).toBe(false);
   });
 
+  it("names the reason Auto is unavailable so the settings row can explain it", () => {
+    const codex = ProviderDriverKind.make("codex");
+    const options = [
+      { instanceId: first, driver: codex, displayName: "Work" },
+      { instanceId: second, driver: codex, displayName: "Personal" },
+    ];
+    const selected = { instanceId: first };
+
+    expect(providerRoutingAutoBlocker(options, { [codex]: [first, second] }, null, selected)).toBe(
+      "threshold",
+    );
+    expect(
+      providerRoutingAutoBlocker(options, { [codex]: [first, second] }, 80, {
+        instanceId: ProviderInstanceId.make("codex_other"),
+      }),
+    ).toBe("account-unavailable");
+    expect(providerRoutingAutoBlocker(options, { [codex]: [second] }, 80, selected)).toBe(
+      "account-not-pooled",
+    );
+    expect(providerRoutingAutoBlocker(options, { [codex]: [first] }, 80, selected)).toBe(
+      "pool-too-small",
+    );
+    expect(
+      providerRoutingAutoBlocker(options, { [codex]: [first, second] }, 80, selected),
+    ).toBeNull();
+  });
+
   it("requires the project's selected account to belong to the eligible pool", () => {
     const codex = ProviderDriverKind.make("codex");
     const options = [
@@ -182,70 +225,151 @@ describe("provider routing pool", () => {
       }),
     ).toBe("auto");
   });
+});
 
-  it("enables Auto only when every selected target has a valid pool", () => {
-    const codex = ProviderDriverKind.make("codex");
-    const options = [
-      { instanceId: first, driver: codex, displayName: "Work" },
-      { instanceId: second, driver: codex, displayName: "Personal" },
-    ];
+describe("providerRoutingSettingsStatusBlocker", () => {
+  it("does not ask for a switch-at percentage while the project stays on Fixed", () => {
+    expect(providerRoutingSettingsStatusBlocker("fixed", "threshold")).toBeNull();
+    expect(providerRoutingSettingsStatusBlocker("auto", "threshold")).toBe("threshold");
+    expect(providerRoutingSettingsStatusBlocker("fixed", "pool-too-small")).toBe("pool-too-small");
+  });
+});
 
+describe("per-target routing validation", () => {
+  const codex = ProviderDriverKind.make("codex");
+  const claude = ProviderDriverKind.make("claudeAgent");
+  const work = ProviderInstanceId.make("codex_work");
+  const personal = ProviderInstanceId.make("codex_personal");
+  const pool = {
+    defaultMode: "fixed" as const,
+    usageThresholdPercent: 80,
+    instanceIdsByDriver: { [codex]: [work, personal] },
+  };
+  const defaultModelSelection = { instanceId: work, model: "gpt-5.5" };
+  // Only the server has two usable Codex accounts; the laptop's second one is signed out.
+  const serverTarget = {
+    settings: { providerRoutingPolicy: pool, defaultModelSelection },
+    providers: [provider("codex_work", "codex"), provider("codex_personal", "codex")],
+  };
+  const laptopTarget = {
+    settings: { providerRoutingPolicy: pool, defaultModelSelection },
+    providers: [
+      provider("codex_work", "codex"),
+      provider("codex_personal", "codex", { auth: { status: "unauthenticated" } }),
+    ],
+  };
+
+  it("enables Auto on a target with two usable accounts and keeps Fixed where it would be invalid", () => {
     expect(
-      canEnableProviderRoutingAutoForEveryPolicy(
-        options,
-        [
-          {
-            defaultMode: "fixed",
-            usageThresholdPercent: 80,
-            instanceIdsByDriver: { [codex]: [first, second] },
-          },
-          {
-            defaultMode: "fixed",
-            usageThresholdPercent: 80,
-            instanceIdsByDriver: { [codex]: [first] },
-          },
-        ],
-        { instanceId: first },
-      ),
-    ).toBe(false);
+      resolveTargetProviderRoutingPolicyPatch({ ...serverTarget, patch: { defaultMode: "auto" } }),
+    ).toEqual({ defaultMode: "auto" });
+    expect(
+      resolveTargetProviderRoutingPolicyPatch({ ...laptopTarget, patch: { defaultMode: "auto" } }),
+    ).toEqual({ defaultMode: "fixed" });
+    expect(providerRoutingAutoBlockerForTargets([serverTarget])).toBeNull();
+    // The laptop's signed-out second account is what makes Auto impossible there.
+    expect(providerRoutingAutoBlockerForTargets([serverTarget, laptopTarget])).toBe(
+      "pool-too-small",
+    );
+    expect(providerRoutingAutoBlockerForTargets([])).toBe("account-unavailable");
   });
 
-  it("disables Auto only on targets whose edited pool becomes invalid", () => {
-    const codex = ProviderDriverKind.make("codex");
-    const options = [
-      { instanceId: first, driver: codex, displayName: "Work" },
-      { instanceId: second, driver: codex, displayName: "Personal" },
-    ];
-    const instanceIds = [first];
+  it("judges each target by its own default account", () => {
+    const claudeDefaultTarget = {
+      settings: {
+        providerRoutingPolicy: pool,
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("claude_work"),
+          model: "claude-opus-5",
+        },
+      },
+      providers: [...serverTarget.providers, provider("claude_work", claude)],
+    };
 
     expect(
-      providerRoutingPoolPatch(
-        {
-          defaultMode: "auto",
-          usageThresholdPercent: 80,
-          instanceIdsByDriver: { [codex]: [first, second] },
-        },
-        codex,
-        instanceIds,
-        options,
-        { instanceId: first },
-      ),
-    ).toEqual({
-      defaultMode: "fixed",
-      instanceIdsByDriver: { [codex]: instanceIds },
-    });
+      resolveTargetProviderRoutingPolicyPatch({
+        ...claudeDefaultTarget,
+        patch: { defaultMode: "auto" },
+      }),
+    ).toEqual({ defaultMode: "fixed" });
+    expect(providerRoutingAutoBlockerForTargets([serverTarget, claudeDefaultTarget])).toBe(
+      "account-not-pooled",
+    );
+  });
+
+  it("turns Auto off only on targets whose edit makes it invalid", () => {
+    const autoServer = {
+      ...serverTarget,
+      settings: {
+        ...serverTarget.settings,
+        providerRoutingPolicy: { ...pool, defaultMode: "auto" as const },
+      },
+    };
+
     expect(
-      providerRoutingPoolPatch(
-        {
-          defaultMode: "fixed",
-          usageThresholdPercent: 80,
-          instanceIdsByDriver: { [codex]: [first, second] },
+      resolveTargetProviderRoutingPolicyPatch({
+        ...autoServer,
+        patch: { instanceIdsByDriver: { [codex]: [work] } },
+      }),
+    ).toEqual({ defaultMode: "fixed", instanceIdsByDriver: { [codex]: [work] } });
+    // A default-model edit leaves the policy untouched unless Auto must be corrected.
+    expect(resolveTargetProviderRoutingPolicyPatch({ ...autoServer, patch: {} })).toBeNull();
+    expect(
+      resolveTargetProviderRoutingPolicyPatch({
+        settings: {
+          ...autoServer.settings,
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("claude_work"),
+            model: "claude-opus-5",
+          },
         },
-        codex,
-        instanceIds,
-        options,
-        { instanceId: first },
-      ),
-    ).toEqual({ instanceIdsByDriver: { [codex]: instanceIds } });
+        providers: [...autoServer.providers, provider("claude_work", claude)],
+        patch: {},
+      }),
+    ).toEqual({ defaultMode: "fixed" });
+  });
+});
+
+describe("providerRoutingThresholdPatch", () => {
+  it("keeps Auto while providers are still warming up after a restart", () => {
+    // Right after a restart providers report `warning`, so per-target validation would reject Auto.
+    const warmingProviders = [
+      provider("codex_work", "codex", { status: "warning" }),
+      provider("codex_personal", "codex", { status: "warning" }),
+    ];
+    const settings = {
+      providerRoutingPolicy: {
+        defaultMode: "auto" as const,
+        usageThresholdPercent: 80,
+        instanceIdsByDriver: {
+          [ProviderDriverKind.make("codex")]: [
+            ProviderInstanceId.make("codex_work"),
+            ProviderInstanceId.make("codex_personal"),
+          ],
+        },
+      },
+      defaultModelSelection: {
+        instanceId: ProviderInstanceId.make("codex_work"),
+        model: "gpt-5.5",
+      },
+    };
+    expect(
+      resolveTargetProviderRoutingPolicyPatch({
+        settings,
+        providers: warmingProviders,
+        patch: { defaultMode: "auto" },
+      }),
+    ).toEqual({ defaultMode: "fixed" });
+
+    expect(providerRoutingThresholdPatch(90)).toEqual({ usageThresholdPercent: 90 });
+  });
+
+  it("saves nothing for the keystrokes between valid thresholds", () => {
+    // Emptying the field to retype "90" reports null first; saving that would disable Auto.
+    for (const invalid of [null, 0, 101, 42.5]) {
+      expect(providerRoutingThresholdPatch(invalid)).toBeNull();
+    }
+    expect(providerRoutingThresholdPatch(1)).toEqual({ usageThresholdPercent: 1 });
+    expect(providerRoutingThresholdPatch(100)).toEqual({ usageThresholdPercent: 100 });
   });
 });

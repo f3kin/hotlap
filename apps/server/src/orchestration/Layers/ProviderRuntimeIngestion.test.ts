@@ -4016,6 +4016,40 @@ describe("ProviderRuntimeIngestion", () => {
     expect(activityPayload?.message).toBe("runtime activity exploded");
   });
 
+  it("leaves the usage-limit activity to the account switcher", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-usage-limit"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-usage-limit"),
+      payload: {
+        message: "Claude usage limit reached. Send the message again once the limit resets.",
+        class: "usage_limit",
+      },
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-after-usage-limit"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-usage-limit"),
+      payload: { message: "a later provider error" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-after-usage-limit"),
+    );
+    expect(thread.activities.some((activity) => activity.id === "evt-usage-limit")).toBe(false);
+    // The failed session still carries the error until a resend clears it.
+    expect(thread.session?.lastError).toBe("a later provider error");
+  });
+
   it("keeps the session running when a runtime.warning arrives during an active turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -1158,7 +1158,17 @@ const secondaryAccountInstanceId = ProviderInstanceId.make("codex-secondary-acco
 const primaryAccount = makeFakeCodexAdapter(CODEX_DRIVER);
 const secondaryAccount = makeFakeCodexAdapter(CODEX_DRIVER);
 const accountRegistryBase = makeStaticInstanceRegistry([
-  [primaryAccountInstanceId, primaryAccount.adapter],
+  [
+    primaryAccountInstanceId,
+    {
+      ...primaryAccount.adapter,
+      // Cursors saved before they recorded their home lack it; only this account knows it.
+      completeResumeCursor: (resumeCursor) =>
+        typeof resumeCursor === "object" && resumeCursor !== null && !("home" in resumeCursor)
+          ? { ...resumeCursor, home: "primary-home" }
+          : resumeCursor,
+    },
+  ],
   [secondaryAccountInstanceId, secondaryAccount.adapter],
 ]);
 const accountRegistry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"] = {
@@ -1429,6 +1439,70 @@ mcpHandoff.layer("ProviderServiceLive MCP handoff", (it) => {
           .map((session) => session.providerInstanceId),
         [secondaryAccountInstanceId],
       );
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }),
+  );
+
+  it.effect(
+    "moves a stopped thread's conversation to another account with the same resume state",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId("thread-stopped-account-move");
+        mcpHandoffBindings.delete(threadId);
+
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: primaryAccountInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-stopped-account-move"),
+          runtimeMode: "full-access",
+        });
+        yield* provider.stopSession({ threadId });
+        secondaryAccount.startSession.mockClear();
+
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: secondaryAccountInstanceId,
+          threadId,
+          cwd: fixtureCwd("project-stopped-account-move"),
+          runtimeMode: "full-access",
+        });
+
+        assert.deepEqual(secondaryAccount.startSession.mock.calls[0]?.[0].resumeCursor, {
+          opaque: `resume-${String(threadId)}`,
+          home: "primary-home",
+        });
+        McpProviderSession.clearMcpProviderSession(threadId);
+      }),
+  );
+
+  it.effect("keeps a moved cursor's own resume state when it already has it", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-complete-account-move");
+      mcpHandoffBindings.set(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: primaryAccountInstanceId,
+        status: "stopped",
+        resumeCursor: { opaque: "recorded", home: "earlier-home" },
+      });
+      secondaryAccount.startSession.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: secondaryAccountInstanceId,
+        threadId,
+        cwd: fixtureCwd("project-complete-account-move"),
+        runtimeMode: "full-access",
+      });
+
+      assert.deepEqual(secondaryAccount.startSession.mock.calls[0]?.[0].resumeCursor, {
+        opaque: "recorded",
+        home: "earlier-home",
+      });
+      mcpHandoffBindings.delete(threadId);
       McpProviderSession.clearMcpProviderSession(threadId);
     }),
   );
@@ -3406,6 +3480,160 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       const remaining = yield* provider.listSessions();
       assert.equal(remaining.length, 0);
+    }),
+  );
+
+  it.effect("records a dispatch marker that only outlives an unfinished send", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const getPersistedTurnAdmission = provider.getPersistedTurnAdmission;
+      assert.isDefined(getPersistedTurnAdmission);
+
+      const threadId = asThreadId("thread-dispatch-marker");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const readMarkers = runtimeRepository
+        .getByThreadId({ threadId })
+        .pipe(
+          Effect.map((runtime) =>
+            Option.isSome(runtime)
+              ? (runtime.value.runtimePayload as Record<string, unknown>).dispatchingMessageIds
+              : undefined,
+          ),
+        );
+
+      const failedMessageId = MessageId.make("message-dispatch-failed");
+      const markersDuringDispatch: Array<unknown> = [];
+      routing.codex.sendTurn.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          markersDuringDispatch.push(yield* readMarkers.pipe(Effect.orDie));
+          // A crash here leaves only the marker, so recovery must not resend.
+          assert.deepEqual(
+            yield* getPersistedTurnAdmission({ threadId, messageId: failedMessageId }).pipe(
+              Effect.orDie,
+            ),
+            { turnId: null, active: false },
+          );
+          return yield* new ProviderAdapterRequestError({
+            provider: "codex",
+            method: "turn/start",
+            detail: "rejected",
+          });
+        }),
+      );
+      const failed = yield* provider
+        .sendTurn({ threadId, requestId: failedMessageId, input: "first", attachments: [] })
+        .pipe(Effect.result);
+      assert.equal(failed._tag, "Failure");
+      assert.deepEqual(markersDuringDispatch, [[failedMessageId]]);
+      assert.deepEqual(yield* readMarkers, []);
+      assert.equal(
+        yield* getPersistedTurnAdmission({ threadId, messageId: failedMessageId }),
+        null,
+      );
+
+      const sentMessageId = MessageId.make("message-dispatch-sent");
+      const turn = yield* provider.sendTurn({
+        threadId,
+        requestId: sentMessageId,
+        input: "second",
+        attachments: [],
+      });
+      assert.deepEqual(yield* readMarkers, []);
+      assert.deepEqual(yield* getPersistedTurnAdmission({ threadId, messageId: sentMessageId }), {
+        turnId: turn.turnId,
+        active: true,
+      });
+    }),
+  );
+
+  it.effect("keeps each overlapping send's dispatch marker until that send finishes", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const getPersistedTurnAdmission = provider.getPersistedTurnAdmission;
+      assert.isDefined(getPersistedTurnAdmission);
+
+      const threadId = asThreadId("thread-overlapping-dispatch");
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const holdSend = (outcome: "admit" | "fail", turnId: TurnId) =>
+        Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          routing.codex.sendTurn.mockImplementationOnce((input) =>
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(
+                outcome === "admit"
+                  ? Effect.succeed({ threadId: input.threadId, turnId })
+                  : Effect.fail(
+                      new ProviderAdapterRequestError({
+                        provider: "codex",
+                        method: "turn/start",
+                        detail: "rejected",
+                      }),
+                    ),
+              ),
+            ),
+          );
+          return { entered, release };
+        });
+      const startSend = (
+        messageId: MessageId,
+        held: { readonly entered: Deferred.Deferred<void> },
+      ) =>
+        provider
+          .sendTurn({ threadId, requestId: messageId, input: messageId, attachments: [] })
+          .pipe(
+            Effect.exit,
+            Effect.forkChild,
+            Effect.tap(() => Deferred.await(held.entered)),
+          );
+      const admissionOf = (messageId: MessageId) =>
+        getPersistedTurnAdmission({ threadId, messageId });
+
+      // A is admitted while B is still dispatching.
+      const messageA = MessageId.make("message-overlap-a");
+      const messageB = MessageId.make("message-overlap-b");
+      const heldA = yield* holdSend("admit", TurnId.make("turn-overlap-a"));
+      const sendA = yield* startSend(messageA, heldA);
+      const heldB = yield* holdSend("admit", TurnId.make("turn-overlap-b"));
+      const sendB = yield* startSend(messageB, heldB);
+      assert.deepEqual(yield* admissionOf(messageA), { turnId: null, active: false });
+      assert.deepEqual(yield* admissionOf(messageB), { turnId: null, active: false });
+
+      yield* Deferred.succeed(heldA.release, undefined);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.join(sendA)));
+      assert.deepEqual(yield* admissionOf(messageA), {
+        turnId: TurnId.make("turn-overlap-a"),
+        active: true,
+      });
+      assert.deepEqual(yield* admissionOf(messageB), { turnId: null, active: false });
+
+      // C fails while B is still dispatching.
+      const messageC = MessageId.make("message-overlap-c");
+      const heldC = yield* holdSend("fail", TurnId.make("turn-overlap-c"));
+      const sendC = yield* startSend(messageC, heldC);
+      yield* Deferred.succeed(heldC.release, undefined);
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(sendC)));
+      assert.equal(yield* admissionOf(messageC), null);
+      assert.deepEqual(yield* admissionOf(messageB), { turnId: null, active: false });
+
+      yield* Deferred.succeed(heldB.release, undefined);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.join(sendB)));
+      assert.deepEqual(yield* admissionOf(messageB), {
+        turnId: TurnId.make("turn-overlap-b"),
+        active: true,
+      });
     }),
   );
 

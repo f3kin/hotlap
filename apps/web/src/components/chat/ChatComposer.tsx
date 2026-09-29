@@ -9,9 +9,10 @@ import { filterComposerPullRequestMatches } from "@t3tools/shared/composerPullRe
 import { importPastedComposerText, readPastedComposerContext } from "../composerInlineTokenPaste";
 import { elementContextToPreviewAnnotation } from "../../lib/elementContext";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
+import { providerRoutingAutoBlockerMessage } from "@t3tools/client-runtime/provider-account-routing";
 import {
-  canEnableProviderRoutingAuto,
   deriveProviderRoutingOptions,
+  providerRoutingAutoBlocker,
 } from "../settings/ProviderRoutingSettings.logic";
 import {
   questionAttachmentDraftId,
@@ -1978,14 +1979,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     providerRoutingSupported &&
     (routedAccountEntry?.driverKind === "codex" ||
       routedAccountEntry?.driverKind === "claudeAgent");
-  const providerRoutingAutoEnabled =
-    providerRoutingPolicy !== null &&
-    canEnableProviderRoutingAuto(
-      deriveProviderRoutingOptions([providerStatuses]),
-      providerRoutingPolicy.instanceIdsByDriver,
-      providerRoutingPolicy.usageThresholdPercent,
-      routedAccountEntry,
-    );
+  const providerRoutingAutoDisabledReason = providerRoutingAutoBlockerMessage(
+    providerRoutingPolicy === null
+      ? "not-configured"
+      : providerRoutingAutoBlocker(
+          deriveProviderRoutingOptions([providerStatuses]),
+          providerRoutingPolicy.instanceIdsByDriver,
+          providerRoutingPolicy.usageThresholdPercent,
+          routedAccountEntry,
+        ),
+  );
   const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
   const selectedProviderSkills = selectedProviderStatus
     ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
@@ -5162,7 +5165,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           <ProviderRoutingModeControl
             mode={providerRoutingMode}
             accountLabel={routedAccountEntry.displayName}
-            autoEnabled={providerRoutingAutoEnabled}
+            accountEmail={routedAccountEntry.snapshot?.auth.email?.trim() || undefined}
+            autoDisabledReason={providerRoutingAutoDisabledReason}
             size={composerControlsInStrip ? "xs" : "sm"}
             disabled={providerCatalogPending}
             onChange={onProviderRoutingModeChange}

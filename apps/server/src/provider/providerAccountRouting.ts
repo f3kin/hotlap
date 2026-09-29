@@ -29,7 +29,7 @@ export interface ProviderAccountRoutingProvider {
   readonly enabled: boolean;
   readonly installed: boolean;
   readonly status: string;
-  readonly auth: { readonly status: string };
+  readonly auth: { readonly status: string; readonly email?: string | undefined };
   readonly availability?: string | undefined;
   readonly continuation?: { readonly groupKey: string } | undefined;
   readonly models: ReadonlyArray<ProviderAccountRoutingModel>;
@@ -55,6 +55,8 @@ export interface ProviderAccountRoutingInput {
   readonly providers: ReadonlyArray<ProviderAccountRoutingProvider>;
   readonly nowMs: number;
   readonly maxUsageAgeMs: number;
+  /** Accounts that just rejected this message with a usage limit, whatever their stored usage says. */
+  readonly limitedInstanceIds?: ReadonlyArray<string> | undefined;
 }
 
 export interface ProviderAccountRoutingDecision {
@@ -181,18 +183,26 @@ export function selectAutomaticProviderAccount(
     (provider) => provider.instanceId === input.modelSelection.instanceId,
   );
   if (!current || (current.driver !== "codex" && current.driver !== "claudeAgent")) return null;
-  if (input.threadHasStarted && current.driver === "claudeAgent") return null;
+  const limited = new Set(input.limitedInstanceIds ?? []);
+  // Once the current account has rejected the message, any account not known to be
+  // exhausted beats failing it: the threshold and stale readings stop mattering.
+  const currentRejected = limited.has(current.instanceId);
 
   const candidates = instanceIds.flatMap((instanceId): ReadonlyArray<EligibleCandidate> => {
     const candidate = input.providers.find((provider) => provider.instanceId === instanceId);
     const candidateWindows = candidate ? freshRelevantWindows(candidate, input) : null;
+    // Claude copies the transcript into the target account, so only Codex needs a shared home.
     const hasCompatibleContinuation =
       !input.threadHasStarted ||
       current.driver !== "codex" ||
       (current.continuation?.groupKey !== undefined &&
         candidate?.continuation?.groupKey === current.continuation.groupKey);
+    const hasRoom = currentRejected
+      ? !candidateWindows?.some((window) => window.usedPercent >= 100)
+      : candidateWindows?.every((window) => window.usedPercent < threshold) === true;
     if (
       candidate &&
+      !limited.has(candidate.instanceId) &&
       candidate.driver === current.driver &&
       candidate.enabled &&
       candidate.installed &&
@@ -201,8 +211,14 @@ export function selectAutomaticProviderAccount(
       candidate.availability !== "unavailable" &&
       hasCompatibleContinuation &&
       hasCompatibleModel(candidate, input.modelSelection) &&
-      candidateWindows?.every((window) => window.usedPercent < threshold) === true
+      hasRoom
     ) {
+      // An account without a fresh reading is tried last.
+      if (candidateWindows === null) {
+        return [
+          { instanceId: candidate.instanceId, weeklyResetMs: Infinity, maxRelevantUsage: 100 },
+        ];
+      }
       const weeklyResetMs = Math.min(
         ...candidateWindows
           .filter((window) => window.kind === "weekly")
@@ -219,7 +235,9 @@ export function selectAutomaticProviderAccount(
     return [];
   });
 
-  const currentUnusable = isProviderAccountConfirmedUnusable(current, input);
+  const currentUnusable = currentRejected || isProviderAccountConfirmedUnusable(current, input);
+  // Moving a started Claude thread costs a cold prompt cache, so it moves only when blocked.
+  if (input.threadHasStarted && !currentUnusable && current.driver === "claudeAgent") return null;
   if (input.threadHasStarted && !currentUnusable) {
     const currentWindows = freshRelevantWindows(current, input);
     if (!currentWindows?.some((window) => window.usedPercent >= threshold)) {
@@ -248,4 +266,49 @@ export function selectAutomaticProviderAccount(
         ? "current-unusable"
         : "usage-threshold",
   };
+}
+
+/**
+ * True when every pool account rejected the message or has a fresh reading at its limit.
+ * An account removed from the providers can never take the message, so it counts as limited.
+ */
+export function isEveryProviderAccountLimited(
+  input: Pick<
+    ProviderAccountRoutingInput,
+    "instanceIds" | "providers" | "limitedInstanceIds" | "nowMs" | "maxUsageAgeMs"
+  >,
+): boolean {
+  const limited = new Set(input.limitedInstanceIds ?? []);
+  return input.instanceIds.every((instanceId) => {
+    if (limited.has(instanceId)) return true;
+    const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
+    return (
+      provider === undefined ||
+      freshRelevantWindows(provider, input)?.some((window) => window.usedPercent >= 100) === true
+    );
+  });
+}
+
+/**
+ * When the first exhausted pool account becomes usable again: each account waits
+ * for every exhausted window it has. Stale usage still counts here, because a
+ * reset time in the future stays true after the reading ages.
+ */
+export function soonestProviderAccountResetMs(input: {
+  readonly instanceIds: ReadonlyArray<string>;
+  readonly providers: ReadonlyArray<ProviderAccountRoutingProvider>;
+  readonly nowMs: number;
+}): number | null {
+  let soonest: number | null = null;
+  for (const instanceId of new Set(input.instanceIds)) {
+    const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
+    const resets = (provider ? relevantWindows(provider) : [])
+      .filter((window) => window.usedPercent >= 100)
+      .map((window) => Date.parse(window.resetsAt ?? ""))
+      .filter((resetsAtMs) => Number.isFinite(resetsAtMs) && resetsAtMs > input.nowMs);
+    if (resets.length === 0) continue;
+    const usableAtMs = Math.max(...resets);
+    soonest = soonest === null ? usableAtMs : Math.min(soonest, usableAtMs);
+  }
+  return soonest;
 }

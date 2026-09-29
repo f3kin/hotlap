@@ -7,6 +7,7 @@ import {
   type ModelSelection,
   type OrchestrationEvent,
   type OrchestrationThreadShell,
+  PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProjectId,
@@ -35,6 +36,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -52,6 +54,7 @@ import { ProviderAuthService } from "../../provider/Services/ProviderAuthService
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { canStopThreadSessionIfIdle } from "../SessionStopPolicy.ts";
@@ -74,10 +77,14 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import {
+  isEveryProviderAccountLimited,
   isProviderAccountConfirmedUnusable,
   selectAutomaticProviderAccount,
+  soonestProviderAccountResetMs,
 } from "../../provider/providerAccountRouting.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
+
+import { formatUsageLimitWait } from "../../provider/providerUsageLimits.ts";
 
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
@@ -138,6 +145,16 @@ const PROVIDER_ACCOUNT_ROUTING_BLOCKED = Symbol("provider-account-routing-blocke
 const MIN_PROVIDER_USAGE_FRESHNESS = Duration.minutes(10);
 const STARTING_SESSION_RECOVERY_TIMEOUT = Duration.seconds(5);
 const TERMINAL_TURN_STATES = new Set(["completed", "error", "interrupted"]);
+
+/** The one message a thread shows when every account in its pool rejected it on a usage limit. */
+function allAccountsLimitedDetail(input: Parameters<typeof soonestProviderAccountResetMs>[0]) {
+  const soonestResetMs = soonestProviderAccountResetMs(input);
+  const soonest =
+    soonestResetMs === null
+      ? ""
+      : ` The soonest resets in ${formatUsageLimitWait(soonestResetMs - input.nowMs)}.`;
+  return `${PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.allAccountsLimited}${soonest}`;
+}
 
 function providerErrorLabel(value: string | undefined): string {
   const normalized = value?.trim();
@@ -230,6 +247,7 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const orchestrationEventStore = yield* OrchestrationEventStore;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const providerAuthService = yield* ProviderAuthService;
@@ -287,6 +305,15 @@ const make = Effect.gen(function* () {
   const pendingTurnReconciliations = new Set<ThreadId>();
   const pendingTurnSends = new Set<string>();
   const admittedPendingTurns = new Set<string>();
+  // Accounts that rejected a message on a usage limit, keyed by `${threadId}:${messageId}`.
+  // Routing skips them for that message whatever their stored usage says.
+  const usageLimitedInstancesByMessage = new Map<string, Set<string>>();
+  // Usage-limited turns per thread, held until ingestion settles the thread. Keyed by turn
+  // so a second send that fails before the first settles cannot drop the first's outcome.
+  const usageLimitedTurns = new Map<
+    ThreadId,
+    Map<TurnId, { readonly instanceId?: string; readonly message: string }>
+  >();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -396,7 +423,8 @@ const make = Effect.gen(function* () {
     if (turnsAfterCompaction.get(threadId) === queued) turnsAfterCompaction.delete(threadId);
   });
 
-  const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
+  /** Typed provider errors carry user-facing text. Others use `unknownDetail`, or the full cause. */
+  const formatFailureDetail = (cause: Cause.Cause<unknown>, unknownDetail?: string): string => {
     const failReason = cause.reasons.find(Cause.isFailReason);
     if (isProviderAdapterRequestError(failReason?.error)) {
       return failReason.error.detail;
@@ -410,7 +438,7 @@ const make = Effect.gen(function* () {
     if (isProviderWorkspaceMissingError(failReason?.error)) {
       return failReason.error.message;
     }
-    return Cause.pretty(cause);
+    return unknownDetail ?? Cause.pretty(cause);
   };
 
   const setThreadSession = (input: {
@@ -938,6 +966,12 @@ const make = Effect.gen(function* () {
       providerHealthRefreshInterval * 2,
     );
     const nowMs = yield* Clock.currentTimeMillis;
+    const limitedInstanceIds = [
+      ...(usageLimitedInstancesByMessage.get(`${input.thread.id}:${input.messageId}`) ?? []),
+    ];
+    const currentUnusable =
+      limitedInstanceIds.includes(currentSelection.instanceId) ||
+      isProviderAccountConfirmedUnusable(currentProvider, { nowMs, maxUsageAgeMs });
     const usageThresholdPercent = resolved.settings.providerRoutingPolicy.usageThresholdPercent;
     const routingConfigured =
       usageThresholdPercent !== null &&
@@ -952,12 +986,12 @@ const make = Effect.gen(function* () {
         threadId: input.thread.id,
         providerRoutingMode: "fixed",
       });
-      if (isProviderAccountConfirmedUnusable(currentProvider, { nowMs, maxUsageAgeMs })) {
+      if (currentUnusable) {
         yield* appendProviderFailureActivity({
           threadId: input.thread.id,
           kind: "provider.account.route.failed",
           summary: "Provider account switch failed",
-          detail: "Automatic switching is not fully configured. The message was not sent.",
+          detail: PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.notConfigured,
           turnId: null,
           createdAt: input.createdAt,
           requestId: input.messageId,
@@ -967,34 +1001,58 @@ const make = Effect.gen(function* () {
       }
       return null;
     }
+    // An imported thread has a durable session to resume before its first turn,
+    // and that session only exists inside the account that recorded it.
+    const threadHasStarted =
+      input.thread.latestTurn !== null ||
+      (yield* providerService.hasPersistedResumeCursor?.(input.thread.id) ?? Effect.succeed(false));
     const decision = selectAutomaticProviderAccount({
       routingMode: "auto",
       instanceIds,
       usageThresholdPercent,
-      threadHasStarted: input.thread.latestTurn !== null,
+      threadHasStarted,
       modelSelection: currentSelection,
       providers,
       nowMs,
       maxUsageAgeMs,
+      limitedInstanceIds,
     });
     if (decision === null) {
-      if (isProviderAccountConfirmedUnusable(currentProvider, { nowMs, maxUsageAgeMs })) {
+      if (currentUnusable) {
+        const everyAccountLimited =
+          limitedInstanceIds.length > 0 &&
+          isEveryProviderAccountLimited({
+            instanceIds,
+            providers,
+            limitedInstanceIds,
+            nowMs,
+            maxUsageAgeMs,
+          });
+        const detail = everyAccountLimited
+          ? allAccountsLimitedDetail({ instanceIds, providers, nowMs })
+          : PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.noEligibleAccount;
         yield* appendProviderFailureActivity({
           threadId: input.thread.id,
           kind: "provider.account.route.failed",
           summary: "Provider account switch failed",
-          detail: "No eligible provider account is available. The message was not sent.",
+          detail,
           turnId: null,
           createdAt: input.createdAt,
           requestId: input.messageId,
           terminalTurnStart: true,
         });
+        if (everyAccountLimited && input.thread.session !== null) {
+          // Replace the provider's "limit reached" banner with the wait for the whole pool.
+          yield* setThreadSession({
+            threadId: input.thread.id,
+            session: { ...input.thread.session, lastError: detail, updatedAt: input.createdAt },
+            createdAt: input.createdAt,
+          });
+        }
         return PROVIDER_ACCOUNT_ROUTING_BLOCKED;
       }
       return null;
     }
-
-    const targetRoutingMode = currentProvider.driver === "claudeAgent" ? "fixed" : "auto";
     let lastStartFailureDetail: string | null = null;
     let targetSelection: ModelSelection | null = null;
     for (const targetInstanceId of decision.targetInstanceIds) {
@@ -1009,7 +1067,7 @@ const make = Effect.gen(function* () {
         Effect.as(true),
         Effect.catchCause((cause) => {
           if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
-          lastStartFailureDetail = formatFailureDetail(cause);
+          lastStartFailureDetail = PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.targetStartFailed;
           return Effect.logWarning("provider account candidate failed to start", {
             threadId: input.thread.id,
             targetInstanceId,
@@ -1024,23 +1082,41 @@ const make = Effect.gen(function* () {
     }
 
     if (targetSelection === null) {
-      const terminalTurnStart = isProviderAccountConfirmedUnusable(currentProvider, {
-        nowMs,
-        maxUsageAgeMs,
-      });
+      const terminalTurnStart = currentUnusable;
+      const routeFailureDetail =
+        lastStartFailureDetail ?? PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.noTargetStarted;
       yield* appendProviderFailureActivity({
         threadId: input.thread.id,
         kind: "provider.account.route.failed",
         summary: "Provider account switch failed",
-        detail: lastStartFailureDetail ?? "No eligible provider account could be started.",
+        detail: routeFailureDetail,
         turnId: null,
         createdAt: input.createdAt,
         requestId: input.messageId,
         ...(terminalTurnStart ? { terminalTurnStart: true as const } : {}),
       });
       if (terminalTurnStart) {
+        // Candidate starts marked the session starting. Nothing sends now, so undo that.
+        yield* setThreadSession({
+          threadId: input.thread.id,
+          session:
+            input.thread.session !== null
+              ? { ...input.thread.session, updatedAt: input.createdAt }
+              : {
+                  threadId: input.thread.id,
+                  status: "error",
+                  providerName: currentProvider.driver,
+                  providerInstanceId: currentSelection.instanceId,
+                  runtimeMode: input.thread.runtimeMode,
+                  activeTurnId: null,
+                  lastError: routeFailureDetail,
+                  updatedAt: input.createdAt,
+                },
+          createdAt: input.createdAt,
+        });
         return PROVIDER_ACCOUNT_ROUTING_BLOCKED;
       }
+      // The send path restarts the current account and settles the session from here.
       return currentSelection;
     }
 
@@ -1055,7 +1131,7 @@ const make = Effect.gen(function* () {
         threadId: input.thread.id,
         previousProviderInstanceId: currentSelection.instanceId,
         modelSelection: targetSelection,
-        providerRoutingMode: targetRoutingMode,
+        providerRoutingMode: "auto",
         activity: {
           id: yield* serverEventId(),
           tone: "info",
@@ -1085,11 +1161,15 @@ const make = Effect.gen(function* () {
         Cause.hasInterruptsOnly(cause)
           ? Effect.failCause(cause)
           : Effect.gen(function* () {
+              yield* Effect.logWarning("provider account route commit failed", {
+                threadId: input.thread.id,
+                cause: Cause.pretty(cause),
+              });
               yield* appendProviderFailureActivity({
                 threadId: input.thread.id,
                 kind: "provider.account.route.failed",
                 summary: "Provider account switch failed",
-                detail: formatFailureDetail(cause),
+                detail: PROVIDER_ACCOUNT_ROUTE_FAILURE_DETAILS.commitFailed,
                 turnId: null,
                 createdAt: input.createdAt,
                 requestId: input.messageId,
@@ -1098,7 +1178,6 @@ const make = Effect.gen(function* () {
                   Effect.logWarning("failed to record provider account switch failure", {
                     threadId: input.thread.id,
                     cause: Cause.pretty(activityCause),
-                    originalCause: Cause.pretty(cause),
                   }),
                 ),
               );
@@ -1118,27 +1197,6 @@ const make = Effect.gen(function* () {
             }),
       ),
     );
-  });
-
-  const fixClaudeRoutingAfterInitialPlacement = Effect.fnUntraced(function* (input: {
-    readonly threadId: ThreadId;
-    readonly modelSelection: ModelSelection;
-  }) {
-    const thread = yield* resolveThreadShell(input.threadId);
-    if (
-      thread?.providerRoutingMode !== "auto" ||
-      thread.latestTurn !== null ||
-      (yield* providerService.getInstanceInfo(input.modelSelection.instanceId)).driverKind !==
-        "claudeAgent"
-    ) {
-      return;
-    }
-    yield* orchestrationEngine.dispatch({
-      type: "thread.meta.update",
-      commandId: yield* serverCommandId("claude-initial-account-placement"),
-      threadId: input.threadId,
-      providerRoutingMode: "fixed",
-    });
   });
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
@@ -1651,11 +1709,11 @@ const make = Effect.gen(function* () {
       );
     }
 
-    const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
+    const handleTurnStartFailure = (cause: Cause.Cause<unknown>, unknownDetail?: string) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.void;
       }
-      const detail = formatFailureDetail(cause);
+      const detail = formatFailureDetail(cause, unknownDetail);
       return setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
@@ -1666,8 +1724,8 @@ const make = Effect.gen(function* () {
       );
     };
 
-    const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
-      handleTurnStartFailure(cause).pipe(
+    const recoverTurnStartFailure = (cause: Cause.Cause<unknown>, unknownDetail?: string) =>
+      handleTurnStartFailure(cause, unknownDetail).pipe(
         Effect.catchCause((recoveryCause) =>
           Effect.logWarning("provider command reactor failed to recover turn start failure", {
             eventType: event.type,
@@ -1884,7 +1942,26 @@ const make = Effect.gen(function* () {
       createdAt: event.payload.createdAt,
       resumed: resumed !== undefined,
       allow: event.payload.allowProviderAccountRouting === true,
-    });
+    }).pipe(
+      // Routing can leave the session starting, so any escaped failure must settle the turn.
+      // Unexpected causes are logged in full and shown to the user as a short detail.
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("provider account routing failed", {
+              threadId: event.payload.threadId,
+              cause: Cause.pretty(cause),
+            }).pipe(
+              Effect.andThen(
+                recoverTurnStartFailure(
+                  cause,
+                  "T3 could not switch provider accounts for this message. Retry the message.",
+                ),
+              ),
+              Effect.as(PROVIDER_ACCOUNT_ROUTING_BLOCKED),
+            ),
+      ),
+    );
     if (routedModelSelection === PROVIDER_ACCOUNT_ROUTING_BLOCKED) {
       return;
     }
@@ -1920,19 +1997,6 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const placedModelSelection =
-      routedModelSelection ?? event.payload.modelSelection ?? thread.modelSelection;
-    const placementPersisted = yield* fixClaudeRoutingAfterInitialPlacement({
-      threadId: event.payload.threadId,
-      modelSelection: placedModelSelection,
-    }).pipe(
-      Effect.as(true),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(false))),
-    );
-    if (!placementPersisted) {
-      return;
-    }
-
     const pendingSendKey = `${event.payload.threadId}:${event.payload.messageId}`;
     if (pendingTurnSends.has(pendingSendKey) || admittedPendingTurns.has(pendingSendKey)) {
       return;
@@ -1958,28 +2022,6 @@ const make = Effect.gen(function* () {
       Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
       Effect.forkScoped,
     );
-  });
-
-  const findPersistedTurnStart = Effect.fn("findPersistedTurnStart")(function* (pending: {
-    readonly threadId: ThreadId;
-    readonly messageId: string;
-  }) {
-    const head = yield* orchestrationEngine.latestSequence;
-    return yield* orchestrationEngine
-      .readThreadEvents({
-        threadId: pending.threadId,
-        fromSequenceExclusive: 0,
-        toSequenceInclusive: head,
-        limit: Number.MAX_SAFE_INTEGER,
-      })
-      .pipe(
-        Stream.filter(
-          (event): event is Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }> =>
-            event.type === "thread.turn-start-requested" &&
-            event.payload.messageId === pending.messageId,
-        ),
-        Stream.runLast,
-      );
   });
 
   const reconcilePendingTurn = Effect.fn("reconcilePendingTurn")(function* (threadId: ThreadId) {
@@ -2009,34 +2051,26 @@ const make = Effect.gen(function* () {
         DateTime.toEpochMillis(DateTime.makeUnsafe(pending.value.requestedAt)),
         DateTime.toEpochMillis(DateTime.makeUnsafe(thread.session.updatedAt)),
       );
-      if (nowMs - recoveryAnchorMs < Duration.toMillis(STARTING_SESSION_RECOVERY_TIMEOUT)) return;
+      const recoveryWaitMs =
+        recoveryAnchorMs + Duration.toMillis(STARTING_SESSION_RECOVERY_TIMEOUT) - nowMs;
+      if (recoveryWaitMs > 0) {
+        // Too early to replay. Check again once the full quiet period has passed.
+        yield* schedulePendingTurnReconciliation(threadId, Duration.millis(recoveryWaitMs));
+        return;
+      }
 
       const persistedAdmission = yield* (
-        providerService.getPersistedTurnAdmission?.(threadId) ?? Effect.succeed(null)
+        providerService.getPersistedTurnAdmission?.({
+          threadId,
+          messageId: pending.value.messageId,
+        }) ?? Effect.succeed(null)
       );
-      if (persistedAdmission?.messageId === pending.value.messageId) {
+      if (persistedAdmission !== null) {
         const liveSessions = yield* providerService.listSessions();
-        const providerStillRunsAdmission = liveSessions.some(
-          (session) =>
-            session.threadId === threadId && session.activeTurnId === persistedAdmission.turnId,
+        const threadHasLiveTurn = liveSessions.some(
+          (session) => session.threadId === threadId && session.activeTurnId != null,
         );
-        if (persistedAdmission.active && !providerStillRunsAdmission) {
-          if (
-            liveSessions.some(
-              (session) => session.threadId === threadId && session.activeTurnId != null,
-            )
-          ) {
-            return;
-          }
-          const cleared = yield* (
-            providerService.clearOrphanedTurnAdmissionIfMatches?.({
-              threadId,
-              messageId: pending.value.messageId,
-              turnId: persistedAdmission.turnId,
-            }) ?? Effect.succeed(false)
-          );
-          if (!cleared) return;
-
+        const settleUnconfirmedDelivery = Effect.fn(function* (detail: string) {
           const failedAt = DateTime.formatIso(yield* DateTime.now);
           const latestThread = yield* resolveThreadShell(threadId);
           if (!latestThread?.session) return;
@@ -2055,18 +2089,51 @@ const make = Effect.gen(function* () {
             threadId,
             kind: "provider.turn.start.failed",
             summary: "Message delivery could not be confirmed",
-            detail:
-              "The provider session ended after accepting this message. It may have been sent, so T3 did not send it again. Retry the message if no response appears.",
+            detail,
             turnId: null,
             createdAt: failedAt,
             requestId: pending.value.messageId,
           });
+        });
+        if (persistedAdmission.turnId === null) {
+          // Dispatch began but was never confirmed. Wait for a live turn, otherwise never resend.
+          if (threadHasLiveTurn) return;
+          // The marker guarded this send only until recovery decided it; a retry
+          // of the same message must not inherit it.
+          yield* (
+            providerService.clearSettledDispatchMarker?.({
+              threadId,
+              messageId: pending.value.messageId,
+            }) ?? Effect.void
+          );
+          yield* settleUnconfirmedDelivery(
+            "The provider session ended before T3 could confirm this message. It may have been sent, so T3 did not send it again. Retry the message if no response appears.",
+          );
+          return;
+        }
+        const admittedTurnId = persistedAdmission.turnId;
+        const providerStillRunsAdmission = liveSessions.some(
+          (session) => session.threadId === threadId && session.activeTurnId === admittedTurnId,
+        );
+        if (persistedAdmission.active && !providerStillRunsAdmission) {
+          if (threadHasLiveTurn) return;
+          const cleared = yield* (
+            providerService.clearOrphanedTurnAdmissionIfMatches?.({
+              threadId,
+              messageId: pending.value.messageId,
+              turnId: admittedTurnId,
+            }) ?? Effect.succeed(false)
+          );
+          if (!cleared) return;
+          yield* settleUnconfirmedDelivery(
+            "The provider session ended after accepting this message. It may have been sent, so T3 did not send it again. Retry the message if no response appears.",
+          );
           return;
         }
         yield* associatePendingTurnAdmission({
           threadId,
           messageId: pending.value.messageId,
-          turnId: persistedAdmission.turnId,
+          turnId: admittedTurnId,
           settled: !persistedAdmission.active && !providerStillRunsAdmission,
         });
         return;
@@ -2109,7 +2176,7 @@ const make = Effect.gen(function* () {
       ) {
         return;
       }
-      const originalEvent = yield* findPersistedTurnStart({
+      const originalEvent = yield* orchestrationEventStore.findTurnStartRequest({
         threadId,
         messageId: pending.value.messageId,
       });
@@ -2162,18 +2229,20 @@ const make = Effect.gen(function* () {
         if (key.startsWith(prefix)) admittedPendingTurns.delete(key);
       }
     });
+  // Annotated because reconciliation reschedules itself through this function.
   const schedulePendingTurnReconciliation = (
     threadId: ThreadId,
-    delay = STARTING_SESSION_RECOVERY_TIMEOUT,
-  ) => {
+    delay: Duration.Duration = STARTING_SESSION_RECOVERY_TIMEOUT,
+  ): Effect.Effect<void, never, Scope.Scope> => {
     if (scheduledPendingTurnReconciliations.has(threadId)) return Effect.void;
     scheduledPendingTurnReconciliations.add(threadId);
+    // Clear the entry before enqueueing so the reconciliation it triggers can reschedule.
     return forkParked(
       Effect.sleep(delay).pipe(
-        Effect.andThen(pendingTurnReconciliationWorker.enqueue(threadId)),
         Effect.ensuring(
           Effect.sync(() => void scheduledPendingTurnReconciliations.delete(threadId)),
         ),
+        Effect.andThen(pendingTurnReconciliationWorker.enqueue(threadId)),
       ),
     );
   };
@@ -2615,6 +2684,177 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
+  type UsageLimitedTurn = {
+    readonly turnId: TurnId;
+    readonly instanceId?: string;
+    readonly message: string;
+  };
+
+  const appendUsageLimitError = Effect.fn("appendUsageLimitError")(function* (
+    threadId: ThreadId,
+    limitedTurn: UsageLimitedTurn,
+  ) {
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: yield* serverCommandId("usage-limit-error"),
+      threadId,
+      activity: {
+        id: yield* serverEventId(),
+        tone: "error",
+        kind: "runtime.error",
+        summary: "Runtime error",
+        payload: { message: limitedTurn.message },
+        turnId: limitedTurn.turnId,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
+
+  /**
+   * Resends a message that failed on a usage limit so routing can move it to another account.
+   * The provider skips the failed attempt's synthetic error on resume, so the transcript is
+   * unchanged. Ingestion leaves usage-limit errors to this step, so every path here records
+   * exactly one outcome: the account switch, the whole pool being limited, or the original error.
+   */
+  const resendAfterUsageLimit = Effect.fn("resendAfterUsageLimit")(function* (
+    thread: OrchestrationThreadShell,
+    limitedTurn: UsageLimitedTurn,
+  ) {
+    const threadId = thread.id;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const instanceId =
+      limitedTurn.instanceId ??
+      thread.session?.providerInstanceId ??
+      thread.modelSelection.instanceId;
+
+    const turn = yield* projectionTurnRepository.getByTurnId({
+      threadId,
+      turnId: limitedTurn.turnId,
+    });
+    const messageId = Option.isSome(turn) ? turn.value.pendingMessageId : null;
+    const messageKey = messageId === null ? null : `${threadId}:${messageId}`;
+    const alreadyLimited = messageKey !== null && usageLimitedInstancesByMessage.get(messageKey);
+    const settings = yield* serverSettingsService.getSettings;
+    const turnStart =
+      messageId === null
+        ? Option.none()
+        : yield* projectionSnapshotQuery.getTurnStartMessage({ threadId, messageId });
+    const request =
+      messageId === null
+        ? Option.none()
+        : yield* orchestrationEventStore.findTurnStartRequest({ threadId, messageId });
+    // Read last, so a message the user sent during the reads above wins over the resend.
+    const pendingTurnStart = yield* (
+      projectionSnapshotQuery.getPendingTurnStartByThreadId?.(threadId) ??
+        Effect.succeed(Option.none())
+    );
+    const canResend =
+      messageId !== null &&
+      messageKey !== null &&
+      thread.providerRoutingMode === "auto" &&
+      resolveProjectSettings(settings, thread.projectId).sources.providerRoutingPolicy ===
+        "project" &&
+      thread.latestTurn?.turnId === limitedTurn.turnId &&
+      Option.isNone(pendingTurnStart) &&
+      // A resend that landed on a limited account again stops here instead of looping.
+      !(alreadyLimited && alreadyLimited.has(instanceId)) &&
+      Option.isSome(turnStart) &&
+      Option.isSome(request) &&
+      // A fork's first send carries the inherited conversation, which a resend cannot rebuild.
+      request.value.payload.providerInput === undefined;
+    if (!canResend) {
+      yield* appendUsageLimitError(threadId, limitedTurn);
+      return;
+    }
+
+    for (const key of usageLimitedInstancesByMessage.keys()) {
+      if (key.startsWith(`${threadId}:`) && key !== messageKey) {
+        usageLimitedInstancesByMessage.delete(key);
+      }
+    }
+    usageLimitedInstancesByMessage.set(
+      messageKey,
+      new Set([...(alreadyLimited || []), instanceId]),
+    );
+    // The failed attempt was admitted once. Forget that, in memory and durably, so
+    // neither the duplicate-send guard nor restart recovery mistakes the resend for it.
+    yield* clearAdmittedPendingTurns(threadId);
+    yield* providerService.clearSettledDispatchMarker?.({ threadId, messageId }) ?? Effect.void;
+    const {
+      messageId: _messageId,
+      modelSelection: _modelSelection,
+      allowProviderAccountRouting: _allowProviderAccountRouting,
+      createdAt: _createdAt,
+      ...payload
+    } = request.value.payload;
+    // Reusing the message id resends without a second user bubble.
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.start",
+      commandId: yield* serverCommandId("usage-limit-resend"),
+      ...payload,
+      modelSelection: thread.modelSelection,
+      allowProviderAccountRouting: true,
+      message: {
+        messageId,
+        role: "user",
+        text: turnStart.value.message.text,
+        attachments: turnStart.value.message.attachments ?? [],
+      },
+      createdAt,
+    });
+  });
+
+  /** Records one outcome for each usage-limited turn of a thread once ingestion settles it. */
+  const settleUsageLimitedTurns = Effect.fn("settleUsageLimitedTurns")(function* (
+    threadId: ThreadId,
+  ) {
+    const limitedTurns = usageLimitedTurns.get(threadId);
+    if (limitedTurns === undefined) return;
+    const thread = yield* resolveThreadShell(threadId);
+    if (!thread) {
+      usageLimitedTurns.delete(threadId);
+      return;
+    }
+    // Ingestion has not settled the failed turn yet. Its next session change checks again.
+    if (
+      thread.session?.status === "running" ||
+      thread.session?.status === "starting" ||
+      thread.session?.activeTurnId != null
+    ) {
+      return;
+    }
+    usageLimitedTurns.delete(threadId);
+    // Only the latest turn can be resent; earlier ones fall back to their error.
+    for (const [turnId, limited] of limitedTurns) {
+      const limitedTurn = { turnId, ...limited };
+      yield* resendAfterUsageLimit(thread, limitedTurn).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("failed to resend message after usage limit", {
+                threadId,
+                cause: Cause.pretty(cause),
+              }).pipe(Effect.andThen(appendUsageLimitError(threadId, limitedTurn))),
+        ),
+      );
+    }
+  });
+
+  const usageLimitWorker = yield* makeDrainableWorker((threadId: ThreadId) =>
+    settleUsageLimitedTurns(threadId).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.interrupt
+          : Effect.logWarning("failed to settle usage-limited turns", {
+              threadId,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+    ),
+  );
+
   const reconcilePendingTurns: ProviderCommandReactorShape["reconcilePendingTurns"] = (threadId) =>
     (threadId !== undefined
       ? pendingTurnReconciliationWorker.enqueue(threadId)
@@ -2662,6 +2902,9 @@ const make = Effect.gen(function* () {
       ) {
         yield* worker.enqueue(event);
       }
+      if (event.type === "thread.session-set" && usageLimitedTurns.has(event.payload.threadId)) {
+        yield* usageLimitWorker.enqueue(event.payload.threadId);
+      }
       if (event.type === "thread.turn-start-requested") {
         yield* schedulePendingTurnReconciliation(event.payload.threadId);
       } else if (
@@ -2678,6 +2921,21 @@ const make = Effect.gen(function* () {
     yield* forkParked(Stream.runForEach(domainEvents, processEvent));
     yield* forkParked(
       Stream.runForEach(providerService.streamEvents, (event) => {
+        if (
+          event.type === "runtime.error" &&
+          event.payload.class === "usage_limit" &&
+          event.turnId !== undefined
+        ) {
+          const limitedTurns = usageLimitedTurns.get(event.threadId) ?? new Map();
+          limitedTurns.set(event.turnId, {
+            ...(event.providerInstanceId !== undefined
+              ? { instanceId: event.providerInstanceId }
+              : {}),
+            message: event.payload.message,
+          });
+          usageLimitedTurns.set(event.threadId, limitedTurns);
+          return usageLimitWorker.enqueue(event.threadId);
+        }
         const reconcile =
           event.type === "session.started" ||
           event.type === "session.state.changed" ||
@@ -2747,6 +3005,7 @@ const make = Effect.gen(function* () {
       yield* worker.drain;
       yield* pendingTurnReconciliationWorker.drain;
       yield* threadTitleRegenerationWorker.drain;
+      yield* usageLimitWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;
 });

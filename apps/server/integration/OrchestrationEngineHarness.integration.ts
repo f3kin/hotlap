@@ -314,6 +314,7 @@ export const makeOrchestrationIntegrationHarness = (
       orchestrationLayer.pipe(Layer.provide(projectionSnapshotQueryLayer)),
       ProjectionPendingApprovalRepositoryLive,
       ProjectionTurnRepositoryLive,
+      OrchestrationEventStoreLive,
       checkpointStoreLayer,
       providerLayer,
       RuntimeReceiptBusTest,
