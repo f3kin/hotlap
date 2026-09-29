@@ -2269,7 +2269,7 @@ const make = Effect.gen(function* () {
           messageId: pending.value.messageId,
         }) ?? Effect.succeed(null)
       );
-      if (persistedAdmission?.messageId === pending.value.messageId) {
+      if (persistedAdmission !== null) {
         // The provider already has this turn, transcript included; a marker
         // restored at startup must not import it again on the next send.
         threadsAwaitingHistoryImport.delete(threadId);
