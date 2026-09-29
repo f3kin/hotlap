@@ -234,6 +234,8 @@ const remapClaudeForkTurnBoundaries = (
 };
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
+/** Sent in place of a usage-limited message that the resumed history already holds. */
+const LIMITED_PROMPT_RESEND = "Continue where you left off.";
 type ClaudeTextStreamKind = Extract<
   RuntimeContentStreamKind,
   "assistant_text" | "reasoning_text" | "reasoning_summary_text"
@@ -266,11 +268,15 @@ interface ClaudeResumeState {
   readonly resumeSessionAt?: string;
   readonly turnCount?: number;
   readonly turnStartMessageIds?: ReadonlyArray<string | null>;
+  /** The message whose turn last hit the usage limit. Its prompt is already in the history. */
+  readonly limitedRequestId?: string;
 }
 
 interface ClaudeTurnState {
   readonly turnId: TurnId;
   readonly startedAt: string;
+  /** The orchestration message that started this turn. */
+  readonly requestId?: string;
   /**
    * True for turns auto-started by assistant output arriving without an
    * active turn (background agent/subagent responses between user prompts).
@@ -463,6 +469,8 @@ interface ClaudeSessionContext {
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
+  /** See ClaudeResumeState.limitedRequestId. Cleared by the next send. */
+  limitedRequestId: string | undefined;
   lastThreadStartedId: string | undefined;
   /** Limits already announced for the running turn, keyed `window:resetsAt`. */
   announcedUsageLimits: { turnId: string; keys: Set<string> } | undefined;
@@ -989,6 +997,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     resumeSessionAt?: unknown;
     turnCount?: unknown;
     turnStartMessageIds?: unknown;
+    limitedRequestId?: unknown;
   };
 
   const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
@@ -1012,6 +1021,8 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     cursor.turnStartMessageIds.every((id: unknown) => id === null || typeof id === "string")
       ? (cursor.turnStartMessageIds as Array<string | null>)
       : undefined;
+  const limitedRequestId =
+    typeof cursor.limitedRequestId === "string" ? cursor.limitedRequestId : undefined;
 
   return {
     ...(threadId ? { threadId } : {}),
@@ -1019,6 +1030,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     ...(configDir ? { configDir } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
     ...(turnStartMessageIds ? { turnStartMessageIds } : {}),
+    ...(limitedRequestId ? { limitedRequestId } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
@@ -2215,6 +2227,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
       turnCount: context.turnStartMessageIds.length,
       turnStartMessageIds: [...context.turnStartMessageIds],
+      ...(context.limitedRequestId ? { limitedRequestId: context.limitedRequestId } : {}),
     };
 
     context.session = {
@@ -3487,8 +3500,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.turnState.latestAssistantUsage = message.message.usage;
         context.turnState.compactedSinceLatestAssistantUsage = false;
       }
-      yield* backfillThinkingFromSnapshot(context, message);
-      yield* backfillAssistantTextBlocksFromSnapshot(context, message);
+      // The CLI's own "API Error: Request rejected (429)" reply repeats the usage-limit
+      // error the turn already reports, and reads as broken after an account switch.
+      if (message.error !== "rate_limit") {
+        yield* backfillThinkingFromSnapshot(context, message);
+        yield* backfillAssistantTextBlocksFromSnapshot(context, message);
+      }
     }
 
     context.lastAssistantUuid = message.uuid;
@@ -3514,6 +3531,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ? "Claude usage limit reached. Send the message again once the limit resets."
         : undefined);
     const { status, errorMessage } = resultOutcome(message, failureHint);
+    // Only Claude's own limit reply puts the failed prompt in the history a resume reads.
+    if (turn !== undefined && turn.synthetic !== true) {
+      context.limitedRequestId =
+        usageLimited && turn.latestAssistantRateLimited ? turn.requestId : undefined;
+    }
 
     if (status === "failed") {
       yield* emitRuntimeError(
@@ -5091,6 +5113,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(resumeState?.turnStartMessageIds
             ? { turnStartMessageIds: resumeState.turnStartMessageIds }
             : {}),
+          ...(resumeState?.limitedRequestId
+            ? { limitedRequestId: resumeState.limitedRequestId }
+            : {}),
         },
         createdAt: startedAt,
         updatedAt: startedAt,
@@ -5124,6 +5149,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
+        limitedRequestId: resumeState?.limitedRequestId,
         lastThreadStartedId: undefined,
         announcedUsageLimits: undefined,
         interruptedTurnSettled: undefined,
@@ -5316,6 +5342,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const turnState: ClaudeTurnState = {
         turnId,
         startedAt: yield* nowIso,
+        ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
         assistantTextBlocks: new Map(),
         assistantTextBlockOrder: [],
         capturedProposedPlanKeys: new Set(),
@@ -5365,7 +5392,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
-    const message = yield* buildUserMessageEffect(input, {
+    // Account switching resends the message that hit the limit. The history already holds
+    // it, attachments included, so a short prompt continues it instead of repeating it.
+    const resendsLimitedPrompt =
+      steeringTurnState === null &&
+      input.requestId !== undefined &&
+      input.requestId === context.limitedRequestId;
+    context.limitedRequestId = undefined;
+    const promptInput = resendsLimitedPrompt
+      ? { ...input, input: LIMITED_PROMPT_RESEND, attachments: [] }
+      : input;
+    const message = yield* buildUserMessageEffect(promptInput, {
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,

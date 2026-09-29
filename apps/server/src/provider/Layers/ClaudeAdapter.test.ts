@@ -16,6 +16,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  MessageId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -2694,6 +2695,157 @@ describe("ClaudeAdapterLive", () => {
       );
       assert.equal(completedTurn(events).state, "failed");
       assert.equal(completedTurn(events).errorMessage, expected);
+      // The CLI's limit reply repeats the error, so only later parent replies show as text.
+      assert.equal(
+        events.filter((event) => event.type === "content.delta").length,
+        messages.filter(
+          (message) => message.error !== "rate_limit" && message.parent_tool_use_id === null,
+        ).length,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect.each([
+    {
+      name: "account switching resends the limited message",
+      requestId: "message-limited",
+      input: "hello",
+      expected: "Continue where you left off.",
+    },
+    {
+      name: "the user sends a new message",
+      requestId: "message-next",
+      input: "hello again",
+      expected: "hello again",
+    },
+  ])("sends only what the resumed history lacks when $name", ({ requestId, input, expected }) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        requestId: MessageId.make("message-limited"),
+        input: "hello",
+        attachments: [],
+      });
+      harness.query.emit(rateLimitAssistant as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+      yield* Fiber.join(eventsFiber);
+
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        requestId: MessageId.make(requestId),
+        input,
+        attachments: [],
+      });
+      const prompts = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      assert.deepEqual(prompts[1]?.message.content, [{ type: "text", text: expected }]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps the limited message in the cursor another account resumes from", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        requestId: MessageId.make("message-limited"),
+        input: "hello",
+        attachments: [],
+      });
+      harness.query.emit(rateLimitAssistant as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+      yield* Fiber.join(eventsFiber);
+
+      const [limited] = yield* adapter.listSessions();
+      assert.deepInclude(limited?.resumeCursor, { limitedRequestId: "message-limited" });
+      const resumed = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor: limited?.resumeCursor,
+      });
+      assert.deepInclude(resumed.resumeCursor, { limitedRequestId: "message-limited" });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("resends a message in full when the limit left no reply in the history", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        requestId: MessageId.make("message-limited"),
+        input: "hello",
+        attachments: [],
+      });
+      const nowMs = yield* Clock.currentTimeMillis;
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          resetsAt: Math.floor(nowMs / 1000) + 60 * 60,
+        },
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected",
+      } as unknown as SDKMessage);
+      harness.query.emit(rateLimitResult as unknown as SDKMessage);
+      yield* Fiber.join(eventsFiber);
+
+      const [limited] = yield* adapter.listSessions();
+      assert.notProperty(limited?.resumeCursor, "limitedRequestId");
+      yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        requestId: MessageId.make("message-limited"),
+        input: "hello",
+        attachments: [],
+      });
+      const prompts = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      assert.deepEqual(prompts[1]?.message.content, [{ type: "text", text: "hello" }]);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
