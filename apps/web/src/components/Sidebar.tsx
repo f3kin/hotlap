@@ -418,7 +418,8 @@ function SidebarThreadTooltip({
               </div>
             </div>
           ) : null}
-          {thread.session?.lastError ? (
+          {/* A usage-limit wait keeps the limit error on the session; the row says Waiting. */}
+          {thread.session?.lastError && thread.usageLimitWaiting !== true ? (
             <div className="flex min-w-0 items-center gap-2 text-destructive-foreground">
               <CircleAlertIcon className="size-3 shrink-0 stroke-current" />
               <div className="min-w-0 truncate">Error occurred</div>
