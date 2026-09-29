@@ -143,7 +143,7 @@ describe("ThreadPullRequestBadgeControl", () => {
       expect(link.join(" ")).toContain("text-xs");
       expect(wrapper).toContain(tone);
       expect(wrapper).not.toMatch(/(hover|focus[a-z-]*):/);
-      expect(html).toMatch(/<svg[^>]*>.*<\/svg>#?370<\/span>/);
+      expect(html).toMatch(/<svg[^>]*>.*<\/svg><span>370<\/span>/);
     },
   );
 });
