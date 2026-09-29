@@ -21,6 +21,7 @@ const LEGACY_PERSISTED_STATE_KEYS = [
 
 export interface PersistedUiState {
   projectExpandedById?: Record<string, boolean>;
+  masterWorkspaceExpandedById?: Record<string, boolean>;
   projectOrder?: string[];
   threadLastVisitedAtById?: Record<string, string>;
   collapsedProjectCwds?: string[];
@@ -35,6 +36,9 @@ export interface PersistedUiState {
 
 export interface UiProjectState {
   projectExpandedById: Record<string, boolean>;
+  // The Master workspace's other collapsible groups (a Master's Cards, the
+  // Snoozed and Settled shelves), keyed like its projects' entries above.
+  masterWorkspaceExpandedById: Record<string, boolean>;
   projectOrder: string[];
   // Logical project key the sidebar list is scoped to, or null for "all
   // projects". Lives here so routes that unmount the sidebar (Settings)
@@ -60,6 +64,7 @@ export interface UiState
 
 const initialState: UiState = {
   projectExpandedById: {},
+  masterWorkspaceExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKey: null,
   threadLastVisitedAtById: {},
@@ -147,6 +152,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
 
   return {
     projectExpandedById,
+    masterWorkspaceExpandedById: sanitizeBooleanRecord(parsed.masterWorkspaceExpandedById),
     projectOrder,
     threadLastVisitedAtById: sanitizeTimestampRecord(parsed.threadLastVisitedAtById),
     threadChangedFilesExpandedById:
@@ -225,6 +231,7 @@ export function persistState(state: UiState): void {
       PERSISTED_STATE_KEY,
       JSON.stringify({
         projectExpandedById,
+        masterWorkspaceExpandedById: state.masterWorkspaceExpandedById,
         projectOrder: state.projectOrder,
         threadLastVisitedAtById: state.threadLastVisitedAtById,
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
@@ -346,6 +353,27 @@ function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMetho
     : { ...state, pullRequestMergeMethod: method };
 }
 
+/**
+ * The keys a sidebar project's expansion is stored under, most specific
+ * first: its grouped (logical) key, each member's physical key, and each
+ * member's legacy cwd key. resolveProjectExpanded reads the first one set;
+ * setProjectExpanded writes them all, so every sidebar resolves the same
+ * choice however it keys the project.
+ */
+export function projectExpansionPreferenceKeys(project: {
+  readonly projectKey: string;
+  readonly memberProjects: ReadonlyArray<{
+    readonly physicalProjectKey: string;
+    readonly workspaceRoot: string;
+  }>;
+}): string[] {
+  return [
+    project.projectKey,
+    ...project.memberProjects.map((member) => member.physicalProjectKey),
+    ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
+  ];
+}
+
 export function resolveProjectExpanded(
   projectExpandedById: Readonly<Record<string, boolean>>,
   preferenceKeys: readonly string[],
@@ -377,6 +405,22 @@ export function setProjectExpanded(
     ...state,
     projectExpandedById,
   };
+}
+
+export function setMasterWorkspaceExpanded(
+  state: UiState,
+  keys: readonly string[],
+  expanded: boolean,
+): UiState {
+  const changed = keys.filter((key) => state.masterWorkspaceExpandedById[key] !== expanded);
+  if (changed.length === 0) {
+    return state;
+  }
+  const masterWorkspaceExpandedById = { ...state.masterWorkspaceExpandedById };
+  for (const key of changed) {
+    masterWorkspaceExpandedById[key] = expanded;
+  }
+  return { ...state, masterWorkspaceExpandedById };
 }
 
 export function reorderProjects(
@@ -431,6 +475,7 @@ interface UiStateStore extends UiState {
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
+  setMasterWorkspaceExpanded: (keys: readonly string[], expanded: boolean) => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
     draggedProjectIds: readonly string[],
@@ -453,6 +498,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
+  setMasterWorkspaceExpanded: (keys, expanded) =>
+    set((state) => setMasterWorkspaceExpanded(state, keys, expanded)),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
     set((state) =>
       reorderProjects(state, currentProjectOrder, draggedProjectIds, targetProjectIds),
