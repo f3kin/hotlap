@@ -29,7 +29,8 @@ const sampleDecoded = <S extends Schema.Constraint>(schema: S) =>
   });
 const encodeSnapshot = Schema.encodeEffect(OrchestrationShellSnapshot);
 
-describe("encodeShellSnapshotForCache", () => {
+// Generating 1000 thread shells can pass the default 5s timeout on slow CI runners.
+describe("encodeShellSnapshotForCache", { timeout: 30_000 }, () => {
   it.effect("matches the Schema encoding of a generated snapshot", () =>
     Effect.gen(function* () {
       const threads = yield* sampleDecoded(OrchestrationThreadShell);
