@@ -394,6 +394,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "auto-resume-after-usage-limit",
+    title: "Auto-resume after usage limits",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["claude usage limit reset rate limited retry continue overnight automatically"],
+  },
+  {
     id: "background-activity",
     title: "Background activity",
     to: "/settings/general",

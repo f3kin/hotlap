@@ -66,6 +66,8 @@ const STATUS_LABEL_BY_STATUS: Partial<
   approval: { label: "Approval", className: "text-warning-foreground" },
   input: { label: "Input", className: "text-adaptive-indigo-600-300" },
   working: { label: "Working", className: "text-adaptive-sky-600-400" },
+  // Auto-resume after a usage limit: calm, since there is nothing to act on.
+  waiting: { label: "Waiting", className: "text-foreground" },
   failed: { label: "Failed", className: "text-danger-foreground" },
   draft: { label: "Draft", className: "text-warning-foreground" },
 };

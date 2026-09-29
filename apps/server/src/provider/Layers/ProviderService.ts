@@ -88,6 +88,7 @@ import {
 } from "./ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
+import { readUsageLimitError } from "../providerUsageLimits.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
@@ -1130,6 +1131,58 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
     });
 
+  /** Clears the directory's active turn and saves Claude's new resume boundary. */
+  const settleEndedTurn = (
+    source: {
+      readonly instanceId: ProviderInstanceId;
+      readonly provider: ProviderDriverKind;
+    },
+    event: ProviderRuntimeEvent,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      if (event.turnId !== undefined) {
+        yield* clearActiveTurnIfMatches({
+          threadId: event.threadId,
+          providerInstanceId: source.instanceId,
+          turnId: event.turnId,
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to clear completed provider runtime turn", {
+              threadId: event.threadId,
+              turnId: event.turnId,
+              cause,
+            }),
+          ),
+        );
+      }
+      if (source.provider === "claudeAgent") {
+        // Background Claude turns have no sendTurn response to persist their
+        // new native boundary. Save it before clients can checkpoint the turn.
+        yield* Effect.gen(function* () {
+          const adapter = yield* registry.getByInstance(source.instanceId);
+          const session = (yield* adapter.listSessions()).find(
+            (session) => session.threadId === event.threadId,
+          );
+          if (session?.resumeCursor !== undefined) {
+            const binding = yield* directory.getBinding(session.threadId);
+            if (Option.isNone(binding) || binding.value.providerInstanceId !== source.instanceId) {
+              return;
+            }
+            yield* directory.upsert({
+              threadId: session.threadId,
+              provider: source.provider,
+              providerInstanceId: source.instanceId,
+              resumeCursor: session.resumeCursor,
+            });
+          }
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to persist Claude turn resume state", { cause }),
+          ),
+        );
+      }
+    });
+
   const processRuntimeEvent = (
     source: {
       readonly instanceId: ProviderInstanceId;
@@ -1154,50 +1207,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         canonicalEvent.type === "turn.aborted"
       ) {
         yield* recordTurnCompletedAnalytics(source, canonicalEvent);
-        if (canonicalEvent.turnId !== undefined) {
-          yield* clearActiveTurnIfMatches({
-            threadId: canonicalEvent.threadId,
-            providerInstanceId: source.instanceId,
-            turnId: canonicalEvent.turnId,
-          }).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("failed to clear completed provider runtime turn", {
-                threadId: canonicalEvent.threadId,
-                turnId: canonicalEvent.turnId,
-                cause,
-              }),
-            ),
-          );
-        }
-        if (source.provider === "claudeAgent") {
-          // Background Claude turns have no sendTurn response to persist their
-          // new native boundary. Save it before clients can checkpoint the turn.
-          yield* Effect.gen(function* () {
-            const adapter = yield* registry.getByInstance(source.instanceId);
-            const session = (yield* adapter.listSessions()).find(
-              (session) => session.threadId === canonicalEvent.threadId,
-            );
-            if (session?.resumeCursor !== undefined) {
-              const binding = yield* directory.getBinding(session.threadId);
-              if (
-                Option.isNone(binding) ||
-                binding.value.providerInstanceId !== source.instanceId
-              ) {
-                return;
-              }
-              yield* directory.upsert({
-                threadId: session.threadId,
-                provider: source.provider,
-                providerInstanceId: source.instanceId,
-                resumeCursor: session.resumeCursor,
-              });
-            }
-          }).pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("failed to persist Claude turn resume state", { cause }),
-            ),
-          );
-        }
+        yield* settleEndedTurn(source, canonicalEvent);
+      } else if (readUsageLimitError(canonicalEvent)?.autoResume === true) {
+        // A dropped auto-resume attempt ends its turn without a turn.completed.
+        yield* settleEndedTurn(source, canonicalEvent);
       } else if (canonicalEvent.type === "session.exited") {
         yield* clearTurnAnalyticsSession(source.instanceId, canonicalEvent.threadId);
       }
@@ -1988,17 +2001,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               updateRuntimePayload: (payload) => withDispatchingMessage(payload, requestId, false),
             },
       );
-      yield* analytics.record("provider.turn.sent", {
-        provider: routed.adapter.provider,
-        model: input.modelSelection?.model,
-        interactionMode: input.interactionMode,
-        // Session-start events alone skew runtime mode toward users who toggle
-        // often, since every toggle restarts the session. Recording it per turn
-        // gives a usage-weighted view and lets it cross with interactionMode.
-        runtimeMode: routed.runtimeMode,
-        attachmentCount: attachments.length,
-        hasInput: typeof input.input === "string" && input.input.trim().length > 0,
-      });
+      // A hidden auto-resume attempt is not a message the user sent.
+      if (input.autoResume !== true) {
+        yield* analytics.record("provider.turn.sent", {
+          provider: routed.adapter.provider,
+          model: input.modelSelection?.model,
+          interactionMode: input.interactionMode,
+          // Session-start events alone skew runtime mode toward users who toggle
+          // often, since every toggle restarts the session. Recording it per turn
+          // gives a usage-weighted view and lets it cross with interactionMode.
+          runtimeMode: routed.runtimeMode,
+          attachmentCount: attachments.length,
+          hasInput: typeof input.input === "string" && input.input.trim().length > 0,
+        });
+      }
       return turn;
     }).pipe(
       withMetrics({

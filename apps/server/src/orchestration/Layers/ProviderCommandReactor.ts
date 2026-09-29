@@ -84,7 +84,7 @@ import {
 } from "../../provider/providerAccountRouting.ts";
 import * as TerminalManager from "../../terminal/Manager.ts";
 
-import { formatUsageLimitWait } from "../../provider/providerUsageLimits.ts";
+import { formatUsageLimitWait, readUsageLimitError } from "../../provider/providerUsageLimits.ts";
 
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
@@ -2924,7 +2924,9 @@ const make = Effect.gen(function* () {
         if (
           event.type === "runtime.error" &&
           event.payload.class === "usage_limit" &&
-          event.turnId !== undefined
+          event.turnId !== undefined &&
+          // A hidden auto-resume attempt stays quiet; UsageLimitAutoResumeReactor retries it.
+          readUsageLimitError(event)?.autoResume !== true
         ) {
           const limitedTurns = usageLimitedTurns.get(event.threadId) ?? new Map();
           limitedTurns.set(event.turnId, {

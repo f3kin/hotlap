@@ -30,6 +30,7 @@ import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
+import { UsageLimitWaitingThreads } from "../UsageLimitWaitingThreads.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { encodeThreadDetailPageCursor } from "../threadDetailCursor.ts";
 import { projectThreadDetailSnapshot } from "../ActivityPayloadProjection.ts";
@@ -3893,6 +3894,42 @@ projectionSnapshotLayer("ProjectionSnapshotQuery conversation sources", (it) => 
       });
     }),
   );
+});
+
+it.effect("marks threads waiting out a usage limit in every shell read", () => {
+  const waiting = new Set(["waiting-thread"]);
+  const layer = OrchestrationProjectionSnapshotQueryLive.pipe(
+    Layer.provide(ThreadBackgroundLiveness.layer),
+    Layer.provide(ThreadPlanProgress.layer),
+    Layer.provide(Layer.succeed(UsageLimitWaitingThreads, waiting)),
+    Layer.provide(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+    ),
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const query = yield* ProjectionSnapshotQuery;
+    yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES ('project-1', 'Project', '/repo', '[]', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')`;
+    yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at)
+      VALUES
+        ('waiting-thread', 'project-1', 'Waiting', '{"provider":"claudeAgent","model":"claude-opus-5-5"}', 'full-access', 'default', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z'),
+        ('other-thread', 'project-1', 'Other', '{"provider":"claudeAgent","model":"claude-opus-5-5"}', 'full-access', 'default', '2026-09-09T00:00:00Z', '2026-09-09T00:00:00Z')`;
+    const readWaiting = Effect.gen(function* () {
+      const shells = (yield* query.getShellSnapshot()).threads;
+      const byId = (id: string) => shells.find((thread) => thread.id === id)?.usageLimitWaiting;
+      const individual = Option.getOrThrow(
+        yield* query.getThreadShellById(ThreadId.make("waiting-thread")),
+      );
+      return [byId("waiting-thread"), byId("other-thread"), individual.usageLimitWaiting];
+    });
+    assert.deepStrictEqual(yield* readWaiting, [true, undefined, true]);
+    waiting.delete("waiting-thread");
+    assert.deepStrictEqual(yield* readWaiting, [undefined, undefined, undefined]);
+  }).pipe(Effect.provide(layer));
 });
 
 it.effect("omits foreign-host PRs from legacy snapshots while preserving native links", () => {

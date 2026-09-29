@@ -86,6 +86,9 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  /** Internal usage-limit resume attempt. Claude keeps the turn hidden until it makes
+      progress, so an attempt that hits the limit again never reaches the thread. */
+  autoResume: Schema.optional(Schema.Boolean),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 

@@ -3985,6 +3985,42 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("runtime exploded");
   });
 
+  it("ignores a hidden auto-resume attempt that hit the usage limit again", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-auto-resume-limited"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-auto-resume"),
+      payload: {
+        message: "Claude usage limit reached.",
+        class: "usage_limit",
+        detail: { resetsAt: Date.parse(now) + 3_600_000, autoResume: true },
+      },
+    });
+    // Ingestion is ordered: once this lands, the attempt's error was handled.
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-after-auto-resume"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      payload: { message: "a later provider error" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-after-auto-resume"),
+    );
+    expect(thread.activities.some((activity) => activity.id === "evt-auto-resume-limited")).toBe(
+      false,
+    );
+    expect(thread.session?.activeTurnId ?? null).toBeNull();
+  });
+
   it("records runtime.error activities from the typed payload message", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

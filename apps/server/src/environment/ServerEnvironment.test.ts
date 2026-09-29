@@ -187,6 +187,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         ProviderDriverKind.make("codex"),
       ]);
       expect(second.capabilities.providerAccountRouting).toBe(true);
+      expect(second.capabilities.usageLimitAutoResume).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
     }),
   );

@@ -208,6 +208,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  const supportsAutoResume = targets.every(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.usageLimitAutoResume === true,
+  );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -394,6 +398,22 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       value={uniform("enableAgentBrowserAccess")}
                       disabled={disabledFor("enableAgentBrowserAccess")}
                       onValueChange={(value) => write({ enableAgentBrowserAccess: value })}
+                    />
+                  </SettingsSection>
+                  <SettingsSection title="Usage limits">
+                    <FanoutSwitchRow
+                      icon="timer"
+                      label="Auto-resume"
+                      subtitle={
+                        projectSelected
+                          ? "Environment-wide setting. Select All projects to change it."
+                          : supportsAutoResume
+                            ? "Retry Claude every 5 minutes until a usage limit resets."
+                            : "Update older servers to control auto-resume."
+                      }
+                      value={uniform("autoResumeAfterUsageLimit")}
+                      disabled={disabledFor("autoResumeAfterUsageLimit") || !supportsAutoResume}
+                      onValueChange={(value) => write({ autoResumeAfterUsageLimit: value })}
                     />
                   </SettingsSection>
                 </>

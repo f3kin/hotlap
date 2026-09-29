@@ -3129,6 +3129,52 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.activities.some((activity) => activity.tone === "error")).toBe(false);
   });
 
+  it("leaves a hidden auto-resume attempt that hit the limit to auto-resume", async () => {
+    const { harness, threadId, current, limitMessage } = await hitClaudeUsageLimit({
+      targetSessionUsedPercent: 20,
+      threadProviderRoutingMode: "fixed",
+    });
+    await waitFor(async () =>
+      (await harness.readModel()).threads[0]!.activities.some(
+        (activity) => activity.tone === "error",
+      ),
+    );
+
+    await harness.emitRuntimeEvent({
+      type: "runtime.error",
+      eventId: EventId.make("evt-auto-resume-limited"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: current.instanceId,
+      threadId,
+      turnId: asTurnId("turn-auto-resume"),
+      createdAt: ROUTING_NOW_ISO,
+      payload: { message: limitMessage, class: "usage_limit", detail: { autoResume: true } },
+    });
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-auto-resume-attempt-settled"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "claudeAgent",
+          providerInstanceId: current.instanceId,
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: ROUTING_NOW_ISO,
+        },
+        createdAt: ROUTING_NOW_ISO,
+      }),
+    );
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads[0];
+    expect(thread?.activities.filter((activity) => activity.tone === "error")).toHaveLength(1);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("shows one message with the soonest reset when every account is usage-limited", async () => {
     const { harness } = await hitClaudeUsageLimit({
       targetSessionUsedPercent: 100,

@@ -6,6 +6,7 @@ import {
 } from "../../state/use-composer-drafts";
 import { useWorktreeSetup } from "./use-worktree-setup";
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
+import { findUsageLimitAutoResumeWait } from "@t3tools/client-runtime/usage-limit-auto-resume";
 import { ScreenHeader } from "../../components/ScreenHeader";
 import { ScreenHeaderButton } from "../../components/ScreenHeaderButton";
 import type { ScreenHeaderAction } from "../../components/ScreenHeader.types";
@@ -406,6 +407,7 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, "cancel auto-resume");
   const forkThread = useAtomCommand(threadEnvironment.fork, { reportFailure: false });
   const loadThreadTranscript = useAtomCommand(copyThreadTranscript, { reportFailure: false });
   const forkWaitAbortRef = useRef<AbortController | null>(null);
@@ -948,6 +950,22 @@ function ThreadRouteContent(
     });
   }, [interruptThreadTurn, selectedThread]);
 
+  // Rechecked when activities change or the screen mounts; that is enough to
+  // drop a stale row, since a live server always writes the wait's final row.
+  const autoResumeWait = useMemo(
+    // oxlint-disable-next-line react/purity
+    () => findUsageLimitAutoResumeWait(selectedThreadDetail?.activities ?? [], Date.now()),
+    [selectedThreadDetail?.activities],
+  );
+  // Stopping the thread is what ends a usage-limit wait on the server.
+  const handleCancelAutoResume = useCallback(async () => {
+    if (!selectedThread) return;
+    await stopThreadSession({
+      environmentId: selectedThread.environmentId,
+      input: { threadId: selectedThread.id },
+    });
+  }, [selectedThread, stopThreadSession]);
+
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
       terminalDebugLog("terminal-menu:open-existing", {
@@ -1326,6 +1344,8 @@ function ThreadRouteContent(
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}
           onStopThread={awaitingBootstrapTurn ? handleCancelWorktreeSetup : handleStopThread}
+          autoResumeWait={autoResumeWait}
+          onCancelAutoResume={handleCancelAutoResume}
           forkableAssistantMessageIds={forkableAssistantMessageIds}
           onForkAssistantMessage={
             canForkConversation && !forkPending ? handleForkAssistantMessage : undefined

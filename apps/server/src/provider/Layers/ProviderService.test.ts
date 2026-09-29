@@ -3718,6 +3718,56 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("clears the active turn when a hidden auto-resume attempt is dropped", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+
+      const threadId = asThreadId("thread-auto-resume-dropped");
+      const session = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "Continue where you left off.",
+        attachments: [],
+        autoResume: true,
+      });
+
+      const dropped = yield* provider.streamEvents.pipe(
+        Stream.filter((event) => event.eventId === "evt-auto-resume-dropped"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      routing.codex.emit({
+        type: "runtime.error",
+        eventId: asEventId("evt-auto-resume-dropped"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: session.threadId,
+        turnId: asTurnId(`turn-${String(session.threadId)}`),
+        createdAt: "2026-01-01T00:00:01.000Z",
+        payload: {
+          message: "Claude usage limit reached.",
+          class: "usage_limit",
+          detail: { autoResume: true },
+        },
+      });
+      yield* Fiber.join(dropped);
+
+      const runtime = yield* runtimeRepository.getByThreadId({ threadId: session.threadId });
+      assert.equal(Option.isSome(runtime), true);
+      if (Option.isSome(runtime)) {
+        assert.propertyVal(runtime.value.runtimePayload, "activeTurnId", null);
+      }
+    }),
+  );
+
   it.effect("does not persist running after a concurrent send is interrupted", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
