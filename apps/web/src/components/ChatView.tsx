@@ -4164,7 +4164,13 @@ export default function ChatView(props: ChatViewProps) {
   )
     ? activeProviderStatus
     : null;
-  const hasTimelineTopBanner = Boolean(visibleThreadError) || visibleProviderStatus !== null;
+  // The auto-resume banner already explains a usage-limit wait, so the session's limit
+  // error would only read as broken. A local error, like a rejected send, still shows.
+  const shownThreadError =
+    activeThreadShell?.usageLimitWaiting === true && localServerError == null
+      ? null
+      : visibleThreadError;
+  const hasTimelineTopBanner = Boolean(shownThreadError) || visibleProviderStatus !== null;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
@@ -10439,7 +10445,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenProviderSetup={openProviderSetup}
               />
               <ThreadErrorBanner
-                error={visibleThreadError}
+                error={shownThreadError}
                 onDismiss={() => {
                   setThreadError(activeThread.id, null);
                   dismissThreadErrorBannerForSession(threadErrorBannerKey);

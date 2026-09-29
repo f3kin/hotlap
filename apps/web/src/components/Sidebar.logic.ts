@@ -784,8 +784,9 @@ export function isContextMenuPointerDown(input: {
 }
 
 // ── Sidebar thread status model ─────────────────────────────────────
-// Five visual states, three colors: color is reserved for "act now"
-// (approval), "in motion" (working), and "broken" (failed). Ready is the
+// Seven visual states, three colors: color is reserved for "act now"
+// (approval), "in motion" (working), and "broken" (failed). Waiting (the
+// server auto-resumes after a usage limit) is calm, like monitoring. Ready is the
 // unlabeled resting state — the agent stopped and is waiting on the user,
 // whether it finished, asked a question, or proposed a plan.
 // Unread completion is tracked separately: it describes whether a ready
@@ -795,6 +796,7 @@ export type SidebarThreadStatus =
   | "input"
   | "working"
   | "monitoring"
+  | "waiting"
   | "failed"
   | "ready";
 
@@ -806,7 +808,9 @@ export function shouldRecedeSidebarThread(input: {
   isSelected: boolean;
 }): boolean {
   if (input.isActive || input.isSelected || input.status === "input") return false;
-  if (input.status === "working" || input.status === "monitoring") return true;
+  if (input.status === "working" || input.status === "monitoring" || input.status === "waiting") {
+    return true;
+  }
   if (input.status === "ready" || input.status === "approval") {
     return !input.isUnread && !input.isWoke;
   }
@@ -815,7 +819,11 @@ export function shouldRecedeSidebarThread(input: {
 
 type SidebarThreadStatusInput = Pick<
   SidebarThreadSummary,
-  "hasPendingApprovals" | "hasPendingUserInput" | "session" | "backgroundLiveness"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "session"
+  | "backgroundLiveness"
+  | "usageLimitWaiting"
 >;
 
 export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): SidebarThreadStatus {
@@ -827,6 +835,10 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.session?.status === "running" || thread.session?.status === "starting") {
     return "working";
+  }
+  // The session keeps the limit error while the server waits to auto-resume.
+  if (thread.usageLimitWaiting === true) {
+    return "waiting";
   }
   // A failed session outranks lingering background liveness: the user must
   // see the failure, not a stale Working (review finding).

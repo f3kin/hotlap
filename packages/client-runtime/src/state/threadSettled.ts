@@ -58,6 +58,7 @@ export type ThreadSnoozeShell = Pick<
   | "hasPendingUserInput"
   | "session"
   | "latestTurn"
+  | "usageLimitWaiting"
 >;
 
 /**
@@ -73,9 +74,11 @@ export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean 
   // Only a FRESH failure raises the hand: a thread snoozed while already
   // failed stays snoozed — that snooze was the user saying "I saw it, not
   // now". session.updatedAt stamps the status edge, so an error newer than
-  // the snooze is new information.
+  // the snooze is new information. A usage-limit wait is not: the server
+  // handles it, and its retries must not wake the thread.
   if (
     shell.session?.status === "error" &&
+    shell.usageLimitWaiting !== true &&
     (shell.snoozedAt == null || Date.parse(shell.session.updatedAt) > Date.parse(shell.snoozedAt))
   ) {
     return true;

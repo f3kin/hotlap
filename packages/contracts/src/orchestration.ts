@@ -976,6 +976,12 @@ export const OrchestrationThreadShell = Schema.Struct({
       }),
     ),
   ),
+  /**
+   * The server is waiting out a usage limit to resume the thread. Its session
+   * still reports the limit error, but lists show Waiting, not Failed.
+   * Optional so old servers/clients interop; absent = not waiting.
+   */
+  usageLimitWaiting: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
 

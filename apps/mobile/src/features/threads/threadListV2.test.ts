@@ -143,6 +143,25 @@ describe("resolveThreadListV2Status", () => {
     expect(resolveThreadListV2Status(thread)).toBe("approval");
   });
 
+  it("resolves waiting over the limit error while the server auto-resumes", () => {
+    const thread = makeThread({
+      id: ThreadId.make("t"),
+      title: "t",
+      session: {
+        threadId: ThreadId.make("t"),
+        status: "error",
+        providerName: "Claude",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        runtimeMode: "full-access",
+        activeTurnId: null,
+        lastError: "Claude usage limit reached.",
+        updatedAt: NOW,
+      },
+    });
+    expect(resolveThreadListV2Status(thread)).toBe("failed");
+    expect(resolveThreadListV2Status({ ...thread, usageLimitWaiting: true })).toBe("waiting");
+  });
+
   it("resolves ready for quiescent threads", () => {
     expect(resolveThreadListV2Status(makeThread({ id: ThreadId.make("t"), title: "t" }))).toBe(
       "ready",

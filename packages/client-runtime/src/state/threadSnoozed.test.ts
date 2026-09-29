@@ -111,6 +111,18 @@ describe("effectiveSnoozed", () => {
     ).toBe(false);
   });
 
+  it("stays snoozed while the server waits out a usage limit", () => {
+    expect(
+      effectiveSnoozed(
+        {
+          ...makeShell({ snoozedUntil: FUTURE_WAKE, sessionStatus: "error" }),
+          usageLimitWaiting: true,
+        },
+        { now: NOW },
+      ),
+    ).toBe(true);
+  });
+
   it("stays snoozed when the failure predates the snooze — the user saw it", () => {
     expect(
       effectiveSnoozed(

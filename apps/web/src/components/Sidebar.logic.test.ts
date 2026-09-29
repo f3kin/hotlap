@@ -840,6 +840,25 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("ready");
   });
 
+  it("reports waiting over the limit error while the server auto-resumes", () => {
+    const limited = { ...session, status: "error" as const, lastError: "Usage limit reached." };
+    expect(resolveSidebarThreadStatus({ ...idle, session: limited, usageLimitWaiting: true })).toBe(
+      "waiting",
+    );
+    // An attempt in flight, or a question it raised, still reads as such.
+    expect(resolveSidebarThreadStatus({ ...idle, session, usageLimitWaiting: true })).toBe(
+      "working",
+    );
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        hasPendingApprovals: true,
+        session: limited,
+        usageLimitWaiting: true,
+      }),
+    ).toBe("approval");
+  });
+
   it("defaults to ready with no session", () => {
     expect(resolveSidebarThreadStatus({ ...idle, session: null })).toBe("ready");
   });

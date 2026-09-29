@@ -37,6 +37,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 import * as UsageLimitAutoResumeReactor from "./UsageLimitAutoResumeReactor.ts";
+import { UsageLimitWaitingThreads } from "./UsageLimitWaitingThreads.ts";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -238,6 +239,7 @@ const makeHarness = Effect.fn("makeUsageLimitAutoResumeHarness")(function* (
   const stops = yield* Ref.make<ReadonlyArray<ProviderStopSessionInput>>([]);
   /** Number of upcoming thread reads that fail. */
   const threadReadFailures = yield* Ref.make(0);
+  const waitingIds = new Set<string>();
 
   const serverSettings = ServerSettingsService.of({
     start: Effect.void,
@@ -290,6 +292,7 @@ const makeHarness = Effect.fn("makeUsageLimitAutoResumeHarness")(function* (
     }),
     Layer.succeed(ServerSettingsService, serverSettings),
     Layer.succeed(ServerActivation, Deferred.await(activation)),
+    Layer.succeed(UsageLimitWaitingThreads, waitingIds),
   );
 
   return {
@@ -302,6 +305,7 @@ const makeHarness = Effect.fn("makeUsageLimitAutoResumeHarness")(function* (
     sendFails,
     stops,
     threadReadFailures,
+    waitingIds,
     runtimeEvents,
     domainEvents,
     layer: UsageLimitAutoResumeReactor.layer.pipe(Layer.provide(dependencies)),
@@ -508,11 +512,14 @@ describe("UsageLimitAutoResumeReactor", () => {
     run({}, (harness, reactor) =>
       Effect.gen(function* () {
         yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + HOUR }));
+        // Thread lists show Waiting only while the wait lasts.
+        assert.isTrue(harness.waitingIds.has(THREAD_ID));
         yield* publish(harness, reactor, userMessage);
 
         const cancelled = yield* lastRow(harness);
         assert.strictEqual(cancelled?.summary, "Auto-resume cancelled");
         assert.propertyVal(cancelled?.payload, "state", "stopped");
+        assert.isFalse(harness.waitingIds.has(THREAD_ID));
         yield* advance(harness, reactor, 10 * MINUTE);
         assert.deepStrictEqual(yield* Ref.get(harness.sends), []);
       }),
@@ -660,6 +667,7 @@ describe("UsageLimitAutoResumeReactor", () => {
       Effect.gen(function* () {
         yield* emit(harness, reactor, usageLimitError({ resetsAtMs: START + HOUR }));
         yield* publish(harness, reactor, threadDeleted);
+        assert.isFalse(harness.waitingIds.has(THREAD_ID));
         yield* advance(harness, reactor, 10 * MINUTE);
         assert.strictEqual((yield* rows(harness)).length, 1);
         assert.deepStrictEqual(yield* Ref.get(harness.sends), []);
@@ -1023,6 +1031,7 @@ describe("UsageLimitAutoResumeReactor", () => {
       },
       (harness, reactor) =>
         Effect.gen(function* () {
+          assert.isTrue(harness.waitingIds.has(THREAD_ID));
           yield* advance(harness, reactor, 30_000);
           assert.deepStrictEqual(yield* Ref.get(harness.sends), []);
           yield* advance(harness, reactor, 30_000);
@@ -1033,6 +1042,7 @@ describe("UsageLimitAutoResumeReactor", () => {
           assert.strictEqual(resumed?.id, "usage-limit-auto-resume:limited-thread:1");
           assert.strictEqual(resumed?.createdAt, iso(START - HOUR));
           assert.strictEqual(resumed?.summary, "Auto-resumed after usage limit");
+          assert.isFalse(harness.waitingIds.has(THREAD_ID));
         }),
     ),
   );

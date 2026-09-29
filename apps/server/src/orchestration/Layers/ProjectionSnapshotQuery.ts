@@ -59,6 +59,7 @@ import {
 } from "../../persistence/Errors.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
+import { UsageLimitWaitingThreads } from "../UsageLimitWaitingThreads.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
 import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -573,6 +574,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
+  const usageLimitWaitingThreads = yield* UsageLimitWaitingThreads;
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
@@ -3322,6 +3324,9 @@ pending_approval_requests AS (
                           row.threadId,
                         ),
                         planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
+                        ...(usageLimitWaitingThreads.has(row.threadId)
+                          ? { usageLimitWaiting: true }
+                          : {}),
                       } satisfies OrchestrationThreadShell)
                     : Result.failVoid,
                 ),
@@ -3510,6 +3515,9 @@ pending_approval_requests AS (
                     row.threadId,
                   ),
                   planProgress: threadPlanProgress.getThreadPlanProgress(row.threadId),
+                  ...(usageLimitWaitingThreads.has(row.threadId)
+                    ? { usageLimitWaiting: true }
+                    : {}),
                 })),
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               } satisfies OrchestrationShellSnapshot;
@@ -4067,6 +4075,9 @@ pending_approval_requests AS (
           threadRow.value.threadId,
         ),
         planProgress: threadPlanProgress.getThreadPlanProgress(threadRow.value.threadId),
+        ...(usageLimitWaitingThreads.has(threadRow.value.threadId)
+          ? { usageLimitWaiting: true }
+          : {}),
       } satisfies OrchestrationThreadShell);
     });
 

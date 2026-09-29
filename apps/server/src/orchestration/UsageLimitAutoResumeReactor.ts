@@ -58,6 +58,7 @@ import {
   withLatestReset,
   type AutoResumeCycle,
 } from "./UsageLimitAutoResumePolicy.ts";
+import { UsageLimitWaitingThreads } from "./UsageLimitWaitingThreads.ts";
 
 export class UsageLimitAutoResumeReactor extends Context.Service<
   UsageLimitAutoResumeReactor,
@@ -178,6 +179,16 @@ export const make = Effect.gen(function* () {
   const waitingThreads = new Map<ThreadId, WaitingThread>();
   const pendingLimits = new Map<ThreadId, PendingLimit>();
   const resumedAttempts = new Map<ThreadId, ResumedAttempt>();
+  // Mirrors waitingThreads' keys for thread lists; see UsageLimitWaitingThreads.
+  const waitingIds = yield* UsageLimitWaitingThreads;
+  const setWaiting = (threadId: ThreadId, waiting: WaitingThread) => {
+    waitingThreads.set(threadId, waiting);
+    waitingIds.add(threadId);
+  };
+  const clearWaiting = (threadId: ThreadId) => {
+    waitingThreads.delete(threadId);
+    waitingIds.delete(threadId);
+  };
   let commandCount = 0;
 
   const writeRow = Effect.fn("UsageLimitAutoResumeReactor.writeRow")(function* (
@@ -233,7 +244,7 @@ export const make = Effect.gen(function* () {
     state: Exclude<UsageLimitAutoResumeState, "waiting">,
     summary: string,
   ) => {
-    waitingThreads.delete(threadId);
+    clearWaiting(threadId);
     return writeRow(threadId, waiting, { state, summary, resetAtMs: waiting.cycle.resetAtMs });
   };
 
@@ -312,7 +323,7 @@ export const make = Effect.gen(function* () {
         resetAtMs,
       });
     }
-    waitingThreads.set(threadId, {
+    setWaiting(threadId, {
       ...row,
       cycle,
       attemptStartedAtMs: undefined,
@@ -476,7 +487,7 @@ export const make = Effect.gen(function* () {
           : finish(event.payload.threadId, waiting, "stopped", SUMMARY.cancelled);
       }
       case "thread.deleted":
-        waitingThreads.delete(event.payload.threadId);
+        clearWaiting(event.payload.threadId);
         resumedAttempts.delete(event.payload.threadId);
         return Effect.void;
       default:
@@ -494,7 +505,7 @@ export const make = Effect.gen(function* () {
     if (Option.isNone(read)) return;
     const thread = read.value;
     if (Option.isNone(thread)) {
-      waitingThreads.delete(threadId);
+      clearWaiting(threadId);
       return;
     }
     // Backs up the cancel event, which may still be queued or was lost to a restart.
@@ -626,7 +637,7 @@ export const make = Effect.gen(function* () {
       ) {
         continue;
       }
-      waitingThreads.set(threadId, {
+      setWaiting(threadId, {
         activityId: row.id,
         createdAt: row.createdAt,
         instanceId: payload.value.instanceId,
