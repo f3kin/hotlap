@@ -292,7 +292,11 @@ export function collectLimitNotices(presentations: LimitPresentations): readonly
   for (const presentation of presentations.values()) {
     const environmentLabel = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
-      if (provider.usageLimits?.unavailable?.reason === "unsupported") continue;
+      if (
+        provider.usageLimits?.unavailable?.reason === "unsupported" &&
+        provider.usageLimits.externalUsage
+      )
+        continue;
       const notice = provider.usageLimits ? limitsNotice(provider.usageLimits) : null;
       const name = provider.displayName?.trim() || String(provider.driver);
       if (notice) notices.push(`${label(environmentLabel, name)}: ${notice}`);
@@ -512,7 +516,7 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
 
 export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
   if (limits.unavailable?.reason === "unsupported") {
-    return limits.unavailable.message ?? "This account has no subscription limits.";
+    return limits.unavailable.message ?? "Usage unavailable for this account's login.";
   }
   if (limits.unavailable?.reason === "probeFailed") {
     return limits.unavailable.message ?? "Could not read limits.";

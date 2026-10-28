@@ -1239,6 +1239,32 @@ describe("sameUsageLimitCommandCoverage", () => {
 });
 
 describe("external usage settings", () => {
+  it("keeps a signed-in Claude Team account visible when its token cannot report limits", () => {
+    const team = provider({
+      instanceId: ProviderInstanceId.make("claude_team"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      displayName: "Claude · Team",
+      usageLimits: {
+        checkedAt: "2026-09-03T11:00:00.000Z",
+        windows: [],
+        unavailable: { reason: "unsupported" },
+      },
+    });
+    const presentations = new Map([
+      [
+        EnvironmentId.make("a"),
+        {
+          entry: { target: { label: "A" } },
+          serverConfig: { providers: [team] },
+        },
+      ],
+    ]);
+    expect(collectLimitAccounts(presentations)).toEqual([]);
+    expect(collectLimitNotices(presentations)).toEqual([
+      "Claude · Team: Usage unavailable for this account's login.",
+    ]);
+  });
+
   it("deduplicates destinations across accounts and environments without inventing quota pools", () => {
     const managed = provider({
       usageLimits: {
