@@ -57,6 +57,8 @@ try {
   if (NodeFS.existsSync("/scratch/userdata")) throw new Error("destination_exists");
   NodeFS.mkdirSync("/scratch/userdata", { recursive: true, mode: 0o700 });
   const input = new NodeSqlite.DatabaseSync("/input/state.sqlite", { readOnly: true });
+  // Pin the read snapshot: without it Node backup can restart each WAL-mode step.
+  input.exec("BEGIN");
   const baseline = captureLegacyBaseline(input);
   try {
     await NodeSqlite.backup(input, "/scratch/userdata/state.sqlite");
