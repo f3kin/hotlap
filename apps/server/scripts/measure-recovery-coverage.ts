@@ -21,7 +21,7 @@ const result = runCoverageFromFiles({
 NodeFS.writeFileSync(
   receiptPath,
   `${JSON.stringify(
-    { kind: "coverage-receipt/1", startedAt, finishedAt: new Date().toISOString(), ...result },
+    { kind: "coverage-receipt/2", startedAt, finishedAt: new Date().toISOString(), ...result },
     null,
     2,
   )}\n`,

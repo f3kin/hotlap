@@ -116,7 +116,15 @@ export function measureRecoveryCoverage(input: CoverageInput) {
         0,
       ),
     };
-    const row = { sourceThreadId: thread.thread_id, source };
+    const lifecycle = lifecycles.get(thread.thread_id);
+    // Per-thread lifecycle lets receipts recount deleted/archived instead of trusting totals.
+    const row = {
+      sourceThreadId: thread.thread_id,
+      source,
+      lifecycle: lifecycle
+        ? { deleted: lifecycle.deletedAt !== null, archived: lifecycle.archivedAt !== null }
+        : null,
+    };
     const raw = selectStaged.all(thread.thread_id);
     if (raw.length === 0) return { ...row, builder: { refused: "missing_staged_events" } };
     let staged;
@@ -133,7 +141,6 @@ export function measureRecoveryCoverage(input: CoverageInput) {
     } catch {
       return { ...row, builder: { refused: "invalid_staged_event" } };
     }
-    const lifecycle = lifecycles.get(thread.thread_id);
     if (!lifecycle) return { ...row, builder: { refused: "missing_source_lifecycle" } };
     // Coverage never applies a plan, so no target baseline exists; 0 is recorded as such.
     const built = buildLegacySnapshotPlan({
@@ -218,8 +225,8 @@ export function measureRecoveryCoverage(input: CoverageInput) {
       sourceThreads: baseline.threads.length,
       sourceMessages: baseline.messages.length,
       // Soft-deleted, archived and message-less threads are measured, never filtered out.
-      sourceDeletedThreads: [...lifecycles.values()].filter((l) => l.deletedAt !== null).length,
-      sourceArchivedThreads: [...lifecycles.values()].filter((l) => l.archivedAt !== null).length,
+      sourceDeletedThreads: threads.filter((t) => t.lifecycle?.deleted).length,
+      sourceArchivedThreads: threads.filter((t) => t.lifecycle?.archived).length,
       sourceEmptyThreads: threads.filter((t) => t.source.messages + t.source.reasoning === 0)
         .length,
       builtThreads: threads.length - builderRefusedCount,

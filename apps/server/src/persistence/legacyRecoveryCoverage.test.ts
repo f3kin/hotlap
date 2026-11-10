@@ -212,6 +212,7 @@ it.effect("maps a supported WAL-only source in all four labelled variants with e
     const thread = "threads" in result ? result.threads[0]! : undefined;
     const expected = { messages: 2, reasoning: 1, attachments: 1, contextRecords: 1 };
     assert.deepEqual(thread?.source, expected);
+    assert.deepEqual(thread?.lifecycle, { deleted: false, archived: true });
     for (const v of thread && "variants" in thread ? thread.variants! : [])
       assert.deepEqual("mapped" in v ? v.mapped : v, expected);
     // Receipts carry digests and counts, never transcript text.
