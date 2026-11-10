@@ -20,7 +20,11 @@ const result = runCoverageFromFiles({
 // Exclusive create: an existing receipt is never overwritten.
 NodeFS.writeFileSync(
   receiptPath,
-  `${JSON.stringify({ startedAt, finishedAt: new Date().toISOString(), ...result }, null, 2)}\n`,
+  `${JSON.stringify(
+    { kind: "coverage-receipt/1", startedAt, finishedAt: new Date().toISOString(), ...result },
+    null,
+    2,
+  )}\n`,
   { flag: "wx", mode: 0o600 },
 );
 // Stdout carries counts and reasons only, never source ids.
