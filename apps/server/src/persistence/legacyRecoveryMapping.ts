@@ -159,6 +159,20 @@ const ITEM_MUST_BE_EMPTY = [
   "senderThreadId",
 ];
 
+// Nested closed worlds: a spread copy must never carry a key nobody reviewed.
+const ATTACHMENT_KEYS = ["type", "id", "name", "mimeType", "sizeBytes"];
+const CONTEXT_RECORD_KEYS = [
+  "version",
+  "contextId",
+  "label",
+  "kind",
+  "attachmentId",
+  "name",
+  "mimeType",
+  "sizeBytes",
+];
+const LINEAGE_KEYS = ["parentThreadId", "relationshipToParent", "rootThreadId"];
+
 class Refusal {
   constructor(readonly reason: string) {}
 }
@@ -247,6 +261,7 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
   const mapAttachment = (attachment: ChatAttachment): ChatAttachment => {
     if (attachment.type !== "image" && attachment.type !== "file")
       refuse("unsupported_attachment_type");
+    closedKeys("attachment", attachment, ATTACHMENT_KEYS, ["source"]);
     const known = attachments.get(attachment.id);
     const targetId =
       known?.targetAttachmentId ??
@@ -282,6 +297,7 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
       records: (value.records as Array<Record<string, unknown>>).map((record) => {
         if (record.kind !== "image" && record.kind !== "file")
           refuse(`unsupported_context_record:${String(record.kind)}`);
+        closedKeys("context_record", record, CONTEXT_RECORD_KEYS, []);
         const target = attachments.get(String(record.attachmentId));
         if (!target) return refuse("unmapped_context_attachment");
         return { ...record, attachmentId: target.targetAttachmentId };
@@ -298,6 +314,7 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
       [...THREAD_COPY, ...THREAD_LIFECYCLE, "id", "projectId", "lineage", "branch", "worktreePath"],
       THREAD_MUST_BE_EMPTY,
     );
+    closedKeys("lineage", thread.lineage, LINEAGE_KEYS, []);
     if (
       thread.id !== sourceThreadId ||
       thread.lineage.parentThreadId !== null ||
@@ -429,6 +446,15 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
           : [];
   if (events.some((event) => leaves(event.payload).some((leaf) => sourceIds.has(leaf))))
     refuse("unmapped_reference");
+
+  // Truncated digests must still be unique within the plan, across every entity kind.
+  const targetIds = [
+    targetThreadId,
+    ...messageIds.values(),
+    ...itemIds.values(),
+    ...[...attachments.values()].map((a) => a.targetAttachmentId),
+  ];
+  if (new Set(targetIds).size !== targetIds.length) refuse("target_identity_collision");
 
   const plan = makeSandboxPlan({
     sourceSnapshotSha256: source.sourceSnapshotSha256,

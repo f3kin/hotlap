@@ -808,6 +808,120 @@ it.effect("refuses unmapped, runtime-linked or ambiguous references instead of o
         "unmapped_context_attachment",
       ],
     ];
+    const withAttachment = (patch: Record<string, unknown>) =>
+      rebuild(
+        source,
+        onType("message.updated", (m) =>
+          m.context ? { ...m, attachments: [{ ...image, ...patch }] } : m,
+        ),
+      );
+    const withRecord = (patch: Record<string, unknown>) =>
+      rebuild(
+        source,
+        onType("message.updated", (m) =>
+          m.context
+            ? { ...m, context: { ...context, records: [{ ...context.records[0], ...patch }] } }
+            : m,
+        ),
+      );
+    cases.push(
+      [
+        refused(withAttachment({ senderThreadId: "src-other" })),
+        "unknown_attachment_field:senderThreadId",
+      ],
+      [
+        refused(withAttachment({ source: { _tag: "pasted-text" } })),
+        "unsupported_attachment_field:source",
+      ],
+      [
+        refused(withRecord({ senderThreadId: "src-other" })),
+        "unknown_context_record_field:senderThreadId",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            onType("thread.created", (t) => ({
+              ...t,
+              lineage: { ...(t.lineage as object), forkPoint: "src-other" },
+            })),
+          ),
+        ),
+        "unknown_lineage_field:forkPoint",
+      ],
+      [refused(source, { lifecycle: "hidden" as never }), "invalid_lifecycle_policy"],
+      [refused(source, { workspace: "keep" as never }), "invalid_workspace_policy"],
+      [
+        refused(
+          rebuild(
+            source,
+            userItem((i) => ({ ...i, futureField: 1 })),
+          ),
+        ),
+        "unknown_turn_item_field:futureField",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            userItem((i) => ({ ...i, type: "proposed_plan" })),
+          ),
+        ),
+        "unsupported_turn_item_type:proposed_plan",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            onType("message.updated", (m) =>
+              m.context ? { ...m, context: { version: 1, records: "x" } } : m,
+            ),
+          ),
+        ),
+        "invalid_context",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            onType("message.updated", (m) =>
+              m.context ? { ...m, context: { ...context, future: 1 } } : m,
+            ),
+          ),
+        ),
+        "unknown_context_field:future",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            userItem((i) => ({
+              ...i,
+              attachments: [{ ...image, name: "other.jpg", mimeType: "image/jpeg" }],
+            })),
+          ),
+        ),
+        "ambiguous_attachment_reference",
+      ],
+      [
+        refused(
+          rebuild(source, (e) =>
+            e.type === "turn-item.updated" && e.payload.type === "reasoning"
+              ? { ...e, payload: { ...e.payload, messageId: "src-msg-user" } }
+              : e,
+          ),
+        ),
+        "unsupported_reasoning_fields",
+      ],
+      [
+        refused(
+          rebuild(source, (e) =>
+            e.type === "message.updated" ? { ...e, threadId: "src-other" } : e,
+          ),
+        ),
+        "unmapped_event_thread",
+      ],
+    );
     for (const [result, reason] of cases) assert.deepEqual(result, { refused: reason });
     // Preserve policies copy lifecycle and workspace exactly and record no transformation.
     const kept = mapped(source, { lifecycle: "preserve", workspace: "preserve" });
