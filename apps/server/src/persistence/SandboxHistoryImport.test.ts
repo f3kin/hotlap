@@ -390,6 +390,25 @@ it.effect(
         }),
         { refused: "source_lifecycle_mismatch" },
       );
+      for (const field of ["startedAt", "completedAt"] as const) {
+        assert.deepEqual(
+          buildLegacySnapshotPlan({
+            ...source,
+            staged: source.staged.map((e) =>
+              e.type === "turn-item.updated"
+                ? {
+                    ...e,
+                    payload: {
+                      ...e.payload,
+                      [field]: DateTime.makeUnsafe("2000-01-01T00:00:00.000Z"),
+                    },
+                  }
+                : e,
+            ),
+          }),
+          { refused: "unsupported_turn_item" },
+        );
+      }
       assert.equal((yield* f.projections.getThreadProjection(f.id)).messages.length, 1);
     }).pipe(Effect.provide(layers)),
 );

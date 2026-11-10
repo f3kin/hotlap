@@ -121,6 +121,10 @@ export function buildLegacySnapshotPlan(
         : item.type !== "assistant_message") ||
       item.ordinal !== index + 1 ||
       item.status !== "completed" ||
+      item.startedAt === null ||
+      item.completedAt === null ||
+      DateTime.formatIso(item.startedAt) !== input.messages[index]?.created_at ||
+      DateTime.formatIso(item.completedAt) !== input.messages[index]?.updated_at ||
       DateTime.formatIso(item.updatedAt) !== DateTime.formatIso(message.updatedAt) ||
       fingerprint("context" in item ? (item.context ?? null) : null) !==
         fingerprint(message.context ?? null) ||

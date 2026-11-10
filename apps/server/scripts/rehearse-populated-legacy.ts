@@ -239,7 +239,12 @@ try {
               item.messageId !== message.message_id ||
               item.text !== message.text ||
               item.type !== (message.role === "user" ? "user_message" : "assistant_message") ||
-              item.ordinal !== index + 1
+              item.ordinal !== index + 1 ||
+              item.startedAt === null ||
+              item.completedAt === null ||
+              DateTime.formatIso(item.startedAt) !== message.created_at ||
+              DateTime.formatIso(item.completedAt) !== message.updated_at ||
+              DateTime.formatIso(item.updatedAt) !== message.updated_at
             );
           })
         )
