@@ -15,6 +15,9 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 
+export const MAX_SANDBOX_EVENTS = 2000;
+export const MAX_SANDBOX_PLAN_BYTES = 4 * 1024 * 1024;
+
 export interface SandboxPlanInput {
   sourceSnapshotSha256: string;
   sourceThreadId: string;
@@ -76,6 +79,7 @@ export class SandboxImportRefused extends Schema.TaggedError<SandboxImportRefuse
 
 // The outer transaction is safe only offline: EventSink publications must have no subscribers.
 const decodeEvent = Schema.decodeEffect(OrchestrationV2DomainEvent);
+const encodePlan = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 export const applySandboxPlan = Effect.fn("SandboxHistoryImport.applySandboxPlan")(function* (
   plan: SandboxPlan,
 ) {
@@ -93,7 +97,8 @@ export const applySandboxPlan = Effect.fn("SandboxHistoryImport.applySandboxPlan
         !Number.isSafeInteger(plan.targetBaselineSequence) ||
         plan.targetBaselineSequence < 0 ||
         plan.events.length < 2 ||
-        plan.events.length > 1000 ||
+        plan.events.length > MAX_SANDBOX_EVENTS ||
+        new TextEncoder().encode(encodePlan(plan)).byteLength > MAX_SANDBOX_PLAN_BYTES ||
         plan.sourceEventIds.length !== plan.events.length ||
         new Set(plan.sourceEventIds).size !== plan.events.length ||
         fingerprint(manifest(plan, plan.sourceEventIds)) !== plan.digest
@@ -155,7 +160,7 @@ export const applySandboxPlan = Effect.fn("SandboxHistoryImport.applySandboxPlan
         }
       });
       const existing = yield* store
-        .read({ threadId: plan.targetThreadId, limit: 1001 })
+        .read({ threadId: plan.targetThreadId, limit: MAX_SANDBOX_EVENTS + 1 })
         .pipe(Stream.runCollect);
       const rows =
         yield* sql`SELECT thread_id FROM orchestration_v2_projection_threads WHERE thread_id = ${plan.targetThreadId}`;

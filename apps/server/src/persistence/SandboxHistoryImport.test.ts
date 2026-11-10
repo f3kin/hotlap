@@ -1,3 +1,4 @@
+import { buildLegacySnapshotPlan, type SnapshotInput } from "./legacySnapshotPlan.ts";
 import { assert, it } from "@effect/vitest";
 import { EventId, MessageId, ThreadId, TurnItemId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -270,5 +271,195 @@ it.effect("interruption after native writes rolls back the outer transaction bef
       0,
     );
     assert.equal((yield* applySandboxPlan(f.plan)).status, "applied");
+  }).pipe(Effect.provide(layers)),
+);
+
+const translationFixture = Effect.gen(function* () {
+  const f = yield* fixture;
+  const source: SnapshotInput = {
+    sourceLifecycle: {
+      forkSourceThreadId: null,
+      forkSourceMessageId: null,
+      archivedAt: null,
+      deletedAt: null,
+    },
+    thread: {
+      thread_id: "recovered",
+      project_id: "project",
+      title: "Recovered",
+      branch: null,
+      worktree_path: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-02-02T00:00:00.000Z",
+    },
+    messages: [
+      {
+        thread_id: "recovered",
+        message_id: "message",
+        role: "user",
+        text: "Recovered text",
+        created_at: "2026-01-02T00:00:00.000Z",
+        updated_at: "2026-01-02T00:00:00.000Z",
+        attachments_json: "[]",
+        context_json: null,
+        is_streaming: 0,
+      },
+    ],
+    staged: f.plan.events,
+    sourceSnapshotSha256: "a".repeat(64),
+    targetBaselineSequence: f.plan.targetBaselineSequence,
+  };
+  return { f, source };
+});
+it.effect(
+  "translates only complete final-state snapshots and refuses duplicate updates or oversized threads",
+  () =>
+    Effect.gen(function* () {
+      const { f, source } = yield* translationFixture;
+      const good = buildLegacySnapshotPlan(source);
+      assert.isTrue("plan" in good);
+      if ("plan" in good) assert.equal((yield* applySandboxPlan(good.plan)).status, "applied");
+      assert.deepEqual(
+        buildLegacySnapshotPlan({ ...source, staged: [...source.staged, source.staged[1]!] }),
+        { refused: "duplicate_entity_update" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          staged: Array.from({ length: 2001 }, () => source.staged[0]!),
+        }),
+        { refused: "event_limit" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          messages: source.messages.map((m) => ({ ...m, text: "different source" })),
+        }),
+        { refused: "source_history_mismatch" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          messages: source.messages.map((m) => ({ ...m, role: "system" })),
+        }),
+        { refused: "unsupported_role_or_streaming" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          staged: source.staged.map((e) =>
+            e.type === "turn-item.updated" ? { ...e, payload: { ...e.payload, ordinal: 10 } } : e,
+          ),
+        }),
+        { refused: "unsupported_turn_item" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          staged: source.staged.map((e) =>
+            e.type === "turn-item.updated" && e.payload.type === "user_message"
+              ? {
+                  ...e,
+                  payload: { ...e.payload, type: "assistant_message" as const, streaming: false },
+                }
+              : e,
+          ),
+        }),
+        { refused: "unsupported_turn_item" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          staged: source.staged.map((e) =>
+            e.type === "message.updated" ? { ...e, payload: { ...e.payload, streaming: true } } : e,
+          ),
+        }),
+        { refused: "unsupported_turn_item" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          sourceLifecycle: { ...source.sourceLifecycle, forkSourceThreadId: "parent" },
+        }),
+        { refused: "source_fork_excluded" },
+      );
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          sourceLifecycle: { ...source.sourceLifecycle, deletedAt: "2026-01-01T00:00:00.000Z" },
+        }),
+        { refused: "source_lifecycle_mismatch" },
+      );
+      assert.equal((yield* f.projections.getThreadProjection(f.id)).messages.length, 1);
+    }).pipe(Effect.provide(layers)),
+);
+
+it.effect(
+  "accepts the explicit 2000-event fixture boundary with exact replay and rejects 2001",
+  () =>
+    Effect.gen(function* () {
+      const { f, source } = yield* translationFixture;
+      const message = source.staged.find((e) => e.type === "message.updated")!;
+      const item = source.staged.find((e) => e.type === "turn-item.updated")!;
+      if (
+        message.type !== "message.updated" ||
+        item.type !== "turn-item.updated" ||
+        item.payload.type !== "user_message"
+      )
+        return;
+      const sourceMessages = Array.from({ length: 999 }, (_, index) => ({
+        ...source.messages[0]!,
+        message_id: `m${String(index).padStart(4, "0")}`,
+      }));
+      const pairs = sourceMessages.flatMap((row, index) => [
+        {
+          ...message,
+          id: EventId.make(`m-event-${index}`),
+          payload: { ...message.payload, id: MessageId.make(row.message_id) },
+        },
+        {
+          ...item,
+          id: EventId.make(`i-event-${index}`),
+          payload: {
+            ...item.payload,
+            id: TurnItemId.make(`i${index}`),
+            messageId: MessageId.make(row.message_id),
+            ordinal: index + 1,
+          },
+        },
+      ]);
+      const staged = [source.staged[0]!, ...pairs, source.staged.at(-1)!];
+      const built = buildLegacySnapshotPlan({ ...source, messages: sourceMessages, staged });
+      assert.isTrue("plan" in built);
+      if ("plan" in built) {
+        assert.equal(built.plan.events.length, 2000);
+        yield* applySandboxPlan(built.plan);
+        assert.equal((yield* f.projections.getThreadProjection(f.id)).messages.length, 999);
+        assert.equal((yield* applySandboxPlan(built.plan)).status, "already_exact");
+      }
+      assert.deepEqual(
+        buildLegacySnapshotPlan({
+          ...source,
+          messages: sourceMessages,
+          staged: [...staged, staged[1]!],
+        }),
+        { refused: "event_limit" },
+      );
+    }).pipe(Effect.provide(layers)),
+);
+
+it.effect("refuses a fixture plan above the explicit four MiB byte bound without writes", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const huge = "x".repeat(4 * 1024 * 1024);
+    const plan = makeSandboxPlan({
+      ...f.plan,
+      events: f.plan.events.map((e) =>
+        e.type === "message.updated" ? { ...e, payload: { ...e.payload, text: huge } } : e,
+      ),
+    });
+    const before = yield* f.eventStore.latestApplicationSequence;
+    assert.isTrue(Exit.isFailure(yield* applySandboxPlan(plan).pipe(Effect.exit)));
+    assert.equal(yield* f.eventStore.latestApplicationSequence, before);
   }).pipe(Effect.provide(layers)),
 );
