@@ -973,6 +973,43 @@ it.effect("refuses unmapped, runtime-linked or ambiguous references instead of o
         "unsupported_attachment_source",
       ],
     );
+    // Content exclusions are path-exact: a source ID under a content-named key in any other
+    // copied subtree is still caught.
+    cases.push(
+      [
+        refused(
+          rebuild(
+            source,
+            onType("thread.created", (t) => ({
+              ...t,
+              modelSelection: {
+                ...(t.modelSelection as object),
+                source: { threadId: "src-thread" },
+              },
+            })),
+          ),
+        ),
+        "unmapped_reference",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            onType("thread.created", (t) => ({
+              ...t,
+              modelSelection: {
+                ...(t.modelSelection as object),
+                name: "src-msg-user",
+                label: "src-project",
+                text: "src-item-user",
+                title: "src-thread",
+              },
+            })),
+          ),
+        ),
+        "unmapped_reference",
+      ],
+    );
     for (const [result, reason] of cases) assert.deepEqual(result, { refused: reason });
     // Valid screenshot variants survive verbatim, including content that equals an old ID.
     for (const variant of [

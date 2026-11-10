@@ -162,9 +162,26 @@ const ITEM_MUST_BE_EMPTY = [
   "senderThreadId",
 ];
 
-// Human content, never typed references: a string here may equal an old ID by chance.
-// Attachment `source` is shape-validated provenance (screenshot or paste metadata).
-const CONTENT_KEYS = ["text", "title", "source", "name", "label"];
+// Human content at exact, validated paths only: a string there may equal an old ID by
+// chance. Payload-level text/title; attachment name and shape-validated source; context
+// record label and name. Every other subtree, however its keys are named, is scanned.
+const PAYLOAD_CONTENT_KEYS = ["text", "title"];
+const ATTACHMENT_CONTENT_KEYS = ["name", "source"];
+const CONTEXT_RECORD_CONTENT_KEYS = ["label", "name"];
+const omit = (value: object, keys: ReadonlyArray<string>) =>
+  Object.fromEntries(Object.entries(value).filter(([key]) => !keys.includes(key)));
+function scannedPayload(payload: Record<string, unknown>) {
+  const scanned = omit(payload, PAYLOAD_CONTENT_KEYS);
+  if (Array.isArray(payload.attachments))
+    scanned.attachments = payload.attachments.map((a: object) => omit(a, ATTACHMENT_CONTENT_KEYS));
+  const context = payload.context as { records?: unknown } | undefined;
+  if (context && Array.isArray(context.records))
+    scanned.context = {
+      ...context,
+      records: context.records.map((r: object) => omit(r, CONTEXT_RECORD_CONTENT_KEYS)),
+    };
+  return scanned;
+}
 
 // Nested closed worlds: a spread copy must never carry a key nobody reviewed.
 const ATTACHMENT_KEYS = ["type", "id", "name", "mimeType", "sizeBytes"];
@@ -473,11 +490,15 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
       : Array.isArray(value)
         ? value.flatMap(leaves)
         : value !== null && typeof value === "object"
-          ? Object.entries(value).flatMap(([key, entry]) =>
-              CONTENT_KEYS.includes(key) ? [] : leaves(entry),
-            )
+          ? Object.values(value).flatMap(leaves)
           : [];
-  if (events.some((event) => leaves(event.payload).some((leaf) => sourceIds.has(leaf))))
+  if (
+    events.some((event) =>
+      leaves(scannedPayload(event.payload as Record<string, unknown>)).some((leaf) =>
+        sourceIds.has(leaf),
+      ),
+    )
+  )
     refuse("unmapped_reference");
 
   // Truncated digests must still be unique within the plan, across every entity kind.
