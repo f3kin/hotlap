@@ -1010,6 +1010,32 @@ it.effect("refuses unmapped, runtime-linked or ambiguous references instead of o
         "unmapped_reference",
       ],
     );
+    // Excluded content paths accept only strings: an object there is scanned like any other.
+    cases.push(
+      [
+        refused(
+          rebuild(
+            source,
+            onType("thread.created", (t) => ({ ...t, title: { threadId: "src-thread" } })),
+          ),
+        ),
+        "unmapped_reference",
+      ],
+      [
+        refused(
+          rebuild(
+            source,
+            onType("message.updated", (m) =>
+              m.context ? { ...m, text: { messageId: "src-msg-asst" } } : m,
+            ),
+          ),
+        ),
+        "unmapped_reference",
+      ],
+      [refused(withRecord({ label: { threadId: "src-thread" } })), "unmapped_reference"],
+      [refused(withRecord({ name: ["src-project"] })), "unmapped_reference"],
+      [refused(withAttachment({ name: { threadId: "src-thread" } })), "unmapped_reference"],
+    );
     for (const [result, reason] of cases) assert.deepEqual(result, { refused: reason });
     // Valid screenshot variants survive verbatim, including content that equals an old ID.
     for (const variant of [

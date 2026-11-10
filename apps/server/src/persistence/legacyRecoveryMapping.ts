@@ -162,23 +162,30 @@ const ITEM_MUST_BE_EMPTY = [
   "senderThreadId",
 ];
 
-// Human content at exact, validated paths only: a string there may equal an old ID by
-// chance. Payload-level text/title; attachment name and shape-validated source; context
-// record label and name. Every other subtree, however its keys are named, is scanned.
+// Content paths may hold a string equal to an old ID by chance, so they skip the scan
+// only when the value is a string. Attachment `source` skips it because mapAttachment
+// already validated it against its contract schema. Everything else is scanned.
 const PAYLOAD_CONTENT_KEYS = ["text", "title"];
-const ATTACHMENT_CONTENT_KEYS = ["name", "source"];
+const ATTACHMENT_CONTENT_KEYS = ["name"];
 const CONTEXT_RECORD_CONTENT_KEYS = ["label", "name"];
-const omit = (value: object, keys: ReadonlyArray<string>) =>
-  Object.fromEntries(Object.entries(value).filter(([key]) => !keys.includes(key)));
+const omitStrings = (value: object, keys: ReadonlyArray<string>) =>
+  Object.fromEntries(
+    Object.entries(value).filter(
+      ([key, entry]) => !(keys.includes(key) && typeof entry === "string"),
+    ),
+  );
 function scannedPayload(payload: Record<string, unknown>) {
-  const scanned = omit(payload, PAYLOAD_CONTENT_KEYS);
+  const scanned = omitStrings(payload, PAYLOAD_CONTENT_KEYS);
   if (Array.isArray(payload.attachments))
-    scanned.attachments = payload.attachments.map((a: object) => omit(a, ATTACHMENT_CONTENT_KEYS));
+    scanned.attachments = payload.attachments.map((a: Record<string, unknown>) => {
+      const { source: _validated, ...rest } = a;
+      return omitStrings(rest, ATTACHMENT_CONTENT_KEYS);
+    });
   const context = payload.context as { records?: unknown } | undefined;
   if (context && Array.isArray(context.records))
     scanned.context = {
       ...context,
-      records: context.records.map((r: object) => omit(r, CONTEXT_RECORD_CONTENT_KEYS)),
+      records: context.records.map((r: object) => omitStrings(r, CONTEXT_RECORD_CONTENT_KEYS)),
     };
   return scanned;
 }
