@@ -4,6 +4,8 @@
 import * as NodeCrypto from "node:crypto";
 import {
   ChatAttachmentId,
+  PastedTextAttachmentSource,
+  SnapShotSource,
   MessageId,
   ThreadId,
   TurnItemId,
@@ -11,6 +13,7 @@ import {
   type OrchestrationV2DomainEvent,
   type ProjectId,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { attachmentRelativePath, createDeterministicAttachmentId } from "../attachmentStore.ts";
 import { fingerprint, makeSandboxPlan, type SandboxPlan } from "./SandboxHistoryImport.ts";
 
@@ -159,6 +162,10 @@ const ITEM_MUST_BE_EMPTY = [
   "senderThreadId",
 ];
 
+// Human content, never typed references: a string here may equal an old ID by chance.
+// Attachment `source` is shape-validated provenance (screenshot or paste metadata).
+const CONTENT_KEYS = ["text", "title", "source", "name", "label"];
+
 // Nested closed worlds: a spread copy must never carry a key nobody reviewed.
 const ATTACHMENT_KEYS = ["type", "id", "name", "mimeType", "sizeBytes"];
 const CONTEXT_RECORD_KEYS = [
@@ -172,6 +179,23 @@ const CONTEXT_RECORD_KEYS = [
   "sizeBytes",
 ];
 const LINEAGE_KEYS = ["parentThreadId", "relationshipToParent", "rootThreadId"];
+
+// Attachment sources describe the captured app or a paste; they hold no T3 history
+// references, so a value is kept verbatim only when it is exactly the contract shape
+// for its attachment type, with no excess or altered field at any depth.
+function exactContractShape(
+  schema: typeof SnapShotSource | typeof PastedTextAttachmentSource,
+  value: unknown,
+) {
+  try {
+    const decoded = Schema.decodeUnknownSync(schema)(value, {
+      onExcessProperty: "error",
+    });
+    return fingerprint(decoded) === fingerprint(value);
+  } catch {
+    return false;
+  }
+}
 
 class Refusal {
   constructor(readonly reason: string) {}
@@ -261,7 +285,16 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
   const mapAttachment = (attachment: ChatAttachment): ChatAttachment => {
     if (attachment.type !== "image" && attachment.type !== "file")
       refuse("unsupported_attachment_type");
-    closedKeys("attachment", attachment, ATTACHMENT_KEYS, ["source"]);
+    closedKeys("attachment", attachment, [...ATTACHMENT_KEYS, "source"], []);
+    if (
+      "source" in attachment &&
+      attachment.source !== undefined &&
+      !exactContractShape(
+        attachment.type === "image" ? SnapShotSource : PastedTextAttachmentSource,
+        attachment.source,
+      )
+    )
+      refuse("unsupported_attachment_source");
     const known = attachments.get(attachment.id);
     const targetId =
       known?.targetAttachmentId ??
@@ -441,7 +474,7 @@ function mapOrThrow(source: SandboxPlan, options: RecoveryMappingOptions) {
         ? value.flatMap(leaves)
         : value !== null && typeof value === "object"
           ? Object.entries(value).flatMap(([key, entry]) =>
-              key === "text" || key === "title" ? [] : leaves(entry),
+              CONTENT_KEYS.includes(key) ? [] : leaves(entry),
             )
           : [];
   if (events.some((event) => leaves(event.payload).some((leaf) => sourceIds.has(leaf))))

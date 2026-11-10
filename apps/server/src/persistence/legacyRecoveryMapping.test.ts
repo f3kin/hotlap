@@ -42,6 +42,24 @@ const image = {
   name: "shot.png",
   mimeType: "image/png",
   sizeBytes: 10,
+  // A valid snapshot source must survive recovery verbatim, nested tree included.
+  source: {
+    kind: "snap-shot" as const,
+    capturedAt: "2026-01-02T00:00:00.000Z",
+    appName: "Browser",
+    windowTitle: "Docs",
+    accessibility: {
+      format: "element-tree" as const,
+      coordinateSpace: "captured-image" as const,
+      imageSize: { width: 10, height: 10 },
+      truncated: false,
+      root: {
+        role: "window",
+        bounds: null,
+        children: [{ role: "button", name: "Save", bounds: null, children: [] }],
+      },
+    },
+  },
 };
 const context = {
   version: 1 as const,
@@ -486,6 +504,7 @@ it.effect(
       assert.equal(user.id, expectedId("message", "src-msg-user"));
       assert.equal(DateTime.formatIso(user.createdAt), at(2));
       const attachmentId = user.attachments[0]!.id;
+      assert.deepEqual((user.attachments[0] as { source?: unknown }).source, image.source);
       assert.isTrue(attachmentId.startsWith(`${target}-`));
       assert.equal(
         (user.context!.records[0] as { attachmentId?: string }).attachmentId,
@@ -831,7 +850,7 @@ it.effect("refuses unmapped, runtime-linked or ambiguous references instead of o
       ],
       [
         refused(withAttachment({ source: { _tag: "pasted-text" } })),
-        "unsupported_attachment_field:source",
+        "unsupported_attachment_source",
       ],
       [
         refused(withRecord({ senderThreadId: "src-other" })),
@@ -922,7 +941,85 @@ it.effect("refuses unmapped, runtime-linked or ambiguous references instead of o
         "unmapped_event_thread",
       ],
     );
+    const tree = image.source.accessibility;
+    cases.push(
+      [
+        refused(withAttachment({ source: { ...image.source, senderThreadId: "src-other" } })),
+        "unsupported_attachment_source",
+      ],
+      [
+        refused(
+          withAttachment({
+            source: {
+              ...image.source,
+              accessibility: {
+                ...tree,
+                root: {
+                  ...tree.root,
+                  children: [{ ...tree.root.children[0], threadId: "src-other" }],
+                },
+              },
+            },
+          }),
+        ),
+        "unsupported_attachment_source",
+      ],
+      [
+        refused(withAttachment({ source: { ...image.source, capturedAt: 7 } })),
+        "unsupported_attachment_source",
+      ],
+      [
+        refused(withAttachment({ type: "file", name: "notes.txt", mimeType: "text/plain" })),
+        "unsupported_attachment_source",
+      ],
+    );
     for (const [result, reason] of cases) assert.deepEqual(result, { refused: reason });
+    // Valid screenshot variants survive verbatim, including content that equals an old ID.
+    for (const variant of [
+      {
+        ...image.source,
+        accessibility: { format: "flat-text", text: "src-thread", truncated: true },
+      },
+      {
+        ...image.source,
+        accessibleText: "src-msg-user",
+        appIdentifier: "src-thread",
+        appIconDataUrl: "data:image/png;base64,AAAA",
+        appName: "src-project",
+      },
+      {
+        kind: "snap-shot",
+        capturedAt: "2026-01-02T00:00:00.000Z",
+        appName: "Browser",
+        windowTitle: "",
+      },
+    ]) {
+      const kept = mapped(withAttachment({ source: variant }));
+      const attachment = kept.plan.events.flatMap((e) =>
+        e.type === "message.updated" ? e.payload.attachments : [],
+      )[0] as { source?: unknown };
+      assert.deepEqual(attachment.source, variant);
+    }
+    // A valid file paste source is kept verbatim on its remapped attachment.
+    const paste = {
+      type: "file" as const,
+      id: "src-thread-22222222-2222-2222-2222-222222222222",
+      name: "notes.txt",
+      mimeType: "text/plain",
+      sizeBytes: 5,
+      source: { _tag: "pasted-text" as const },
+    };
+    const withPaste = mapped(
+      rebuild(
+        source,
+        onType("message.updated", (m) => (m.context ? { ...m, attachments: [image, paste] } : m)),
+      ),
+    );
+    const pasted = withPaste.plan.events
+      .flatMap((e) => (e.type === "message.updated" ? e.payload.attachments : []))
+      .find((a) => a.type === "file");
+    assert.deepEqual(pasted?.source, { _tag: "pasted-text" });
+    assert.notEqual(pasted?.id, paste.id);
     // Preserve policies copy lifecycle and workspace exactly and record no transformation.
     const kept = mapped(source, { lifecycle: "preserve", workspace: "preserve" });
     const thread = kept.plan.events.at(-1)!.payload as {
