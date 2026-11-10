@@ -194,7 +194,7 @@ export function measureRecoveryCoverage(input: CoverageInput) {
         const r = "variants" in t ? t.variants?.find((v) => v.variant === label) : undefined;
         return r && "refused" in r ? r.refused : undefined;
       }),
-      complete: mapped === threads.length,
+      complete: threads.length > 0 && mapped === threads.length,
     };
   });
   const builderRefusedCount = Object.values(builderRefused).reduce((a, b) => a + b, 0);
@@ -217,6 +217,11 @@ export function measureRecoveryCoverage(input: CoverageInput) {
       sourceStoreId: input.sourceStoreId,
       sourceThreads: baseline.threads.length,
       sourceMessages: baseline.messages.length,
+      // Soft-deleted, archived and message-less threads are measured, never filtered out.
+      sourceDeletedThreads: [...lifecycles.values()].filter((l) => l.deletedAt !== null).length,
+      sourceArchivedThreads: [...lifecycles.values()].filter((l) => l.archivedAt !== null).length,
+      sourceEmptyThreads: threads.filter((t) => t.source.messages + t.source.reasoning === 0)
+        .length,
       builtThreads: threads.length - builderRefusedCount,
       builderRefused,
       variants,
@@ -225,9 +230,8 @@ export function measureRecoveryCoverage(input: CoverageInput) {
       accountedExactly,
       // An empty capture is its own outcome, never a vacuous pass.
       emptySource: baseline.threads.length === 0,
-      // Evidence collected is not completeness: any refusal keeps this false.
-      complete:
-        baseline.threads.length > 0 && accountedExactly && variants.every((v) => v.complete),
+      // Evidence is not completeness: any refusal or an empty capture keeps this false.
+      complete: accountedExactly && variants.every((v) => v.complete),
     },
     threads,
   };

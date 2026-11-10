@@ -1,6 +1,5 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Fixtures are real SQLite files with WAL sidecars.
 import * as NodeFS from "node:fs";
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Fixtures are real SQLite files with WAL sidecars.
 import * as NodeOS from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Fixtures are real SQLite files with WAL sidecars.
 import * as NodePath from "node:path";
@@ -11,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
-import { afterAll } from "vitest";
+import { afterAll } from "vite-plus/test";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as Legacy from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
@@ -206,6 +205,10 @@ it.effect("maps a supported WAL-only source in all four labelled variants with e
       ],
     );
     assert.isTrue(s.accountedExactly);
+    assert.deepEqual(
+      [s.sourceDeletedThreads, s.sourceArchivedThreads, s.sourceEmptyThreads],
+      [0, 1, 0],
+    );
     const thread = "threads" in result ? result.threads[0]! : undefined;
     const expected = { messages: 2, reasoning: 1, attachments: 1, contextRecords: 1 };
     assert.deepEqual(thread?.source, expected);
@@ -234,8 +237,35 @@ it.effect("an immutable open that ignores the WAL is the red control: nothing is
     staging.close();
     assert.equal(ignored.sourceThreads, 0);
     assert.isTrue(ignored.emptySource);
+    assert.deepEqual(
+      ignored.variants.map((v) => v.complete),
+      [false, false, false, false],
+    );
     assert.equal(ignored.unexpectedStagedThreads, 1);
     assert.isFalse(ignored.complete);
+  }),
+);
+
+it.effect("an empty but exactly accounted capture is its own outcome, never complete", () =>
+  Effect.gen(function* () {
+    const files = writeStores(yield* fixtureInput, { staged: [] });
+    // Immutable open hides the WAL-only rows, leaving both stores empty.
+    const legacy = new NodeSqlite.DatabaseSync(new URL(`file://${files.legacyPath}?immutable=1`), {
+      readOnly: true,
+    });
+    const staging = new NodeSqlite.DatabaseSync(files.stagingPath, { readOnly: true });
+    const empty = measureRecoveryCoverage({
+      legacy,
+      staging,
+      sourceStoreId: "fixture-store",
+      sourceSnapshotSha256: "a".repeat(64),
+    }).summary;
+    legacy.close();
+    staging.close();
+    assert.equal(empty.sourceThreads, 0);
+    assert.isTrue(empty.accountedExactly);
+    assert.isTrue(empty.emptySource);
+    assert.isFalse(empty.complete);
   }),
 );
 

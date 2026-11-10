@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalConsole:off - Sandbox CLI: stdout summary and wall-clock receipt stamps.
 // Sandbox-only coverage measurement: pinned read-only inputs, one private receipt, no writes elsewhere.
 // Usage: measure-recovery-coverage.ts <store-id> <legacy.sqlite> <staging.sqlite> <pins.json> <receipt.json>
 // Exit: 0 complete; 1 measured but incomplete; 2 pin or input failure.
