@@ -1,6 +1,7 @@
+import { compareLegacyVisibleItems } from "./legacyRehearsalCheck.ts";
 import { buildLegacySnapshotPlan, type SnapshotInput } from "./legacySnapshotPlan.ts";
 import { assert, it } from "@effect/vitest";
-import { EventId, MessageId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import { EventId, MessageId, RunId, ThreadId, TurnItemId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -326,7 +327,7 @@ it.effect(
       assert.deepEqual(
         buildLegacySnapshotPlan({
           ...source,
-          staged: Array.from({ length: 2001 }, () => source.staged[0]!),
+          staged: Array.from({ length: 2501 }, () => source.staged[0]!),
         }),
         { refused: "event_limit" },
       );
@@ -414,7 +415,7 @@ it.effect(
 );
 
 it.effect(
-  "accepts the explicit 2000-event fixture boundary with exact replay and rejects 2001",
+  "accepts the explicit 2500-event fixture boundary with exact replay and rejects 2501",
   () =>
     Effect.gen(function* () {
       const { f, source } = yield* translationFixture;
@@ -426,7 +427,7 @@ it.effect(
         item.payload.type !== "user_message"
       )
         return;
-      const sourceMessages = Array.from({ length: 999 }, (_, index) => ({
+      const sourceMessages = Array.from({ length: 1249 }, (_, index) => ({
         ...source.messages[0]!,
         message_id: `m${String(index).padStart(4, "0")}`,
       }));
@@ -451,9 +452,9 @@ it.effect(
       const built = buildLegacySnapshotPlan({ ...source, messages: sourceMessages, staged });
       assert.isTrue("plan" in built);
       if ("plan" in built) {
-        assert.equal(built.plan.events.length, 2000);
+        assert.equal(built.plan.events.length, 2500);
         yield* applySandboxPlan(built.plan);
-        assert.equal((yield* f.projections.getThreadProjection(f.id)).messages.length, 999);
+        assert.equal((yield* f.projections.getThreadProjection(f.id)).messages.length, 1249);
         assert.equal((yield* applySandboxPlan(built.plan)).status, "already_exact");
       }
       assert.deepEqual(
@@ -480,5 +481,112 @@ it.effect("refuses a fixture plan above the explicit four MiB byte bound without
     const before = yield* f.eventStore.latestApplicationSequence;
     assert.isTrue(Exit.isFailure(yield* applySandboxPlan(plan).pipe(Effect.exit)));
     assert.equal(yield* f.eventStore.latestApplicationSequence, before);
+  }).pipe(Effect.provide(layers)),
+);
+
+it.effect("preserves source reasoning as ordered native items without runtime links", () =>
+  Effect.gen(function* () {
+    const { f, source } = yield* translationFixture;
+    const reasoning = {
+      ...source.messages[0]!,
+      message_id: "aaa-reasoning",
+      role: "reasoning",
+      text: "Original reasoning",
+      updated_at: "2026-01-03T00:00:00.000Z",
+    };
+    const original = [reasoning, ...source.messages];
+    const built = buildLegacySnapshotPlan({ ...source, messages: original });
+    assert.isTrue("plan" in built);
+    if (!("plan" in built)) return;
+    const real = yield* EventSink.EventSinkV2;
+    const before = yield* f.eventStore.latestApplicationSequence;
+    const interrupted = yield* applySandboxPlan(built.plan).pipe(
+      Effect.provideService(EventSink.EventSinkV2, {
+        ...real,
+        write: (input) => real.write({ ...input, events: [...input.events, input.events[0]!] }),
+      }),
+      Effect.exit,
+    );
+    assert.isTrue(Exit.isFailure(interrupted));
+    assert.equal(yield* f.eventStore.latestApplicationSequence, before);
+    assert.equal(
+      (yield* f.sql`SELECT thread_id FROM orchestration_v2_projection_threads WHERE thread_id = ${f.id}`)
+        .length,
+      0,
+    );
+    yield* applySandboxPlan(built.plan);
+    const target = yield* f.projections.getThreadProjection(f.id);
+    assert.equal(target.messages.length, 1);
+    assert.equal(target.visibleTurnItems.length, 2);
+    const first = target.visibleTurnItems[0]!.item;
+    assert.equal(first.type, "reasoning");
+    assert.equal(first.id, "migration:v1:turn-item:aaa-reasoning");
+    assert.equal("text" in first ? first.text : null, reasoning.text);
+    assert.equal(
+      first.startedAt === null ? null : DateTime.formatIso(first.startedAt),
+      reasoning.created_at,
+    );
+    assert.equal(
+      first.completedAt === null ? null : DateTime.formatIso(first.completedAt),
+      reasoning.updated_at,
+    );
+    assert.equal(DateTime.formatIso(first.updatedAt), reasoning.updated_at);
+    assert.deepEqual(
+      [
+        first.runId,
+        first.nodeId,
+        first.providerThreadId,
+        first.providerTurnId,
+        first.nativeItemRef,
+        first.parentItemId,
+      ],
+      [null, null, null, null, null, null],
+    );
+    assert.equal(target.visibleTurnItems[1]!.item.ordinal, 2);
+    const visible = target.visibleTurnItems.map((row) => row.item);
+    assert.isTrue(compareLegacyVisibleItems(original, visible));
+    assert.isFalse(compareLegacyVisibleItems(original, visible.slice(1)));
+    assert.isFalse(
+      compareLegacyVisibleItems(original, [
+        { ...first, runId: RunId.make("fabricated") },
+        visible[1]!,
+      ]),
+    );
+    assert.isFalse(compareLegacyVisibleItems(original, [...visible].reverse()));
+    for (const field of ["startedAt", "completedAt", "updatedAt"] as const)
+      assert.isFalse(
+        compareLegacyVisibleItems(original, [
+          { ...first, [field]: DateTime.makeUnsafe("2000-01-01T00:00:00.000Z") },
+          visible[1]!,
+        ]),
+      );
+    assert.isFalse(
+      compareLegacyVisibleItems(original, [
+        { ...first, id: TurnItemId.make("wrong") },
+        visible[1]!,
+      ]),
+    );
+    if (first.type === "reasoning") {
+      assert.isFalse(
+        compareLegacyVisibleItems(original, [{ ...first, text: "lost original" }, visible[1]!]),
+      );
+      assert.isFalse(
+        compareLegacyVisibleItems(original, [{ ...first, streaming: true }, visible[1]!]),
+      );
+    }
+    for (const changed of [
+      { ...reasoning, context_json: "{}" },
+      { ...reasoning, attachments_json: '[{"id":"a"}]' },
+      { ...reasoning, created_at: "2026-01-02T00:00:00.000001Z" },
+    ])
+      assert.deepEqual(
+        buildLegacySnapshotPlan({ ...source, messages: [changed, ...source.messages] }),
+        { refused: "unsupported_reasoning_fields" },
+      );
+    assert.deepEqual(
+      buildLegacySnapshotPlan({ ...source, messages: [reasoning, reasoning, ...source.messages] }),
+      { refused: "duplicate_source_identity" },
+    );
+    assert.equal((yield* applySandboxPlan(built.plan)).status, "already_exact");
   }).pipe(Effect.provide(layers)),
 );

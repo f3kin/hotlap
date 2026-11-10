@@ -15,7 +15,7 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 
-export const MAX_SANDBOX_EVENTS = 2000;
+export const MAX_SANDBOX_EVENTS = 2500;
 export const MAX_SANDBOX_PLAN_BYTES = 4 * 1024 * 1024;
 
 export interface SandboxPlanInput {

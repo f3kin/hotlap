@@ -15,7 +15,10 @@ import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import * as EventSink from "../src/orchestration-v2/EventSink.ts";
 import * as Legacy from "../src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import { captureLegacyBaseline } from "../src/persistence/legacyRehearsalBaseline.ts";
-import { compareHistory } from "../src/persistence/legacyRehearsalCheck.ts";
+import {
+  compareHistory,
+  compareLegacyVisibleItems,
+} from "../src/persistence/legacyRehearsalCheck.ts";
 import { buildLegacySnapshotPlan } from "../src/persistence/legacySnapshotPlan.ts";
 import { applySandboxPlan, fingerprint } from "../src/persistence/SandboxHistoryImport.ts";
 const decodeEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEventJson);
@@ -82,6 +85,8 @@ const result = {
   sourceMessages: baseline.messages.length,
   appliedThreads: 0,
   appliedMessages: 0,
+  appliedReasoning: 0,
+  reasoningIdentityMappings: [] as { sourceMessageId: string; targetItemId: string }[],
   refused: [] as { threadId: string; reason: string; messages: number; events: number }[],
   mapping: [] as {
     sourceThreadId: string;
@@ -166,7 +171,15 @@ try {
         }
         yield* applySandboxPlan(built.plan);
         result.appliedThreads++;
-        result.appliedMessages += messages.length;
+        result.appliedMessages += messages.filter((m) => m.role !== "reasoning").length;
+        const reasoning = messages.filter((m) => m.role === "reasoning");
+        result.appliedReasoning += reasoning.length;
+        result.reasoningIdentityMappings.push(
+          ...reasoning.map((m) => ({
+            sourceMessageId: m.message_id,
+            targetItemId: `migration:v1:turn-item:${m.message_id}`,
+          })),
+        );
         result.mapping.push({
           sourceThreadId: thread.thread_id,
           targetThreadId: built.plan.targetThreadId,
@@ -175,15 +188,17 @@ try {
         });
         const actual = yield* projections.getThreadProjection(ThreadId.make(thread.thread_id));
         importedFingerprints.set(thread.thread_id, fingerprint(actual));
-        const expected = messages.map((m) => ({
-          id: m.message_id,
-          role: m.role,
-          text: m.text,
-          createdAt: DateTime.formatIso(DateTime.makeUnsafe(m.created_at)),
-          updatedAt: DateTime.formatIso(DateTime.makeUnsafe(m.updated_at)),
-          attachments: JSON.parse(m.attachments_json ?? "[]"),
-          context: JSON.parse(m.context_json ?? "null"),
-        }));
+        const expected = messages
+          .filter((m) => m.role !== "reasoning")
+          .map((m) => ({
+            id: m.message_id,
+            role: m.role,
+            text: m.text,
+            createdAt: DateTime.formatIso(DateTime.makeUnsafe(m.created_at)),
+            updatedAt: DateTime.formatIso(DateTime.makeUnsafe(m.updated_at)),
+            attachments: JSON.parse(m.attachments_json ?? "[]"),
+            context: JSON.parse(m.context_json ?? "null"),
+          }));
         result.attachmentReferences += expected.reduce(
           (n, m) => n + (Array.isArray(m.attachments) ? m.attachments.length : 0),
           0,
@@ -230,25 +245,7 @@ try {
         )
           result.lifecycleMismatches++;
         const visible = actual.visibleTurnItems.map((row) => row.item);
-        if (
-          visible.length !== messages.length ||
-          visible.some((item, index) => {
-            const message = messages[index]!;
-            return (
-              (item.type !== "user_message" && item.type !== "assistant_message") ||
-              item.messageId !== message.message_id ||
-              item.text !== message.text ||
-              item.type !== (message.role === "user" ? "user_message" : "assistant_message") ||
-              item.ordinal !== index + 1 ||
-              item.startedAt === null ||
-              item.completedAt === null ||
-              DateTime.formatIso(item.startedAt) !== message.created_at ||
-              DateTime.formatIso(item.completedAt) !== message.updated_at ||
-              DateTime.formatIso(item.updatedAt) !== message.updated_at
-            );
-          })
-        )
-          result.visibleItemMismatches++;
+        if (!compareLegacyVisibleItems(messages, visible)) result.visibleItemMismatches++;
         const before = yield* events.latestApplicationSequence;
         yield* applySandboxPlan(built.plan);
         result.replayWrites += (yield* events.latestApplicationSequence) - before;
@@ -270,13 +267,20 @@ try {
 result.allSourceAccounted =
   result.orphanMessages === 0 &&
   result.appliedThreads + result.refused.length === result.sourceThreads &&
-  result.appliedMessages + result.refused.reduce((n, row) => n + row.messages, 0) ===
+  result.appliedMessages +
+    result.appliedReasoning +
+    result.refused.reduce((n, row) => n + row.messages, 0) ===
     result.sourceMessages;
 result.sourceUnchanged = fingerprint(hashes()) === fingerprint(pins);
 NodeFS.writeFileSync("/scratch/populated-receipt.private.json", JSON.stringify(result, null, 2), {
   mode: 0o600,
 });
-const { mapping: _mapping, refused, ...summary } = result;
+const {
+  mapping: _mapping,
+  reasoningIdentityMappings: _reasoningMappings,
+  refused,
+  ...summary
+} = result;
 process.stdout.write(
   JSON.stringify({
     ...summary,

@@ -1,3 +1,7 @@
+import type { OrchestrationV2TurnItem } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import type { LegacyBaselineMessage } from "./legacyRehearsalBaseline.ts";
+
 export interface HistoryMessage {
   id: string;
   role: string;
@@ -42,4 +46,52 @@ export function compareHistory(expected: HistoryMessage[], actual: HistoryMessag
     changed,
     orderChanged,
   };
+}
+
+/** Independent original-row oracle; never takes a generated import plan. */
+export function compareLegacyVisibleItems(
+  source: ReadonlyArray<LegacyBaselineMessage>,
+  items: ReadonlyArray<OrchestrationV2TurnItem>,
+): boolean {
+  return (
+    items.length === source.length &&
+    new Set(source.map((m) => m.message_id)).size === source.length &&
+    new Set(items.map((item) => item.id)).size === items.length &&
+    items.every((item, index) => {
+      const row = source[index]!;
+      const kind =
+        row.role === "reasoning"
+          ? "reasoning"
+          : row.role === "user"
+            ? "user_message"
+            : row.role === "assistant"
+              ? "assistant_message"
+              : null;
+      const identity =
+        row.role === "reasoning"
+          ? item.id === `migration:v1:turn-item:${row.message_id}`
+          : "messageId" in item && item.messageId === row.message_id;
+      return (
+        item.type === kind &&
+        identity &&
+        "text" in item &&
+        item.text === row.text &&
+        item.threadId === row.thread_id &&
+        item.ordinal === index + 1 &&
+        item.status === "completed" &&
+        item.startedAt !== null &&
+        DateTime.formatIso(item.startedAt) === row.created_at &&
+        item.completedAt !== null &&
+        DateTime.formatIso(item.completedAt) === row.updated_at &&
+        DateTime.formatIso(item.updatedAt) === row.updated_at &&
+        item.runId === null &&
+        item.nodeId === null &&
+        item.providerThreadId === null &&
+        item.providerTurnId === null &&
+        item.nativeItemRef === null &&
+        item.parentItemId === null &&
+        (!("streaming" in item) || item.streaming === false)
+      );
+    })
+  );
 }
